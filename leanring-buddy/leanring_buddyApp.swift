@@ -43,6 +43,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
 
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()
+        OpenClickyDesktopNotificationCenter.shared.configure()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()

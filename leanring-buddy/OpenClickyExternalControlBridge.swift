@@ -22,6 +22,7 @@ enum OpenClickyExternalControlCommand {
     case captureScreenshot(focused: Bool)
     case clear
     case speak(text: String, interrupt: Bool)
+    case notify(title: String, body: String, threadID: String?, sound: Bool)
 }
 
 struct OpenClickyExternalControlResponse {
@@ -148,7 +149,7 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
                 "name": "OpenClicky External Control Bridge",
                 "port": port,
                 "transport": "local-http+sse",
-                "tools": ["show_cursor", "show_cursors", "show_caption", "screenshot", "clear", "speak"]
+                "tools": ["show_cursor", "show_cursors", "show_caption", "screenshot", "clear", "speak", "notify"]
             ], statusCode: 200, on: connection)
             return
         }
@@ -182,6 +183,8 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             command = .clear
         case "/speak":
             command = Self.speakCommand(from: request.jsonBody)
+        case "/notify", "/notification":
+            command = Self.notifyCommand(from: request.jsonBody)
         case "/mcp/call", "/tools/call":
             command = Self.mcpToolCommand(from: request.jsonBody)
         case "/mcp":
@@ -304,6 +307,18 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
         return .speak(text: text, interrupt: bool(json["interrupt"]) ?? false)
     }
 
+    private static func notifyCommand(from json: [String: Any]) -> OpenClickyExternalControlCommand? {
+        let title = string(json["title"]) ?? "OpenClicky"
+        guard let body = string(json["body"]) ?? string(json["text"]),
+              !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return .notify(
+            title: title,
+            body: body,
+            threadID: string(json["threadID"]) ?? string(json["threadId"]),
+            sound: bool(json["sound"]) ?? true
+        )
+    }
+
     private static var mcpToolDescriptors: [[String: Any]] {
         [
             [
@@ -372,6 +387,20 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
                 ]
             ],
             [
+                "name": "notify",
+                "description": "Send a native macOS desktop notification from OpenClicky without stealing focus.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "title": ["type": "string"],
+                        "body": ["type": "string"],
+                        "threadID": ["type": "string"],
+                        "sound": ["type": "boolean"]
+                    ],
+                    "required": ["body"]
+                ]
+            ],
+            [
                 "name": "clear",
                 "description": "Clear the OpenClicky proxy cursor/caption overlay.",
                 "inputSchema": ["type": "object", "properties": [:]]
@@ -395,6 +424,8 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             return .clear
         case "speak", "openclicky_speak":
             return speakCommand(from: arguments)
+        case "notify", "notification", "openclicky_notify":
+            return notifyCommand(from: arguments)
         default:
             return nil
         }

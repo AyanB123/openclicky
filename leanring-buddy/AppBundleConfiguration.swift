@@ -19,6 +19,7 @@ nonisolated enum AppBundleConfiguration {
     /// (`userDeepgramAPIKeyDefaultsKey`). Only the voice/model is
     /// TTS-specific.
     static let userDeepgramTTSVoiceDefaultsKey = "openClickyDeepgramTTSVoice"
+    static let userDeepgramVoiceAgentThinkModelDefaultsKey = "openClickyDeepgramVoiceAgentThinkModel"
     static let userTTSProviderDefaultsKey = "openClickyTTSProvider"
     static let userSpeculativePreFireDefaultsKey = "openClickySpeculativePreFireEnabled"
     static let userVoiceResponseCaptionsEnabledDefaultsKey = "openClickyVoiceResponseCaptionsEnabled"
@@ -155,6 +156,15 @@ nonisolated enum AppBundleConfiguration {
             environmentKeys: ["DEEPGRAM_TTS_VOICE"]
         ) ?? localDevelopmentEnvironmentValue(forKey: "DEEPGRAM_TTS_VOICE")
         ?? "aura-2-thalia-en"
+    }
+
+    /// LLM model Deepgram Voice Agent should use for the think stage.
+    static func deepgramVoiceAgentThinkModel() -> String {
+        userDefaultsValue(forKey: userDeepgramVoiceAgentThinkModelDefaultsKey) ?? stringValue(
+            forKey: "DeepgramVoiceAgentThinkModel",
+            environmentKeys: ["DEEPGRAM_VOICE_AGENT_THINK_MODEL"]
+        ) ?? localDevelopmentEnvironmentValue(forKey: "DEEPGRAM_VOICE_AGENT_THINK_MODEL")
+        ?? "gpt-4o-mini"
     }
 
     /// Microsoft Edge Read Aloud voice identifier. These are the free

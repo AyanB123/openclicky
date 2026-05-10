@@ -123,6 +123,7 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userOpenAIRealtimeVoiceIDDefaultsKey) private var userOpenAIRealtimeVoiceID = "marin"
     @AppStorage(AppBundleConfiguration.userMicrosoftEdgeVoiceIDDefaultsKey) private var userMicrosoftEdgeVoiceID = "en-US-EmmaMultilingualNeural"
     @AppStorage(AppBundleConfiguration.userDeepgramTTSVoiceDefaultsKey) private var userDeepgramTTSVoice = "aura-2-thalia-en"
+    @AppStorage(AppBundleConfiguration.userDeepgramVoiceAgentThinkModelDefaultsKey) private var userDeepgramVoiceAgentThinkModel = "gpt-4o-mini"
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionsEnabledDefaultsKey) private var voiceResponseCaptionsEnabled = false
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionFontDefaultsKey) private var voiceResponseCaptionFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
@@ -158,7 +159,7 @@ struct OpenClickySettingsView: View {
                     sectionHeader
                     selectedPanel
                 }
-                .frame(maxWidth: 660, alignment: .leading)
+                .frame(maxWidth: 760, alignment: .leading)
                 .padding(.horizontal, 28)
                 .padding(.vertical, 24)
             }
@@ -364,8 +365,10 @@ struct OpenClickySettingsView: View {
 
     private var voicePanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            voiceRouteOverview
+
             settingsGroup("Response voice model") {
-                Text("Pick GPT Realtime for the live voice path, or a normal text model when OpenClicky should generate text first and speak it with a separate playback engine.")
+                Text("Pick Realtime when one model should listen and speak live, or use a normal model when OpenClicky should think first and hand the reply to a playback engine.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -373,10 +376,12 @@ struct OpenClickySettingsView: View {
                 modelOptionGrid(
                     options: OpenClickyModelCatalog.responseVoiceModels,
                     selectedModelID: companionManager.selectedModel,
+                    columns: 3,
                     select: { companionManager.setSelectedModel($0) }
                 )
 
-                if OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
+                if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .openAI,
+                   OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
                     Picker("Realtime voice", selection: Binding(
                         get: {
                             userOpenAIRealtimeVoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -395,6 +400,33 @@ struct OpenClickySettingsView: View {
                     .pickerStyle(.menu)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 11)
+                }
+
+                if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .deepgram {
+                    Text("Deepgram Voice Agent uses one WebSocket for listening, thinking, and speaking; it reuses the Deepgram key under API Keys.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    textFieldRow(
+                        title: "Deepgram voice",
+                        subtitle: "Aura model identifier for the speak stage.",
+                        systemImageName: "person.wave.2",
+                        placeholder: "aura-2-thalia-en",
+                        text: Binding(
+                            get: { userDeepgramTTSVoice },
+                            set: { userDeepgramTTSVoice = $0; companionManager.setDeepgramTTSVoice($0) }
+                        )
+                    )
+                    textFieldRow(
+                        title: "Deepgram think model",
+                        subtitle: "LLM model Deepgram should use inside the Voice Agent.",
+                        systemImageName: "brain.head.profile",
+                        placeholder: "gpt-4o-mini",
+                        text: Binding(
+                            get: { userDeepgramVoiceAgentThinkModel },
+                            set: { userDeepgramVoiceAgentThinkModel = $0; companionManager.setDeepgramVoiceAgentThinkModel($0) }
+                        )
+                    )
                 }
             }
 
@@ -452,7 +484,7 @@ struct OpenClickySettingsView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 11)
 
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                LazyVGrid(columns: settingsOptionColumns(3), spacing: 8) {
                     ForEach(OpenClickyResponseCaptionFont.allCases) { captionFont in
                         optionButton(
                             title: captionFont.label,
@@ -579,6 +611,38 @@ struct OpenClickySettingsView: View {
         }
     }
 
+    private var voiceRouteOverview: some View {
+        settingsGroup("Voice route") {
+            LazyVGrid(columns: settingsOptionColumns(3), spacing: 8) {
+                voiceRouteStep(
+                    title: "Listen",
+                    value: OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
+                        ? "Realtime audio"
+                        : companionManager.buddyDictationManager.transcriptionProviderDisplayName,
+                    systemImageName: "mic"
+                )
+                voiceRouteStep(
+                    title: "Think",
+                    value: selectedResponseVoiceModelLabel,
+                    systemImageName: "brain.head.profile"
+                )
+                voiceRouteStep(
+                    title: "Speak",
+                    value: OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
+                        ? "Realtime voice"
+                        : companionManager.selectedTTSProvider.displayName,
+                    systemImageName: "speaker.wave.2"
+                )
+            }
+            .padding(14)
+        }
+    }
+
+    private var selectedResponseVoiceModelLabel: String {
+        OpenClickyModelCatalog.responseVoiceModels.first { $0.id == companionManager.selectedModel }?.label
+            ?? companionManager.selectedModel
+    }
+
     private var pointingPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             settingsGroup("Screen pointing model") {
@@ -631,7 +695,7 @@ struct OpenClickySettingsView: View {
 
                 secureFieldRow(
                     title: "Deepgram listening key",
-                    subtitle: "Used by the Deepgram streaming transcription provider and Deepgram TTS.",
+                    subtitle: "Used by Deepgram streaming transcription, Aura TTS, and Deepgram Voice Agent.",
                     systemImageName: "key",
                     placeholder: "Deepgram key",
                     text: Binding(
@@ -1201,6 +1265,41 @@ struct OpenClickySettingsView: View {
         }
     }
 
+    private func settingsOptionColumns(_ count: Int) -> [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
+    }
+
+    private func voiceRouteStep(title: String, value: String, systemImageName: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImageName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 16)
+                Text(title.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .tracking(0.6)
+            }
+
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.primary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 74, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
+        )
+    }
+
     private func toggleRow(title: String, subtitle: String, systemImageName: String, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 12) {
             rowIcon(systemImageName)
@@ -1370,8 +1469,13 @@ struct OpenClickySettingsView: View {
         .padding(.vertical, 11)
     }
 
-    private func modelOptionGrid(options: [OpenClickyModelOption], selectedModelID: String, select: @escaping (String) -> Void) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+    private func modelOptionGrid(
+        options: [OpenClickyModelOption],
+        selectedModelID: String,
+        columns: Int = 2,
+        select: @escaping (String) -> Void
+    ) -> some View {
+        LazyVGrid(columns: settingsOptionColumns(columns), spacing: 8) {
             ForEach(options) { option in
                 optionButton(
                     title: option.label,

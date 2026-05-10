@@ -2711,6 +2711,484 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     }
 }
 
+
+// MARK: - DeepgramVoiceAgentClient
+
+/// Bidirectional Deepgram Voice Agent client. Deepgram owns the live
+/// listen/think/speak loop over one WebSocket: OpenClicky streams PCM
+/// microphone audio, receives `ConversationText` events, and plays raw
+/// binary PCM audio chunks back as they arrive.
+@MainActor
+final class DeepgramVoiceAgentClient {
+    nonisolated static let streamSampleRate: Double = 24_000
+
+    struct BidirectionalVoiceTurnResult {
+        let userTranscript: String
+        let assistantTranscript: String
+        let didCreateAssistantResponse: Bool
+        let wasRoutedByClient: Bool
+    }
+
+    private var apiKey: String?
+    private(set) var voiceID: String
+    var thinkModel: String
+    private let listenModel: String
+    private let session: URLSession
+
+    private var audioEngine: AVAudioEngine?
+    private var playerNode: AVAudioPlayerNode?
+    private var activeTurn: BidirectionalVoiceTurn?
+
+    init(apiKey: String?, voiceID: String, thinkModel: String, listenModel: String = "nova-3") {
+        self.apiKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedVoice = voiceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.voiceID = trimmedVoice.isEmpty ? "aura-2-thalia-en" : trimmedVoice
+        let trimmedThinkModel = thinkModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.thinkModel = trimmedThinkModel.isEmpty ? "gpt-4o-mini" : trimmedThinkModel
+        self.listenModel = listenModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "nova-3" : listenModel
+        self.session = URLSession(configuration: .default)
+    }
+
+    var isPlaying: Bool {
+        guard let playerNode, playerNode.engine != nil else { return false }
+        return playerNode.isPlaying
+    }
+
+    func updateConfiguration(apiKey: String?, voiceID: String, thinkModel: String) {
+        self.apiKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedVoice = voiceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedVoice.isEmpty { self.voiceID = trimmedVoice }
+        let trimmedThinkModel = thinkModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedThinkModel.isEmpty { self.thinkModel = trimmedThinkModel }
+    }
+
+    func warmUpConnection() {
+        guard let url = URL(string: "https://api.deepgram.com/v1/agent/converse") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 10
+        session.dataTask(with: request) { _, _, _ in }.resume()
+    }
+
+    func beginBidirectionalVoiceTurn(
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
+        onUserTranscript: @escaping @MainActor @Sendable (String) -> Void,
+        onAssistantTextChunk: @escaping @MainActor @Sendable (String) -> Void,
+        onPlaybackStarted: @escaping @MainActor @Sendable () -> Void
+    ) async throws {
+        stopPlaybackInternal()
+        activeTurn?.cancel()
+        activeTurn = nil
+
+        guard let apiKey, !apiKey.isEmpty else {
+            throw NSError(
+                domain: "DeepgramVoiceAgentClient",
+                code: -1000,
+                userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent needs a Deepgram API key in Settings or DEEPGRAM_API_KEY in the launch environment."]
+            )
+        }
+        guard let url = URL(string: "wss://api.deepgram.com/v1/agent/converse") else {
+            throw NSError(domain: "DeepgramVoiceAgentClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent WebSocket URL is invalid."])
+        }
+        guard let streamFormat = Self.makeStreamFormat() else {
+            throw NSError(domain: "DeepgramVoiceAgentClient", code: -3, userInfo: [NSLocalizedDescriptionKey: "Could not build Deepgram Voice Agent PCM stream format."])
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let webSocket = session.webSocketTask(with: request)
+        webSocket.resume()
+        try await waitForEvent("Welcome", on: webSocket)
+
+        let historyMessages: [[String: String]] = conversationHistory.suffix(8).flatMap { entry in
+            [
+                ["type": "History", "role": "user", "content": entry.userPlaceholder],
+                ["type": "History", "role": "assistant", "content": entry.assistantResponse]
+            ]
+        }
+        let instructions = [
+            systemPrompt,
+            "You are in OpenClicky's Deepgram Voice Agent realtime mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not claim you will start background work, take care of a task, or start an agent unless the app already routed the turn before you receive it. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
+        ].compactMap { $0 }.joined(separator: "\n\n")
+
+        var agent: [String: Any] = [
+            "language": "en",
+            "listen": [
+                "provider": [
+                    "type": "deepgram",
+                    "model": listenModel,
+                    "smart_format": true
+                ]
+            ],
+            "think": [
+                "provider": [
+                    "type": "open_ai",
+                    "model": thinkModel,
+                    "temperature": 0.6
+                ],
+                "prompt": instructions
+            ],
+            "speak": [
+                "provider": [
+                    "type": "deepgram",
+                    "model": voiceID
+                ]
+            ]
+        ]
+        if !historyMessages.isEmpty {
+            agent["context"] = ["messages": historyMessages]
+        }
+
+        try await sendJSON([
+            "type": "Settings",
+            "tags": ["openclicky", "voice_agent"],
+            "audio": [
+                "input": [
+                    "encoding": "linear16",
+                    "sample_rate": Int(Self.streamSampleRate)
+                ],
+                "output": [
+                    "encoding": "linear16",
+                    "sample_rate": Int(Self.streamSampleRate),
+                    "container": "none"
+                ]
+            ],
+            "agent": agent
+        ], to: webSocket)
+        try await waitForEvent("SettingsApplied", on: webSocket)
+
+        let turn = try BidirectionalVoiceTurn(
+            client: self,
+            webSocket: webSocket,
+            streamFormat: streamFormat,
+            onUserTranscript: onUserTranscript,
+            onAssistantTextChunk: onAssistantTextChunk,
+            onPlaybackStarted: onPlaybackStarted
+        )
+        activeTurn = turn
+        audioEngine = turn.outputEngine
+        playerNode = turn.playerNode
+        try turn.startInputCapture()
+        turn.startReceiving()
+    }
+
+    func finishBidirectionalVoiceTurn(
+        routeUserTranscriptBeforeAssistantResponse: (@MainActor @Sendable (String) -> Bool)? = nil
+    ) async throws -> BidirectionalVoiceTurnResult {
+        guard let activeTurn else { throw CancellationError() }
+        self.activeTurn = nil
+        do {
+            let result = try await activeTurn.finish(routeUserTranscriptBeforeAssistantResponse: routeUserTranscriptBeforeAssistantResponse)
+            stopPlaybackInternal()
+            return result
+        } catch {
+            activeTurn.cancel()
+            stopPlaybackInternal()
+            throw error
+        }
+    }
+
+    func cancelBidirectionalVoiceTurn() {
+        activeTurn?.cancel()
+        activeTurn = nil
+        stopPlaybackInternal()
+    }
+
+    private final class BidirectionalVoiceTurn {
+        private weak var client: DeepgramVoiceAgentClient?
+        private let webSocket: URLSessionWebSocketTask
+        let outputEngine: AVAudioEngine
+        let playerNode: AVAudioPlayerNode
+        private let inputEngine = AVAudioEngine()
+        private let inputConverter = BuddyPCM16AudioConverter(targetSampleRate: DeepgramVoiceAgentClient.streamSampleRate)
+        private let streamFormat: AVAudioFormat
+        private let onUserTranscript: @MainActor @Sendable (String) -> Void
+        private let onAssistantTextChunk: @MainActor @Sendable (String) -> Void
+        private let onPlaybackStarted: @MainActor @Sendable () -> Void
+        private var receiveTask: Task<BidirectionalVoiceTurnResult, Error>?
+        private var keepAliveTask: Task<Void, Never>?
+        private var routeUserTranscriptBeforeAssistantResponse: (@MainActor @Sendable (String) -> Bool)?
+        private var hasInstalledInputTap = false
+        private var didStartPlayback = false
+        private var didCreateAssistantResponse = false
+        private var didRouteByClient = false
+        private var didStopInput = false
+
+        init(
+            client: DeepgramVoiceAgentClient,
+            webSocket: URLSessionWebSocketTask,
+            streamFormat: AVAudioFormat,
+            onUserTranscript: @escaping @MainActor @Sendable (String) -> Void,
+            onAssistantTextChunk: @escaping @MainActor @Sendable (String) -> Void,
+            onPlaybackStarted: @escaping @MainActor @Sendable () -> Void
+        ) throws {
+            self.client = client
+            self.webSocket = webSocket
+            self.streamFormat = streamFormat
+            self.onUserTranscript = onUserTranscript
+            self.onAssistantTextChunk = onAssistantTextChunk
+            self.onPlaybackStarted = onPlaybackStarted
+
+            let outputEngine = AVAudioEngine()
+            let playerNode = AVAudioPlayerNode()
+            outputEngine.attach(playerNode)
+            outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: streamFormat)
+            try outputEngine.start()
+            self.outputEngine = outputEngine
+            self.playerNode = playerNode
+        }
+
+        func startInputCapture() throws {
+            let inputNode = inputEngine.inputNode
+            let inputFormat = inputNode.outputFormat(forBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
+                guard let self,
+                      let pcmData = self.inputConverter.convertToPCM16Data(from: buffer),
+                      !pcmData.isEmpty else { return }
+                Task { [weak self] in
+                    guard let self else { return }
+                    try? await self.webSocket.send(.data(pcmData))
+                }
+            }
+            hasInstalledInputTap = true
+            inputEngine.prepare()
+            try inputEngine.start()
+        }
+
+        func startReceiving() {
+            keepAliveTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    try? await self.sendJSON(["type": "KeepAlive"])
+                }
+            }
+            receiveTask = Task { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.receiveUntilDone()
+            }
+        }
+
+        func finish(
+            routeUserTranscriptBeforeAssistantResponse: (@MainActor @Sendable (String) -> Bool)? = nil
+        ) async throws -> BidirectionalVoiceTurnResult {
+            stopInputCapture()
+            self.routeUserTranscriptBeforeAssistantResponse = routeUserTranscriptBeforeAssistantResponse
+            do {
+                guard let receiveTask else { throw CancellationError() }
+                let result = try await withThrowingTaskGroup(of: BidirectionalVoiceTurnResult.self) { group in
+                    group.addTask { try await receiveTask.value }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 30_000_000_000)
+                        throw NSError(
+                            domain: "DeepgramVoiceAgentClient",
+                            code: -30,
+                            userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent did not finish the realtime turn before timeout."]
+                        )
+                    }
+                    guard let first = try await group.next() else { throw CancellationError() }
+                    group.cancelAll()
+                    return first
+                }
+                webSocket.cancel(with: .normalClosure, reason: nil)
+                keepAliveTask?.cancel()
+                keepAliveTask = nil
+                return result
+            } catch {
+                keepAliveTask?.cancel()
+                keepAliveTask = nil
+                throw error
+            }
+        }
+
+        func cancel() {
+            stopInputCapture()
+            receiveTask?.cancel()
+            receiveTask = nil
+            keepAliveTask?.cancel()
+            keepAliveTask = nil
+            ElevenLabsTTSClient.stopPlayerIfAttached(playerNode)
+            outputEngine.stop()
+            webSocket.cancel(with: .goingAway, reason: nil)
+        }
+
+        private func sendJSON(_ payload: [String: Any]) async throws {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            guard let string = String(data: data, encoding: .utf8) else { return }
+            try await webSocket.send(.string(string))
+        }
+
+        private func stopInputCapture() {
+            didStopInput = true
+            if hasInstalledInputTap {
+                inputEngine.inputNode.removeTap(onBus: 0)
+                hasInstalledInputTap = false
+            }
+            if inputEngine.isRunning {
+                inputEngine.stop()
+            }
+        }
+
+        private func receiveUntilDone() async throws -> BidirectionalVoiceTurnResult {
+            var userTranscript = ""
+            var assistantTranscript = ""
+            var scheduledFrameCount: AVAudioFramePosition = 0
+
+            receiveLoop: while true {
+                try Task.checkCancellation()
+                guard let message = try await client?.receiveMessage(from: webSocket) else { throw CancellationError() }
+                switch message {
+                case .audio(let data):
+                    let samples = DeepgramVoiceAgentClient.int16Samples(fromLittleEndianPCM: data)
+                    let frames = await MainActor.run {
+                        ElevenLabsTTSClient.scheduleSamples(samples, on: playerNode, format: streamFormat)
+                    }
+                    scheduledFrameCount += frames
+                    if frames > 0, !didStartPlayback {
+                        didStartPlayback = true
+                        await MainActor.run { onPlaybackStarted() }
+                    }
+                case .event(let event):
+                    let type = event["type"] as? String ?? ""
+                    if type == "ConversationText" {
+                        let role = event["role"] as? String ?? ""
+                        let content = (event["content"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !content.isEmpty else { continue }
+                        if role == "user" {
+                            userTranscript = content
+                            await MainActor.run { onUserTranscript(content) }
+                            if didStopInput, !didRouteByClient, !didCreateAssistantResponse {
+                                let routed = await MainActor.run {
+                                    routeUserTranscriptBeforeAssistantResponse?(content) ?? false
+                                }
+                                if routed {
+                                    didRouteByClient = true
+                                    break receiveLoop
+                                }
+                            }
+                        } else if role == "assistant" {
+                            didCreateAssistantResponse = true
+                            assistantTranscript = content
+                            await MainActor.run { onAssistantTextChunk(content) }
+                        }
+                    } else if type == "UserStartedSpeaking" {
+                        ElevenLabsTTSClient.stopPlayerIfAttached(playerNode)
+                    } else if type == "AgentAudioDone" {
+                        break receiveLoop
+                    } else if type == "Error" || type == "error" {
+                        guard let error = client?.voiceAgentError(from: event) else { throw CancellationError() }
+                        throw error
+                    }
+                }
+            }
+
+            if scheduledFrameCount > 0 {
+                await ElevenLabsTTSClient.waitForPlaybackToDrain(
+                    playerNode,
+                    scheduledFrameCount: scheduledFrameCount,
+                    sampleRate: DeepgramVoiceAgentClient.streamSampleRate
+                )
+            }
+            return BidirectionalVoiceTurnResult(
+                userTranscript: userTranscript.trimmingCharacters(in: .whitespacesAndNewlines),
+                assistantTranscript: assistantTranscript.trimmingCharacters(in: .whitespacesAndNewlines),
+                didCreateAssistantResponse: didCreateAssistantResponse,
+                wasRoutedByClient: didRouteByClient
+            )
+        }
+    }
+
+    private enum IncomingMessage {
+        case event([String: Any])
+        case audio(Data)
+    }
+
+    private func waitForEvent(_ expectedType: String, on webSocket: URLSessionWebSocketTask) async throws {
+        while true {
+            try Task.checkCancellation()
+            let message = try await receiveMessage(from: webSocket)
+            if case .event(let event) = message {
+                let type = event["type"] as? String ?? ""
+                if type == expectedType { return }
+                if type == "Error" || type == "error" { throw voiceAgentError(from: event) }
+            }
+        }
+    }
+
+    private func receiveMessage(from webSocket: URLSessionWebSocketTask) async throws -> IncomingMessage {
+        let message = try await webSocket.receive()
+        switch message {
+        case .data(let data):
+            if let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return .event(event)
+            }
+            return .audio(data)
+        case .string(let string):
+            if let data = string.data(using: .utf8),
+               let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return .event(event)
+            }
+            return .event(["type": "Warning", "description": string])
+        @unknown default:
+            return .event(["type": "Warning", "description": "Unknown Deepgram WebSocket message"])
+        }
+    }
+
+    private func sendJSON(_ payload: [String: Any], to webSocket: URLSessionWebSocketTask) async throws {
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        guard let string = String(data: data, encoding: .utf8) else { return }
+        try await webSocket.send(.string(string))
+    }
+
+    private nonisolated func voiceAgentError(from event: [String: Any]) -> NSError {
+        let message = event["description"] as? String
+            ?? event["message"] as? String
+            ?? (event["error"] as? [String: Any])?["message"] as? String
+            ?? "Deepgram Voice Agent failed."
+        return NSError(domain: "DeepgramVoiceAgentClient", code: -2, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    func stopPlayback() {
+        stopPlaybackInternal()
+    }
+
+    private func stopPlaybackInternal() {
+        activeTurn?.cancel()
+        activeTurn = nil
+        if let playerNode {
+            ElevenLabsTTSClient.stopPlayerIfAttached(playerNode)
+        }
+        playerNode = nil
+        audioEngine?.stop()
+        audioEngine = nil
+    }
+
+    private static func makeStreamFormat() -> AVAudioFormat? {
+        AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: streamSampleRate,
+            channels: 1,
+            interleaved: false
+        )
+    }
+
+    private nonisolated static func int16Samples(fromLittleEndianPCM data: Data) -> [Int16] {
+        var samples: [Int16] = []
+        samples.reserveCapacity(data.count / 2)
+        var index = data.startIndex
+        while index + 1 < data.endIndex {
+            let low = UInt16(data[index])
+            let high = UInt16(data[index + 1]) << 8
+            samples.append(Int16(bitPattern: high | low))
+            index += 2
+        }
+        return samples
+    }
+}
+
 // MARK: - OpenClickyTTSProvider
 
 nonisolated enum OpenClickyTTSProvider: String, CaseIterable, Identifiable {

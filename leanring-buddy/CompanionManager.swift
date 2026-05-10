@@ -344,6 +344,14 @@ final class CompanionManager: ObservableObject {
         )
     }()
 
+    private lazy var deepgramVoiceAgentClient: DeepgramVoiceAgentClient = {
+        return DeepgramVoiceAgentClient(
+            apiKey: AppBundleConfiguration.deepgramAPIKey(),
+            voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+            thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+        )
+    }()
+
     /// Currently selected playback engine. Persisted to UserDefaults under
     /// `openClickyTTSProvider` for compatibility with earlier builds.
     @Published var selectedTTSProvider: OpenClickyTTSProvider = {
@@ -424,6 +432,11 @@ final class CompanionManager: ObservableObject {
         deepgramTTSClient.updateConfiguration(
             apiKey: AppBundleConfiguration.deepgramAPIKey(),
             voiceID: AppBundleConfiguration.deepgramTTSVoice()
+        )
+        deepgramVoiceAgentClient.updateConfiguration(
+            apiKey: AppBundleConfiguration.deepgramAPIKey(),
+            voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+            thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
         )
         if selectedTTSProvider == .deepgram {
             FillerPhraseLibrary.shared.prepare(client: deepgramTTSClient)
@@ -889,10 +902,19 @@ final class CompanionManager: ObservableObject {
 
         if OpenClickyModelCatalog.isSpeechModelID(resolvedModel) {
             selectedSpeechModel = resolvedModel
-            openAIRealtimeSpeechClient.model = resolvedModel
             UserDefaults.standard.set(resolvedModel, forKey: "openClickySpeechModel")
-            setTTSProvider(.openAIRealtime)
-            openAIRealtimeSpeechClient.warmUpConnection()
+            if selectedVoiceResponseModel.provider == .openAI {
+                openAIRealtimeSpeechClient.model = resolvedModel
+                setTTSProvider(.openAIRealtime)
+                openAIRealtimeSpeechClient.warmUpConnection()
+            } else if selectedVoiceResponseModel.provider == .deepgram {
+                deepgramVoiceAgentClient.updateConfiguration(
+                    apiKey: AppBundleConfiguration.deepgramAPIKey(),
+                    voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+                    thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+                )
+                deepgramVoiceAgentClient.warmUpConnection()
+            }
             return
         }
 
@@ -910,6 +932,8 @@ final class CompanionManager: ObservableObject {
             if selectedVoiceResponseModel.provider == .codex || AppBundleConfiguration.openAIAPIKey() == nil {
                 codexVoiceSession.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
             }
+        case .deepgram:
+            deepgramVoiceAgentClient.warmUpConnection()
         }
     }
 
@@ -936,6 +960,12 @@ final class CompanionManager: ObservableObject {
             codexVoiceSession.model = modelOption.id
         case .codex:
             codexVoiceSession.model = modelOption.id
+        case .deepgram:
+            deepgramVoiceAgentClient.updateConfiguration(
+                apiKey: AppBundleConfiguration.deepgramAPIKey(),
+                voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+                thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+            )
         }
     }
 
@@ -1148,6 +1178,29 @@ final class CompanionManager: ObservableObject {
     func setDeepgramAPIKey(_ apiKey: String) {
         persistOptionalSecret(apiKey, defaultsKey: AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey)
         buddyDictationManager.setTranscriptionProvider(buddyDictationManager.transcriptionProviderID)
+        deepgramTTSClient.updateConfiguration(
+            apiKey: AppBundleConfiguration.deepgramAPIKey(),
+            voiceID: AppBundleConfiguration.deepgramTTSVoice()
+        )
+        deepgramVoiceAgentClient.updateConfiguration(
+            apiKey: AppBundleConfiguration.deepgramAPIKey(),
+            voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+            thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+        )
+    }
+
+    func setDeepgramVoiceAgentThinkModel(_ model: String) {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            UserDefaults.standard.removeObject(forKey: AppBundleConfiguration.userDeepgramVoiceAgentThinkModelDefaultsKey)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: AppBundleConfiguration.userDeepgramVoiceAgentThinkModelDefaultsKey)
+        }
+        deepgramVoiceAgentClient.updateConfiguration(
+            apiKey: AppBundleConfiguration.deepgramAPIKey(),
+            voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+            thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+        )
     }
 
     func setVoiceTranscriptionProvider(_ providerID: String) {
@@ -1271,6 +1324,15 @@ final class CompanionManager: ObservableObject {
             UserDefaults.standard.set(OpenClickyTTSProvider.openAIRealtime.rawValue, forKey: AppBundleConfiguration.userTTSProviderDefaultsKey)
             UserDefaults.standard.set(selectedVoiceResponseModel.id, forKey: "openClickySpeechModel")
             openAIRealtimeSpeechClient.warmUpConnection()
+        case .deepgram:
+            selectedSpeechModel = selectedVoiceResponseModel.id
+            UserDefaults.standard.set(selectedVoiceResponseModel.id, forKey: "openClickySpeechModel")
+            deepgramVoiceAgentClient.updateConfiguration(
+                apiKey: AppBundleConfiguration.deepgramAPIKey(),
+                voiceID: AppBundleConfiguration.deepgramTTSVoice(),
+                thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
+            )
+            deepgramVoiceAgentClient.warmUpConnection()
         case .openAI, .codex:
             codexVoiceSession.model = selectedVoiceResponseModel.id
             if selectedVoiceResponseModel.provider == .codex || AppBundleConfiguration.openAIAPIKey() == nil {
@@ -1431,6 +1493,15 @@ final class CompanionManager: ObservableObject {
             return .ok(["cleared": true])
         case .speak(let text, let interrupt):
             return speakExternalProxyText(text, interrupt: interrupt)
+        case .notify(let title, let body, let threadID, let sound):
+            let identifier = OpenClickyDesktopNotificationCenter.shared.post(
+                title: title,
+                body: body,
+                threadID: threadID ?? "openclicky.external",
+                playSound: sound,
+                userInfo: ["source": "external_control_bridge"]
+            )
+            return .accepted(["notified": true, "identifier": identifier])
         }
     }
 
@@ -2261,7 +2332,7 @@ final class CompanionManager: ObservableObject {
             "playbackEngine": selectedTTSProvider.rawValue,
             "playbackController": activeTTSControllerName,
             "speechModel": selectedSpeechModel,
-            "speechVoice": openAIRealtimeSpeechClient.voiceID
+            "speechVoice": activeRealtimeSpeechVoiceID
         ]
 
         switch selectedVoiceResponseModel.provider {
@@ -2307,6 +2378,16 @@ final class CompanionManager: ObservableObject {
                 fields["streamingMethod"] = "codex_app_server_agentMessage_delta"
                 fields["apiKeyFallback"] = false
             }
+        case .deepgram:
+            fields["executionMethod"] = "DeepgramVoiceAgentClient.beginBidirectionalVoiceTurn"
+            fields["authMode"] = "deepgram_api_key_primary"
+            fields["transport"] = "deepgram_voice_agent_websocket"
+            fields["streamingMethod"] = "binary PCM in/out + ConversationText"
+            fields["inputPath"] = "deepgram_voice_agent_pcm_stream"
+            fields["bypassesWhisper"] = true
+            fields["playbackEngine"] = "deepgram_voice_agent"
+            fields["speechVoice"] = deepgramVoiceAgentClient.voiceID
+            fields["thinkModel"] = deepgramVoiceAgentClient.thinkModel
         case .codex:
             fields["executionMethod"] = "CodexVoiceSession.analyzeImageStreaming"
             fields["authMode"] = "local_codex_chatgpt_primary"
@@ -2408,6 +2489,23 @@ final class CompanionManager: ObservableObject {
         OpenClickyModelCatalog.isSpeechModelID(selectedModel)
     }
 
+    private var activeRealtimeSpeechVoiceID: String {
+        let model = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        return model.provider == .deepgram ? deepgramVoiceAgentClient.voiceID : openAIRealtimeSpeechClient.voiceID
+    }
+
+    private var activeRealtimeInputPath: String {
+        let model = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        return model.provider == .deepgram ? "deepgram_voice_agent_pcm_stream" : "realtime_input_audio_buffer"
+    }
+
+    private struct BidirectionalRealtimeVoiceResult {
+        let userTranscript: String
+        let assistantTranscript: String
+        let didCreateAssistantResponse: Bool
+        let wasRoutedByClient: Bool
+    }
+
     private func startBidirectionalRealtimeVoiceCapture(source: String) {
         guard !isRealtimeBidirectionalVoiceCaptureActive else { return }
 
@@ -2426,8 +2524,8 @@ final class CompanionManager: ObservableObject {
             fields: [
                 "source": source,
                 "speechModel": selectedModel,
-                "speechVoice": openAIRealtimeSpeechClient.voiceID,
-                "inputPath": "realtime_input_audio_buffer",
+                "speechVoice": activeRealtimeSpeechVoiceID,
+                "inputPath": activeRealtimeInputPath,
                 "bypassesWhisper": true,
                 "historyCount": historyForAPI.count
             ]
@@ -2436,37 +2534,52 @@ final class CompanionManager: ObservableObject {
         realtimeBidirectionalVoiceTask?.cancel()
         realtimeBidirectionalVoiceTask = Task { [weak self] in
             do {
-                try await self?.openAIRealtimeSpeechClient.beginBidirectionalVoiceTurn(
-                    systemPrompt: self?.currentVoiceResponseSystemPrompt() ?? "",
-                    conversationHistory: historyForAPI,
-                    onUserTranscript: { transcript in
-                        self?.lastTranscript = transcript
-                    },
-                    onAssistantTextChunk: { accumulatedText in
-                        let trimmed = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        self?.latestVoiceResponseCard = ClickyResponseCard(
-                            source: .voice,
-                            rawText: trimmed,
-                            contextTitle: "Realtime voice input"
-                        )
-                        self?.updateVoiceResponseCaption(trimmed)
-                    },
-                    onPlaybackStarted: {
-                        self?.voiceState = .responding
-                        OpenClickyMessageLogStore.shared.append(
-                            lane: "voice",
-                            direction: "internal",
-                            event: "voice.realtime_bidirectional.audio_started",
-                            fields: [
-                                "source": source,
-                                "speechModel": self?.selectedModel ?? "unknown",
-                                "speechVoice": self?.openAIRealtimeSpeechClient.voiceID ?? "unknown",
-                                "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
-                            ]
-                        )
-                    }
-                )
+                guard let self else { return }
+                let onUserTranscript: @MainActor @Sendable (String) -> Void = { [weak self] transcript in
+                    self?.lastTranscript = transcript
+                }
+                let onAssistantTextChunk: @MainActor @Sendable (String) -> Void = { [weak self] accumulatedText in
+                    let trimmed = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    self?.latestVoiceResponseCard = ClickyResponseCard(
+                        source: .voice,
+                        rawText: trimmed,
+                        contextTitle: "Realtime voice input"
+                    )
+                    self?.updateVoiceResponseCaption(trimmed)
+                }
+                let onPlaybackStarted: @MainActor @Sendable () -> Void = { [weak self] in
+                    self?.voiceState = .responding
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "internal",
+                        event: "voice.realtime_bidirectional.audio_started",
+                        fields: [
+                            "source": source,
+                            "speechModel": self?.selectedModel ?? "unknown",
+                            "speechVoice": self?.activeRealtimeSpeechVoiceID ?? "unknown",
+                            "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
+                        ]
+                    )
+                }
+                let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: self.selectedModel)
+                if selectedVoiceResponseModel.provider == .deepgram {
+                    try await self.deepgramVoiceAgentClient.beginBidirectionalVoiceTurn(
+                        systemPrompt: self.currentVoiceResponseSystemPrompt(),
+                        conversationHistory: historyForAPI,
+                        onUserTranscript: onUserTranscript,
+                        onAssistantTextChunk: onAssistantTextChunk,
+                        onPlaybackStarted: onPlaybackStarted
+                    )
+                } else {
+                    try await self.openAIRealtimeSpeechClient.beginBidirectionalVoiceTurn(
+                        systemPrompt: self.currentVoiceResponseSystemPrompt(),
+                        conversationHistory: historyForAPI,
+                        onUserTranscript: onUserTranscript,
+                        onAssistantTextChunk: onAssistantTextChunk,
+                        onPlaybackStarted: onPlaybackStarted
+                    )
+                }
                 OpenClickyMessageLogStore.shared.append(
                     lane: "voice",
                     direction: "internal",
@@ -2495,12 +2608,33 @@ final class CompanionManager: ObservableObject {
         realtimeBidirectionalVoiceTask = Task { [weak self] in
             do {
                 guard let self else { return }
-                let result = try await self.openAIRealtimeSpeechClient.finishBidirectionalVoiceTurn(
-                    routeUserTranscriptBeforeAssistantResponse: { [weak self] transcript in
-                        guard let self else { return false }
-                        return self.routeCompletedRealtimeVoiceTranscriptIfNeeded(transcript)
-                    }
-                )
+                let routeBeforeAssistant: @MainActor @Sendable (String) -> Bool = { [weak self] transcript in
+                    guard let self else { return false }
+                    return self.routeCompletedRealtimeVoiceTranscriptIfNeeded(transcript)
+                }
+                let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: self.selectedModel)
+                let result: BidirectionalRealtimeVoiceResult
+                if selectedVoiceResponseModel.provider == .deepgram {
+                    let deepgramResult = try await self.deepgramVoiceAgentClient.finishBidirectionalVoiceTurn(
+                        routeUserTranscriptBeforeAssistantResponse: routeBeforeAssistant
+                    )
+                    result = BidirectionalRealtimeVoiceResult(
+                        userTranscript: deepgramResult.userTranscript,
+                        assistantTranscript: deepgramResult.assistantTranscript,
+                        didCreateAssistantResponse: deepgramResult.didCreateAssistantResponse,
+                        wasRoutedByClient: deepgramResult.wasRoutedByClient
+                    )
+                } else {
+                    let openAIResult = try await self.openAIRealtimeSpeechClient.finishBidirectionalVoiceTurn(
+                        routeUserTranscriptBeforeAssistantResponse: routeBeforeAssistant
+                    )
+                    result = BidirectionalRealtimeVoiceResult(
+                        userTranscript: openAIResult.userTranscript,
+                        assistantTranscript: openAIResult.assistantTranscript,
+                        didCreateAssistantResponse: openAIResult.didCreateAssistantResponse,
+                        wasRoutedByClient: openAIResult.wasRoutedByClient
+                    )
+                }
                 let assistantText = result.assistantTranscript.isEmpty
                     ? (result.didCreateAssistantResponse ? "Done." : "Routed to OpenClicky.")
                     : result.assistantTranscript
@@ -2534,8 +2668,8 @@ final class CompanionManager: ObservableObject {
                         fields: [
                             "source": source,
                             "speechModel": self.selectedModel,
-                            "speechVoice": self.openAIRealtimeSpeechClient.voiceID,
-                            "inputPath": "realtime_input_audio_buffer",
+                            "speechVoice": self.activeRealtimeSpeechVoiceID,
+                            "inputPath": self.activeRealtimeInputPath,
                             "bypassesWhisper": true,
                             "routedByApp": routedByApp,
                             "appRouteChecked": true,
@@ -2625,6 +2759,7 @@ final class CompanionManager: ObservableObject {
 
     private func handleBidirectionalRealtimeVoiceFailure(_ error: Error, source: String, stage: String) {
         openAIRealtimeSpeechClient.cancelBidirectionalVoiceTurn()
+        deepgramVoiceAgentClient.cancelBidirectionalVoiceTurn()
         isRealtimeBidirectionalVoiceCaptureActive = false
         realtimeBidirectionalVoiceCaptureStartedAt = nil
         voiceState = .idle
@@ -8427,14 +8562,9 @@ final class CompanionManager: ObservableObject {
         guard let session = codexAgentSessions.first(where: { $0.id == sessionID }) else { return }
         let taskTitle = Self.agentCompletionSpokenTaskTitle(for: session)
 
-        // Skip narration if the user is mid-conversation with the voice
-        // responder — the dock item still updates visually, and we don't
-        // want to talk over the user's current request.
-        if voiceState == .listening { return }
-
         // User-initiated cancellation: the user just clicked Stop / said
         // "cancel" — they already know what happened. Don't narrate it back.
-        // Only system-initiated cancellations get spoken (those would
+        // Only system-initiated cancellations get spoken/notified (those would
         // otherwise be invisible to the user).
         if outcome == "cancelled", Self.isUserInitiatedCancelReason(cancelReason) {
             return
@@ -8458,7 +8588,33 @@ final class CompanionManager: ObservableObject {
                 : "\(taskTitle) is done \(Self.briefCompletionSummary(trimmedSummary))"
         }
 
-        // Sequence behind any in-flight TTS instead of cutting it.
+        let notificationTitle: String
+        switch outcome {
+        case "cancelled": notificationTitle = "OpenClicky task cancelled"
+        case "failed": notificationTitle = "OpenClicky task stopped"
+        default: notificationTitle = "OpenClicky task done"
+        }
+        OpenClickyDesktopNotificationCenter.shared.post(
+            title: notificationTitle,
+            body: line,
+            threadID: "openclicky.agent.\(sessionID.uuidString)",
+            playSound: outcome == "success",
+            userInfo: [
+                "source": "agent_completion",
+                "sessionID": sessionID.uuidString,
+                "outcome": outcome
+            ]
+        )
+
+        // Skip narration if the user is mid-conversation with the voice
+        // responder — the dock item still updates visually, and the desktop
+        // notification now carries the update without talking over them.
+        if voiceState == .listening { return }
+
+        // Sequence behind any in-flight TTS or voice capture instead of
+        // cutting in. The queued path is important: an agent can finish
+        // while the user has already started the next push-to-talk turn,
+        // and completion speech must not feed back into the microphone.
         // Previously this called `speakShortSystemResponse(line)` directly,
         // whose `interruptCurrentVoiceResponse()` would chop the
         // acknowledgement TTS mid-sentence when fast tasks completed
@@ -8504,7 +8660,7 @@ final class CompanionManager: ObservableObject {
             }
             if let sessionID, self.silencedAgentSpeechSessionIDs.contains(sessionID) { return }
             if Task.isCancelled { return }
-            await self.waitForVoicePlaybackToIdle()
+            guard await self.waitForSystemAnnouncementSlot(sessionID: sessionID) else { return }
             if let sessionID, self.silencedAgentSpeechSessionIDs.contains(sessionID) { return }
             if withChime {
                 let chimeDuration = self.playAgentDoneChime()
@@ -8512,6 +8668,7 @@ final class CompanionManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(settleSeconds * 1_000_000_000))
                 if Task.isCancelled { return }
                 if let sessionID, self.silencedAgentSpeechSessionIDs.contains(sessionID) { return }
+                guard await self.waitForSystemAnnouncementSlot(sessionID: sessionID) else { return }
             }
             self.speakingSystemAnnouncementSessionID = sessionID
             self.speakShortSystemResponse(line, interruptExisting: false)
@@ -8560,6 +8717,48 @@ final class CompanionManager: ObservableObject {
             if Task.isCancelled { return }
             if Date().timeIntervalSince(start) >= maxWaitSeconds { return }
             try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    @MainActor
+    private func waitForSystemAnnouncementSlot(
+        sessionID: UUID?,
+        maxWaitSeconds: TimeInterval = 30.0
+    ) async -> Bool {
+        let start = Date()
+        while systemAnnouncementAudioWouldCollideWithVoiceInput {
+            if Task.isCancelled { return false }
+            if let sessionID, silencedAgentSpeechSessionIDs.contains(sessionID) { return false }
+            if Date().timeIntervalSince(start) >= maxWaitSeconds {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "agent",
+                    direction: "internal",
+                    event: "openclicky.agent_completion.speech_deferred_timeout",
+                    fields: [
+                        "sessionID": sessionID?.uuidString ?? "",
+                        "voiceState": String(describing: voiceState),
+                        "dictationInProgress": buddyDictationManager.isDictationInProgress,
+                        "realtimeCaptureActive": isRealtimeBidirectionalVoiceCaptureActive,
+                        "ttsPlaying": voiceTTSClient.isPlaying
+                    ]
+                )
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return true
+    }
+
+    @MainActor
+    private var systemAnnouncementAudioWouldCollideWithVoiceInput: Bool {
+        if voiceTTSClient.isPlaying { return true }
+        if buddyDictationManager.isDictationInProgress { return true }
+        if isRealtimeBidirectionalVoiceCaptureActive { return true }
+        switch voiceState {
+        case .listening, .processing, .responding:
+            return true
+        case .idle:
+            return false
         }
     }
 
@@ -9103,6 +9302,7 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         currentResponseTask = nil
         codexVoiceSession.cancelActiveTurn(reason: "voice_response_interrupted")
+        deepgramVoiceAgentClient.stopPlayback()
         voiceTTSClient.stopPlayback()
         clearVoiceResponseCaption()
     }
@@ -10495,6 +10695,12 @@ final class CompanionManager: ObservableObject {
                 userPrompt: userPrompt,
                 onTextChunk: onTextChunk
             )
+        case .deepgram:
+            throw NSError(
+                domain: "DeepgramVoiceAgentClient",
+                code: -20,
+                userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent handles live microphone turns directly; text/screenshot fallback should route through a normal response model."]
+            )
         case .codex:
             return try await analyzeCodexVoiceResponse(
                 images: images,
@@ -10771,6 +10977,12 @@ final class CompanionManager: ObservableObject {
             )
             onTextChunk(text)
             return text
+        case .deepgram:
+            throw NSError(
+                domain: "DeepgramVoiceAgentClient",
+                code: -21,
+                userInfo: [NSLocalizedDescriptionKey: "Deepgram Voice Agent is not a pointing model."]
+            )
         case .openAI:
             openAIAPI.model = selectedPointingModel.id
             let (text, _) = try await openAIAPI.analyzeImage(
@@ -10816,7 +11028,7 @@ final class CompanionManager: ObservableObject {
                 displayWidthInPoints: targetScreenCapture.displayWidthInPoints,
                 displayHeightInPoints: targetScreenCapture.displayHeightInPoints
             )
-        case .openAI:
+        case .openAI, .deepgram:
             return
         }
 

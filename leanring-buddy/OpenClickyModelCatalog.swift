@@ -4,6 +4,7 @@ nonisolated enum OpenClickyModelProvider: String, Equatable {
     case anthropic
     case openAI
     case codex
+    case deepgram
 
     var displayName: String {
         switch self {
@@ -13,6 +14,8 @@ nonisolated enum OpenClickyModelProvider: String, Equatable {
             return "OpenAI"
         case .codex:
             return "Codex"
+        case .deepgram:
+            return "Deepgram"
         }
     }
 }
@@ -66,7 +69,8 @@ nonisolated enum OpenClickyModelCatalog {
         // reply generation and the audio playback path instead of chaining
         // a separate text model into TTS.
         OpenClickyModelOption(id: "gpt-realtime-2", label: "GPT Realtime 2", provider: .openAI, maxOutputTokens: 1_200),
-        OpenClickyModelOption(id: "gpt-realtime-1.5", label: "GPT Realtime 1.5", provider: .openAI, maxOutputTokens: 1_200)
+        OpenClickyModelOption(id: "gpt-realtime-1.5", label: "GPT Realtime 1.5", provider: .openAI, maxOutputTokens: 1_200),
+        OpenClickyModelOption(id: "deepgram-voice-agent", label: "Deepgram Voice Agent", provider: .deepgram, maxOutputTokens: 1_200)
     ]
 
     static let responseVoiceModels: [OpenClickyModelOption] = speechModels + voiceResponseModels
