@@ -1,8 +1,35 @@
 # OpenClicky
 
-OpenClicky is a native macOS menu-bar companion by Jason Kneen. It provides push-to-talk voice help, screen-aware responses, a cursor overlay for pointing at UI elements, and an Agent Mode dashboard for coding, research, writing, and automation tasks.
+OpenClicky is a native macOS menu-bar companion by Jason Kneen. It hosts Clicky, an AI companion that provides push-to-talk voice help, screen-aware responses, image gallery views, local agent work, and a cursor overlay for pointing at UI elements.
 
 OpenClicky uses local configuration only. There is no Google login requirement and no hosted key-sync flow.
+
+## Clicky At A Glance
+
+Clicky currently handles:
+
+- fresh web search for facts and news
+- image gallery display for visual results
+- screen-aware guidance using `[POINT:x,y:label]` and `[TYPE:x,y:label]`
+- child workers and agent spawning for larger tasks
+- GitHub integration through Composio MCP
+- local shell and file work inside the configured projects root
+- frontend builds and previews
+- reports, PDFs, DOCX files, and spreadsheets
+- repo scaffolding and day-to-day dev work
+- native computer-use fallback when direct routes are not enough
+
+## Routing
+
+Clicky prefers structured routes over visible UI whenever possible:
+
+- use direct answers for simple questions
+- use web search for fresh information
+- use image gallery flows for visual content
+- spawn child workers for substantial builds, research, artifact work, connected-app actions, or multi-step GUI tasks
+- keep same-context work in `sessions_send` and start new work in `sessions_spawn`
+- prefer integration routes such as GitHub via Composio MCP before falling back to browser or window automation
+- use OpenClicky's computer-use path only as the last-mile fallback for native Mac or browser actions
 
 ## Requirements
 

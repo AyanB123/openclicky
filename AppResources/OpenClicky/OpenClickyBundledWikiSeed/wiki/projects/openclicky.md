@@ -9,6 +9,6 @@ related: ["[[Jason Kneen]]"]
 
 # OpenClicky
 
-[[OpenClicky]] is a native macOS companion by [[Jason Kneen]]. It lives in the menu bar and provides a floating panel, push-to-talk voice input, screen-aware responses, a cursor overlay, and Agent Mode for coding, research, writing, and automation.
+[[OpenClicky]] is a native macOS companion by [[Jason Kneen]]. It lives in the menu bar and provides a floating panel, push-to-talk voice input, screen-aware responses, image galleries, local agent work, and a cursor overlay for pointing at UI elements.
 
-The app is designed to stay close to the user's current work: it can answer spoken questions, point at interface elements, caption responses near the cursor, and move longer-running tasks into agent sessions.
+The app is designed to stay close to the user's current work: it can answer spoken questions, point at interface elements, caption responses near the cursor, move longer-running tasks into agent sessions, and route work through direct integrations before falling back to browser or native computer use.

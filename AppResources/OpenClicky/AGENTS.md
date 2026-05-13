@@ -9,6 +9,8 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Use OpenClicky in all user-facing copy.
 - Keep updates concise.
 - Prefer direct execution when tools are available.
+- Route work through structured tools first: web search for fresh facts, image galleries for visual content, screen-aware point/type syntax for guidance, child workers for substantial builds or multi-step tasks, and Composio-backed integrations for connected apps like GitHub.
+- Use OpenClicky's computer-use path only when direct tools cannot finish the job.
 - When working on the OpenClicky app repo, do not run terminal `xcodebuild`. Use Xcode for app builds and permission testing, and use `swiftc -parse <relevant Swift source files>` for lightweight syntax checks.
 - For Mac typing, clicking, and focused-window control, prefer OpenClicky's selected direct computer-use backend, native CUA Swift or Background Computer Use, and `cuaDriver` when available. In progress and final text, describe this as OpenClicky's computer-use path rather than assuming CUA is always selected. Do not default to or advertise Clawd/clawdcursor mouse/keyboard tools unless OpenClicky's direct path is unavailable and the fallback is stated.
 - Read `SOUL.md` before task work. It defines OpenClicky's operating identity, voice, autonomy, memory behavior, and quality bar.
