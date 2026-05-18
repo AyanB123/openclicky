@@ -226,37 +226,37 @@ struct OpenClickyNotchPanelView: View {
             focusQuickPromptIfHome()
             focusExpandedAgentPromptIfNeeded()
         }
-        .onChange(of: selectedTab) { _ in
+        .onChange(of: selectedTab) {
             focusQuickPromptIfHome()
             focusExpandedAgentPromptIfNeeded()
             notifyPanelSizeChanged()
         }
-        .onChange(of: quickPromptMode) { _ in
+        .onChange(of: quickPromptMode) {
             notifyPanelSizeChanged()
         }
-        .onChange(of: quickPromptAttachments.count) { _ in
+        .onChange(of: quickPromptAttachments.count) {
             notifyPanelSizeChanged()
         }
-        .onChange(of: expandedAgentAttachments.count) { _ in
+        .onChange(of: expandedAgentAttachments.count) {
             notifyPanelSizeChanged()
         }
-        .onChange(of: companionManager.codexAgentSession.entries.count) { _ in
+        .onChange(of: companionManager.codexAgentSession.entries.count) {
             guard quickPromptMode == .chat else { return }
             notifyPanelSizeChanged()
         }
-        .onChange(of: companionManager.codexAgentSession.isTurnActiveForChatQueue) { _ in
+        .onChange(of: companionManager.codexAgentSession.isTurnActiveForChatQueue) {
             guard quickPromptMode == .chat else { return }
             notifyPanelSizeChanged()
         }
-        .onChange(of: expandedAgentSessionID) { _ in
+        .onChange(of: expandedAgentSessionID) {
             focusExpandedAgentPromptIfNeeded()
             notifyPanelSizeChanged()
         }
-        .onChange(of: agentSessionFilter) { _ in
+        .onChange(of: agentSessionFilter) {
             expandedAgentSessionID = nil
             notifyPanelSizeChanged()
         }
-        .onChange(of: gogStatus) { _ in
+        .onChange(of: gogStatus) {
             notifyPanelSizeChanged()
         }
     }
@@ -538,7 +538,7 @@ struct OpenClickyNotchPanelView: View {
                 agentSessionRows
             }
             .frame(maxHeight: maxHeight, alignment: .top)
-            .onChange(of: expandedAgentSessionID) { sessionID in
+            .onChange(of: expandedAgentSessionID) { _, sessionID in
                 guard let sessionID else { return }
                 DispatchQueue.main.async {
                     withAnimation(.easeOut(duration: 0.20)) {
@@ -878,7 +878,7 @@ struct OpenClickyNotchPanelView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(Color.white.opacity(0.08), lineWidth: 1)
             )
-            .onChange(of: companionManager.codexAgentSession.entries.count) { _ in
+            .onChange(of: companionManager.codexAgentSession.entries.count) {
                 let targetID = compactChatEntries.last?.id ?? (companionManager.codexAgentSession.isTurnActiveForChatQueue ? "compact-chat-status" : nil)
                 guard let targetID else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -1316,7 +1316,7 @@ struct OpenClickyNotchPanelView: View {
                     RoundedRectangle(cornerRadius: 15, style: .continuous)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
-                .onChange(of: session.entries.count) { _ in
+                .onChange(of: session.entries.count) {
                     let targetID = entries.last?.id ?? (session.isTurnActiveForChatQueue ? "\(session.id.uuidString)-agent-status" : nil)
                     guard let targetID else { return }
                     withAnimation(.easeOut(duration: 0.18)) {
@@ -1324,7 +1324,7 @@ struct OpenClickyNotchPanelView: View {
                     }
                     notifyPanelSizeChanged()
                 }
-                .onChange(of: session.isTurnActiveForChatQueue) { _ in
+                .onChange(of: session.isTurnActiveForChatQueue) {
                     notifyPanelSizeChanged()
                 }
             }
@@ -1757,7 +1757,7 @@ struct OpenClickyNotchPanelView: View {
         ]
     }
 
-    private static func fileURL(from item: Any?) -> URL? {
+    nonisolated private static func fileURL(from item: Any?) -> URL? {
         if let url = item as? URL {
             return url.isFileURL ? url.standardizedFileURL : nil
         }
@@ -1787,7 +1787,7 @@ struct OpenClickyNotchPanelView: View {
         return .document
     }
 
-    private static func persistDroppedImage(_ data: Data) -> URL? {
+    nonisolated private static func persistDroppedImage(_ data: Data) -> URL? {
         let directory = FileManager.default
             .homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/OpenClicky/AgentMode/DroppedAttachments", isDirectory: true)

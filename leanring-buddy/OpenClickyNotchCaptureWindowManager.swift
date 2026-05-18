@@ -121,17 +121,17 @@ final class OpenClickyNotchCaptureWindowManager {
     // point sizes; do not divide by backingScaleFactor or the content clips on
     // Retina displays.
     private static let expandedPanelWidth: CGFloat = 520
-    private static let mainPanelWidth: CGFloat = 430
+    private static let mainPanelWidth: CGFloat = 360
     private static let mainPanelHeight: CGFloat = 620
-    private static let mainPanelMinimumSize = NSSize(width: 356, height: 300)
-    private static let mainPanelMaximumSize = NSSize(width: 760, height: 820)
-    private static let statusPanelWidthScale: CGFloat = 0.20
+    private static let mainPanelMinimumSize = NSSize(width: 320, height: 300)
+    private static let mainPanelMaximumSize = NSSize(width: 620, height: 820)
+    private static let statusPanelWidthScale: CGFloat = 0.12
     private static let statusPanelHorizontalNudge: CGFloat = 0
-    private static let minimumBuiltInCollapsedPanelWidth: CGFloat = 90
-    private static let minimumVoicePanelWidth: CGFloat = 96
-    private static let minimumExternalCollapsedPanelWidth: CGFloat = 56
-    private static let maximumExternalCollapsedPanelWidth: CGFloat = 68
-    private static let maximumExpandedStatusPanelWidth: CGFloat = 128
+    private static let minimumBuiltInCollapsedPanelWidth: CGFloat = 76
+    private static let minimumVoicePanelWidth: CGFloat = 92
+    private static let minimumExternalCollapsedPanelWidth: CGFloat = 88
+    private static let maximumExternalCollapsedPanelWidth: CGFloat = 88
+    private static let maximumExpandedStatusPanelWidth: CGFloat = 112
     private static let statusLozengeHeight: CGFloat = 38
     private static let collapsedPanelHeight: CGFloat = statusLozengeHeight
     private static let expandedHandleWidth: CGFloat = 96
@@ -780,9 +780,24 @@ final class OpenClickyNotchCaptureWindowManager {
         let fullFrame = screen.frame
         let visibleFrame = screen.visibleFrame
         let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
-        let captureHeight = panel?.isVisible == true ? panel?.frame.height ?? Self.collapsedPanelHeight : Self.collapsedPanelHeight
         let x = Self.centeredX(for: size, on: screen)
-        let preferredY = screen.frame.maxY - captureHeight - Self.mainPanelGapBelowCapture - size.height
+        // Anchor the dropdown a small gap below the pill (or the menu bar if
+        // the pill is hidden). Do NOT subtract the pill height from
+        // usableFrame.maxY -- the pill sits above the menu bar (in the notch
+        // safe area on built-in displays, overlapping the menu bar on
+        // externals), so its placement already accounts for any overhang.
+        let pillBottomY: CGFloat
+        if let panel, panel.isVisible {
+            pillBottomY = panel.frame.minY
+        } else {
+            let captureSize = NSSize(
+                width: Self.collapsedPanelWidth(for: screen),
+                height: Self.collapsedPanelHeight
+            )
+            pillBottomY = Self.statusLozengeY(for: captureSize, on: screen)
+        }
+        let anchorY = min(pillBottomY, usableFrame.maxY)
+        let preferredY = anchorY - Self.mainPanelGapBelowCapture - size.height
         let minY = usableFrame.minY + Self.screenEdgePadding
         let y = max(preferredY, minY)
         return NSPoint(x: x, y: y)
@@ -860,6 +875,8 @@ final class OpenClickyNotchCaptureWindowManager {
         let fullFrame = screen.frame
         let visibleFrame = screen.visibleFrame
         let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
+        // Center the notch/status pill on the physical display, not the visible
+        // frame, so a side Dock or menu-bar reservation cannot shove it off-center.
         let centeredX = fullFrame.midX - size.width / 2 + Self.statusPanelHorizontalNudge
 
         guard size.width + (Self.screenEdgePadding * 2) > usableFrame.width else {
@@ -898,12 +915,9 @@ final class OpenClickyNotchCaptureWindowManager {
             )
         }
 
-        let visibleWidth = screen.visibleFrame.isEmpty ? screen.frame.width : screen.visibleFrame.width
-        let proportionalWidth = round(visibleWidth * 0.14 * Self.statusPanelWidthScale)
-        return min(
-            Self.maximumExternalCollapsedPanelWidth,
-            max(Self.minimumExternalCollapsedPanelWidth, proportionalWidth)
-        )
+        // External monitors: keep the persistent notch pill compact so it
+        // doesn't span too wide and truncate app names like "Ghostty".
+        return Self.maximumExternalCollapsedPanelWidth
     }
 
     private static func expandedStatusPanelWidth(for screen: NSScreen) -> CGFloat {
@@ -1336,7 +1350,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             collapsedStack.trailingAnchor.constraint(lessThanOrEqualTo: collapsedPlayIconView.leadingAnchor, constant: -4),
             collapsedStack.trailingAnchor.constraint(lessThanOrEqualTo: collapsedAgentDotsView.leadingAnchor, constant: -4),
             collapsedStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor),
-            collapsedAppNameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 46)
+            collapsedAppNameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 42)
         ])
     }
 

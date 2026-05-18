@@ -580,17 +580,20 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         let model = homeManager.model
         let reasoningEffort = homeManager.reasoningEffort
         let modelProviderID = homeManager.modelProviderID
-        let layout = try await Task.detached(priority: .userInitiated) {
-            let backgroundHomeManager = CodexHomeManager(
+
+        let preparedLayout = try await MainActor.run {
+            let hm = CodexHomeManager(
                 applicationSupportDirectory: applicationSupportDirectory,
                 workerBaseURL: workerBaseURL,
                 model: model,
                 reasoningEffort: reasoningEffort
             )
-            let preparedLayout = try backgroundHomeManager.prepare(bundle: .main)
-            let executable = try CodexRuntimeLocator.codexExecutableURL(bundle: .main)
+            return try hm.prepare(bundle: .main)
+        }
+
+        let executable = try CodexRuntimeLocator.codexExecutableURL(bundle: .main)
+        try await Task.detached(priority: .userInitiated) {
             try processManager.start(executableURL: executable, codexHome: preparedLayout.homeDirectory)
-            return preparedLayout
         }.value
 
         if !hasInitializedProcess {
@@ -600,7 +603,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
 
         try await ensureCodexAuthentication()
 
-        let baseInstructions = (try? String(contentsOf: layout.modelInstructionsFile, encoding: .utf8))
+        let baseInstructions = (try? String(contentsOf: preparedLayout.modelInstructionsFile, encoding: .utf8))
             ?? "You are OpenClicky, a friendly macOS cursor companion with Codex Agent Mode."
         let specialistContext = prependedSystemContext.trimmingCharacters(in: .whitespacesAndNewlines)
         let specialistPrefix = specialistContext.isEmpty ? "" : "\(specialistContext)\n\n--- OpenClicky base instructions ---\n"
@@ -609,15 +612,15 @@ final class CodexAgentSession: ObservableObject, Identifiable {
 
         When working on the OpenClicky app repo, do not run terminal `xcodebuild`. Use Xcode for app builds and permission testing, and use `swiftc -parse <relevant Swift source files>` for lightweight Swift syntax checks.
 
-        OpenClicky's runtime map is at \(layout.runtimeMapFile.path). Read it when the user asks about logs, storage locations, memory, skills, widgets, settings, sessions, or where OpenClicky keeps anything. You may view or edit those local files when asked, subject to normal safety rules for destructive changes, credentials, and permissions.
+        OpenClicky's runtime map is at \(preparedLayout.runtimeMapFile.path). Read it when the user asks about logs, storage locations, memory, skills, widgets, settings, sessions, or where OpenClicky keeps anything. You may view or edit those local files when asked, subject to normal safety rules for destructive changes, credentials, and permissions.
 
-        OpenClicky's persona is at \(layout.soulFile.path). Read it before task work. Treat it as the operating identity for voice-first behavior, autonomy, memory, archive-first changes, and plain-English progress.
+        OpenClicky's persona is at \(preparedLayout.soulFile.path). Read it before task work. Treat it as the operating identity for voice-first behavior, autonomy, memory, archive-first changes, and plain-English progress.
 
-        Archive-first is mandatory. When replacing, optimizing, pruning, or superseding OpenClicky memory, skills, runtime notes, prompts, config, or log-derived artifacts, copy or move the old version into \(layout.archivesDirectory.path) first. Do not delete old artifacts unless the user explicitly asks for deletion and understands it is destructive.
+        Archive-first is mandatory. When replacing, optimizing, pruning, or superseding OpenClicky memory, skills, runtime notes, prompts, config, or log-derived artifacts, copy or move the old version into \(preparedLayout.archivesDirectory.path) first. Do not delete old artifacts unless the user explicitly asks for deletion and understands it is destructive.
 
-        Persistent memory is available. Read \(layout.persistentMemoryFile.path) before task work, then update it only when useful durable context is learned. Never tell the user you cannot remember outside the current conversation; use this memory file instead.
+        Persistent memory is available. Read \(preparedLayout.persistentMemoryFile.path) before task work, then update it only when useful durable context is learned. Never tell the user you cannot remember outside the current conversation; use this memory file instead.
 
-        Learned skills live at \(layout.learnedSkillsDirectory.path). Use or update them when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Do not announce learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
+        Learned skills live at \(preparedLayout.learnedSkillsDirectory.path). Use or update them when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Do not announce learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
 
         Message logs are stored in \(OpenClickyMessageLogStore.shared.logDirectory.path). The current JSONL log is \(OpenClickyMessageLogStore.shared.currentLogFile.path). Log review comments are available at \(OpenClickyMessageLogStore.shared.agentReviewCommentsFile.path), with JSONL comments at \(OpenClickyMessageLogStore.shared.reviewCommentsFile.path). When the user asks you to fix issues discovered from logs, read those files and treat each comment as actionable review context.
 
