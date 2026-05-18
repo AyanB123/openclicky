@@ -90,8 +90,8 @@ final class CodexHUDWindowManager {
         guard let panel else { return }
         guard let visibleFrame = visibleScreenFrameForMouseOrPanel(for: panel) else { return }
 
-        let availableWidth = max(OpenClickyHUDLayout.minimumAvailableDimension, visibleFrame.width - (OpenClickyHUDLayout.screenEdgePadding * 2))
-        let availableHeight = max(OpenClickyHUDLayout.minimumAvailableDimension, visibleFrame.height - (OpenClickyHUDLayout.screenEdgePadding * 2))
+        let availableWidth = availableDimension(for: visibleFrame.width)
+        let availableHeight = availableDimension(for: visibleFrame.height)
         let minimumWidth = min(OpenClickyHUDLayout.minimumWidth, availableWidth)
         let minimumHeight = min(OpenClickyHUDLayout.minimumHeight, availableHeight)
 
@@ -122,9 +122,9 @@ final class CodexHUDWindowManager {
         let edgePadding = OpenClickyHUDLayout.screenEdgePadding
         let size = panel.frame.size
         let minX = frame.minX + edgePadding
-        let maxX = max(minX, frame.maxX - size.width - edgePadding)
+        let maxX = constrainedMaximumOrigin(maximumBoundary: frame.maxX, contentDimension: size.width, minimumOrigin: minX, edgePadding: edgePadding)
         let minY = frame.minY + edgePadding
-        let maxY = max(minY, frame.maxY - size.height - edgePadding)
+        let maxY = constrainedMaximumOrigin(maximumBoundary: frame.maxY, contentDimension: size.height, minimumOrigin: minY, edgePadding: edgePadding)
         let preferredX = frame.midX - size.width / 2
         let preferredY = frame.minY + OpenClickyHUDLayout.bottomOffset
         let x = min(max(preferredX, minX), maxX)
@@ -135,6 +135,22 @@ final class CodexHUDWindowManager {
     private func visibleScreenFrameForMouseOrPanel(for panel: NSPanel) -> NSRect? {
         let screen = NSScreen.screen(containingOrNearestTo: NSEvent.mouseLocation) ?? panel.screen
         return screen?.visibleFrame
+    }
+
+    private func availableDimension(for visibleDimension: CGFloat) -> CGFloat {
+        max(
+            OpenClickyHUDLayout.minimumAvailableDimension,
+            visibleDimension - (OpenClickyHUDLayout.screenEdgePadding * 2)
+        )
+    }
+
+    private func constrainedMaximumOrigin(
+        maximumBoundary: CGFloat,
+        contentDimension: CGFloat,
+        minimumOrigin: CGFloat,
+        edgePadding: CGFloat
+    ) -> CGFloat {
+        max(minimumOrigin, maximumBoundary - contentDimension - edgePadding)
     }
 }
 
