@@ -287,6 +287,7 @@ struct ClickyResponseCardCompactView: View {
                         .foregroundColor(DS.Colors.textPrimary)
                         .lineSpacing(4)
                         .lineLimit(nil)
+                        .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
