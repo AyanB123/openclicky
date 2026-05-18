@@ -462,7 +462,7 @@ final class ElevenLabsTTSClient {
               let channel = buffer.floatChannelData?[0] else {
             return 0
         }
-        let scale: Float = 1.0 / 32_768.0
+        let scale: Float = (1.0 / 32_768.0) * Float(AppBundleConfiguration.voicePlaybackVolume())
         for index in samples.indices {
             channel[index] = Float(samples[index]) * scale
         }

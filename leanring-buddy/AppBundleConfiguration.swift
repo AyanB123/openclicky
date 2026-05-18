@@ -21,6 +21,8 @@ nonisolated enum AppBundleConfiguration {
     static let userDeepgramTTSVoiceDefaultsKey = "openClickyDeepgramTTSVoice"
     static let userDeepgramVoiceAgentThinkModelDefaultsKey = "openClickyDeepgramVoiceAgentThinkModel"
     static let userTTSProviderDefaultsKey = "openClickyTTSProvider"
+    static let openClickyVoicePlaybackVolumeDefaultsKey = "openClickyVoicePlaybackVolume"
+    static let defaultVoicePlaybackVolume = 0.45
     static let userSpeculativePreFireDefaultsKey = "openClickySpeculativePreFireEnabled"
     static let userVoiceResponseCaptionsEnabledDefaultsKey = "openClickyVoiceResponseCaptionsEnabled"
     static let userVoiceResponseCaptionFontDefaultsKey = "openClickyVoiceResponseCaptionFont"
@@ -109,7 +111,7 @@ nonisolated enum AppBundleConfiguration {
             forKey: "ElevenLabsVoiceID",
             environmentKeys: ["ELEVENLABS_VOICE_ID"]
         ) ?? localDevelopmentEnvironmentValue(forKey: "ELEVENLABS_VOICE_ID")
-        ?? "kPzsL2i3teMYv0FxEYQ6"
+        ?? "hpp4J3VqNfWAUOO0d1Us"
     }
 
     static func cartesiaAPIKey() -> String? {
@@ -143,6 +145,16 @@ nonisolated enum AppBundleConfiguration {
     /// "cartesia", "deepgram", or "microsoft_edge".
     static func ttsProviderRaw() -> String {
         userDefaultsValue(forKey: userTTSProviderDefaultsKey) ?? "openai_realtime"
+    }
+
+    static func voicePlaybackVolume() -> Double {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: openClickyVoicePlaybackVolumeDefaultsKey) != nil else {
+            return defaultVoicePlaybackVolume
+        }
+        let volume = defaults.double(forKey: openClickyVoicePlaybackVolumeDefaultsKey)
+        guard volume.isFinite else { return defaultVoicePlaybackVolume }
+        return min(max(volume, 0.0), 1.0)
     }
 
     /// Deepgram TTS voice/model identifier. Defaults to Aura 2 Thalia

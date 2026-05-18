@@ -365,12 +365,95 @@ final class CompanionManager: ObservableObject {
         )
     }()
 
-    private lazy var deepgramTTSClient: DeepgramTTSClient = {
-        return DeepgramTTSClient(
-            apiKey: AppBundleConfiguration.deepgramAPIKey(),
-            voiceID: AppBundleConfiguration.deepgramTTSVoice()
+    private struct DeepgramTTSConfigurationSnapshot: Equatable {
+        let apiKey: String?
+        let voiceID: String
+
+        var hasAPIKey: Bool {
+            guard let apiKey else { return false }
+            return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        static func current() -> Self {
+            Self(
+                apiKey: AppBundleConfiguration.deepgramAPIKey(),
+                voiceID: AppBundleConfiguration.deepgramTTSVoice()
+            )
+        }
+    }
+
+    private var cachedDeepgramTTSClient: DeepgramTTSClient?
+    private var cachedDeepgramTTSSnapshot: DeepgramTTSConfigurationSnapshot?
+    /// Mirrors `DeepgramTTSClient.makeError(-100, "Deepgram API key is not configured")`.
+    /// Used for explicit missing-key diagnostics in `voice.response_failure_silent`.
+    private static let deepgramNotConfiguredErrorCode = -100
+
+    private var activeDeepgramTTSClient: DeepgramTTSClient {
+        getOrBuildDeepgramTTSClient(reason: "access")
+    }
+
+    @MainActor
+    private func getOrBuildDeepgramTTSClient(reason: String) -> DeepgramTTSClient {
+        let currentSnapshot = DeepgramTTSConfigurationSnapshot.current()
+        if let cachedDeepgramTTSClient, cachedDeepgramTTSSnapshot == currentSnapshot {
+            return cachedDeepgramTTSClient
+        }
+
+        let previousSnapshot = cachedDeepgramTTSSnapshot
+        cachedDeepgramTTSClient?.stopPlayback()
+        let refreshedClient = DeepgramTTSClient(
+            apiKey: currentSnapshot.apiKey,
+            voiceID: currentSnapshot.voiceID
         )
-    }()
+        cachedDeepgramTTSClient = refreshedClient
+        cachedDeepgramTTSSnapshot = currentSnapshot
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "internal",
+            event: "voice.tts_client_refreshed",
+            fields: [
+                "provider": OpenClickyTTSProvider.deepgram.rawValue,
+                "reason": previousSnapshot == nil ? "initial" : reason,
+                "keyConfigured": currentSnapshot.hasAPIKey,
+                "voiceID": currentSnapshot.voiceID,
+                "snapshotChanged": previousSnapshot != currentSnapshot
+            ]
+        )
+        return refreshedClient
+    }
+
+    @MainActor
+    private func invalidateDeepgramTTSClient(reason: String) {
+        let snapshotBeforeInvalidate = cachedDeepgramTTSSnapshot
+        let liveSnapshot = DeepgramTTSConfigurationSnapshot.current()
+        cachedDeepgramTTSClient?.stopPlayback()
+        cachedDeepgramTTSClient = nil
+        cachedDeepgramTTSSnapshot = nil
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "internal",
+            event: "voice.tts_client_invalidated",
+            fields: [
+                "provider": OpenClickyTTSProvider.deepgram.rawValue,
+                "reason": reason,
+                "keyConfigured": snapshotBeforeInvalidate?.hasAPIKey ?? liveSnapshot.hasAPIKey,
+                "voiceID": snapshotBeforeInvalidate?.voiceID ?? liveSnapshot.voiceID,
+                "snapshotSource": snapshotBeforeInvalidate == nil ? "live_defaults" : "cached_client"
+            ]
+        )
+    }
+
+    @MainActor
+    private func warmDeepgramTTSClientIfActive() {
+        guard selectedTTSProvider == .deepgram else { return }
+        // Accessing `activeDeepgramTTSClient` rebuilds only when the config
+        // snapshot changed; otherwise it returns the cached active client.
+        // In either case, warm the active client to avoid cold-start delay.
+        let currentClient = activeDeepgramTTSClient
+        currentClient.warmUpConnection()
+        FillerPhraseLibrary.shared.prepare(client: currentClient)
+    }
 
     private lazy var microsoftEdgeTTSClient: MicrosoftEdgeTTSClient = {
         return MicrosoftEdgeTTSClient(
@@ -426,7 +509,7 @@ final class CompanionManager: ObservableObject {
         case .openAIRealtime: return openAIRealtimeSpeechClient
         case .elevenLabs: return elevenLabsTTSClient
         case .cartesia:   return cartesiaTTSClient
-        case .deepgram:   return deepgramTTSClient
+        case .deepgram:   return activeDeepgramTTSClient
         case .microsoftEdge: return microsoftEdgeTTSClient
         }
     }
@@ -471,18 +554,13 @@ final class CompanionManager: ObservableObject {
         } else {
             UserDefaults.standard.set(trimmed, forKey: AppBundleConfiguration.userDeepgramTTSVoiceDefaultsKey)
         }
-        deepgramTTSClient.updateConfiguration(
-            apiKey: AppBundleConfiguration.deepgramAPIKey(),
-            voiceID: AppBundleConfiguration.deepgramTTSVoice()
-        )
+        invalidateDeepgramTTSClient(reason: "deepgram_voice_updated")
         deepgramVoiceAgentClient.updateConfiguration(
             apiKey: AppBundleConfiguration.deepgramAPIKey(),
             voiceID: AppBundleConfiguration.deepgramTTSVoice(),
             thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
         )
-        if selectedTTSProvider == .deepgram {
-            FillerPhraseLibrary.shared.prepare(client: deepgramTTSClient)
-        }
+        warmDeepgramTTSClientIfActive()
     }
 
     func setMicrosoftEdgeVoiceID(_ voiceID: String) {
@@ -512,6 +590,9 @@ final class CompanionManager: ObservableObject {
             self.voiceTTSClient.stopPlayback()
             self.selectedTTSProvider = provider
             UserDefaults.standard.set(provider.rawValue, forKey: AppBundleConfiguration.userTTSProviderDefaultsKey)
+            if provider == .deepgram {
+                self.invalidateDeepgramTTSClient(reason: "tts_provider_switched")
+            }
             self.voiceTTSClient.warmUpConnection()
             FillerPhraseLibrary.shared.prepare(client: self.voiceTTSClient)
         }
@@ -1324,15 +1405,13 @@ final class CompanionManager: ObservableObject {
     func setDeepgramAPIKey(_ apiKey: String) {
         persistOptionalSecret(apiKey, defaultsKey: AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey)
         buddyDictationManager.setTranscriptionProvider(buddyDictationManager.transcriptionProviderID)
-        deepgramTTSClient.updateConfiguration(
-            apiKey: AppBundleConfiguration.deepgramAPIKey(),
-            voiceID: AppBundleConfiguration.deepgramTTSVoice()
-        )
+        invalidateDeepgramTTSClient(reason: "deepgram_key_updated")
         deepgramVoiceAgentClient.updateConfiguration(
             apiKey: AppBundleConfiguration.deepgramAPIKey(),
             voiceID: AppBundleConfiguration.deepgramTTSVoice(),
             thinkModel: AppBundleConfiguration.deepgramVoiceAgentThinkModel()
         )
+        warmDeepgramTTSClientIfActive()
     }
 
     func setDeepgramVoiceAgentThinkModel(_ model: String) {
@@ -1674,8 +1753,7 @@ final class CompanionManager: ObservableObject {
         // fly back to the user's real pointer. Do not warp the system pointer
         // here and do not draw a duplicate primary cursor icon.
         detectedElementScreenLocation = targetPoint
-        detectedElementDisplayFrame = NSScreen.screens.first { $0.frame.contains(targetPoint) }?.frame
-            ?? NSScreen.main?.frame
+        detectedElementDisplayFrame = NSScreen.screen(containingOrNearestTo: targetPoint)?.frame
             ?? CGRect(origin: targetPoint, size: .zero)
         detectedElementBubbleText = caption?.trimmingCharacters(in: .whitespacesAndNewlines)
         detectedElementReturnsImmediately = false
@@ -1736,8 +1814,7 @@ final class CompanionManager: ObservableObject {
 
     private func agentDockSpawnProxyTargetPoint(from startPoint: CGPoint) -> CGPoint {
         let screen = agentDockTargetScreen()
-            ?? NSScreen.screens.first(where: { $0.frame.contains(startPoint) })
-            ?? NSScreen.main
+            ?? NSScreen.screen(containingOrNearestTo: startPoint)
 
         guard let screen else { return startPoint }
 
@@ -1788,22 +1865,11 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func clampedExternalCursorPoint(_ point: CGPoint) -> CGPoint {
-        guard !NSScreen.screens.isEmpty else { return point }
-        let unionFrame = NSScreen.screens.reduce(CGRect.null) { partial, screen in
-            partial.union(screen.frame)
-        }
-        guard !unionFrame.isNull else { return point }
-        return CGPoint(
-            x: min(max(point.x, unionFrame.minX), unionFrame.maxX - 1),
-            y: min(max(point.y, unionFrame.minY), unionFrame.maxY - 1)
-        )
+        NSScreen.pointClampedToDesktop(point)
     }
 
     private static func quartzCursorPoint(fromAppKitScreenPoint point: CGPoint) -> CGPoint {
-        let targetScreen = NSScreen.screens.first { $0.frame.contains(point) }
-            ?? NSScreen.screens.min { lhs, rhs in
-                distanceSquared(from: point, to: lhs.frame) < distanceSquared(from: point, to: rhs.frame)
-            }
+        let targetScreen = NSScreen.screen(containingOrNearestTo: point)
         guard let frame = targetScreen?.frame else { return point }
 
         // Public bridge coordinates use AppKit/NSEvent space (global desktop,
@@ -1813,14 +1879,6 @@ final class CompanionManager: ObservableObject {
         let localY = point.y - frame.minY
         let quartzY = frame.minY + (frame.height - localY)
         return CGPoint(x: point.x, y: quartzY)
-    }
-
-    private static func distanceSquared(from point: CGPoint, to rect: CGRect) -> CGFloat {
-        let clampedX = min(max(point.x, rect.minX), rect.maxX)
-        let clampedY = min(max(point.y, rect.minY), rect.maxY)
-        let dx = point.x - clampedX
-        let dy = point.y - clampedY
-        return dx * dx + dy * dy
     }
 
     private func clearExternalPrimaryCaption() {
@@ -7262,6 +7320,11 @@ final class CompanionManager: ObservableObject {
     private static func isLikelyAgentToolWorkInstruction(_ instruction: String) -> Bool {
         let normalized = normalizedSpokenCommandText(instruction)
         let toolWorkSignals = [
+            "github",
+            "issue",
+            "issues",
+            "pull request",
+            "pr",
             "desktop",
             "download",
             "downloads",
@@ -7286,6 +7349,10 @@ final class CompanionManager: ObservableObject {
             "audit",
             "look at",
             "take a look",
+            "research",
+            "summarize",
+            "summary",
+            "slider",
             "find",
             "search"
         ]
@@ -7983,12 +8050,13 @@ final class CompanionManager: ObservableObject {
             || isReferentialAgentWorkFollowUp(transcript)
     }
 
-    private static func implicitAgentTaskInstruction(from transcript: String) -> String? {
+    static func implicitAgentTaskInstruction(from transcript: String) -> String? {
         let candidate = normalizedAgentTaskInstruction(from: transcript)
         let normalized = normalizedSpokenCommandText(candidate)
         guard wordCount(in: normalized) >= 3 else { return nil }
         guard !isMetaAgentRoutingQuestion(candidate) else { return nil }
         guard !isLikelyPureConversation(candidate) else { return nil }
+        guard !isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
 
         let hasAction = containsAgentWorkAction(normalized)
         let hasToolContext = isLikelyAgentToolWorkInstruction(candidate)
@@ -8026,13 +8094,31 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func containsDurableWorkTarget(_ normalized: String) -> Bool {
-        let targetPattern = #"\b(?:openclicky|clicky|repo|repository|codebase|project|app|settings|preference|preferences|log|logs|memory|skill|skills|desktop|download|downloads|document|documents|folder|folders|file|files|code|diff|git|branch|pull\s+request|issue|bug|test|tests|build|swift|xcode|email|gmail|calendar|spreadsheet|sheet|doc|slides)\b"#
+        let targetPattern = #"\b(?:openclicky|clicky|github|repo|repository|codebase|project|app|settings|preference|preferences|log|logs|memory|skill|skills|desktop|download|downloads|document|documents|folder|folders|file|files|code|diff|git|branch|pull\s+request|pr|issue|issues|bug|test|tests|build|swift|xcode|email|gmail|calendar|spreadsheet|sheet|doc|slides)\b"#
         return normalized.range(of: targetPattern, options: .regularExpression) != nil
     }
 
     private static func containsFreshResearchRequest(_ normalized: String) -> Bool {
         let researchPattern = #"\b(?:latest|live|price|news|weather|schedule|standings|research|look\s+up|search\s+(?:the\s+)?web|google|browse)\b"#
         return normalized.range(of: researchPattern, options: .regularExpression) != nil
+    }
+
+    private static func isSensitiveOrDestructiveAgentTaskRequest(_ normalized: String) -> Bool {
+        let destructivePattern = #"\b(?:delete|remove|erase|wipe|destroy|drop|revoke|reset|nuke|clear|purge|uninstall|terminate|kill)\b"#
+        let broadScopePattern = #"\b(?:all|everything|entire|whole)\b"#
+        let destructiveTargetPattern = #"\b(?:file|files|folder|folders|directory|directories|repo|repository|branch|branches|commit|commits|tag|tags|history|database|databases|keychain|account|accounts)\b"#
+        let sensitiveTargetsPattern = #"\b(?:account|accounts|credential|credentials|password|passwords|token|tokens|api\s*key|secret|secrets|permission|permissions|auth|ssh|private\s+key|keychain|database|databases|prod|production|system\s+settings)\b"#
+
+        let hasDestructiveVerb = normalized.range(of: destructivePattern, options: .regularExpression) != nil
+        let hasBroadScope = normalized.range(of: broadScopePattern, options: .regularExpression) != nil
+        let hasDestructiveTarget = normalized.range(of: destructiveTargetPattern, options: .regularExpression) != nil
+        let hasSensitiveTarget = normalized.range(of: sensitiveTargetsPattern, options: .regularExpression) != nil
+
+        // Safety policy:
+        // - credential/permission/auth targets are always confirmation-worthy.
+        // - destructive verbs are confirmation-worthy when aimed at a destructive target
+        //   or broad-scope operation.
+        return hasSensitiveTarget || (hasDestructiveVerb && (hasBroadScope || hasDestructiveTarget))
     }
 
     private static func isLikelyDirectLocalOnlyRequest(_ transcript: String) -> Bool {
@@ -8109,7 +8195,7 @@ final class CompanionManager: ObservableObject {
     private static func hasAgentWorkVerbAndArtifact(_ transcript: String) -> Bool {
         let normalized = normalizedSpokenCommandText(transcript)
         let workVerbPattern = #"\b(?:create|make|build|update|change|edit|fix|design|redesign|open|show|preview|pull\s+up|find|save|export|write|review|test|run|stop)\b"#
-        let artifactPattern = #"\b(?:form|page|site|website|app|file|document|report|code|repo|repository|folder|version|style|design|panel|overlay|status|progress|comments|thinking|calls)\b"#
+        let artifactPattern = #"\b(?:form|page|site|website|app|file|document|report|code|repo|repository|github|issue|issues|pull\s+request|pr|folder|version|style|design|panel|overlay|status|progress|comments|thinking|calls|ui|volume|slider|control)\b"#
         return normalized.range(of: workVerbPattern, options: .regularExpression) != nil
             && normalized.range(of: artifactPattern, options: .regularExpression) != nil
     }
@@ -10407,12 +10493,12 @@ final class CompanionManager: ObservableObject {
 
     private func agentDockTargetScreen() -> NSScreen? {
         let mouseLocation = NSEvent.mouseLocation
-        return NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+        return NSScreen.screen(containingOrNearestTo: mouseLocation)
     }
 
     func pointAtPermissionDragAssistant() {
         let mouseLocation = NSEvent.mouseLocation
-        let targetScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+        let targetScreen = NSScreen.screen(containingOrNearestTo: mouseLocation)
         guard let targetScreen else { return }
 
         let visibleFrame = targetScreen.visibleFrame
@@ -10427,7 +10513,7 @@ final class CompanionManager: ObservableObject {
 
     private func showAgentDockWindowNearCurrentScreen() {
         let mouseLocation = NSEvent.mouseLocation
-        let targetScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main
+        let targetScreen = NSScreen.screen(containingOrNearestTo: mouseLocation)
         guard let targetScreen else { return }
         agentDockWindowManager.show(
             companionManager: self,
@@ -10851,11 +10937,16 @@ final class CompanionManager: ObservableObject {
 
             do {
                 OpenClickyApplicationUsageLogStore.shared.recordFrontmostApplication(source: "voice_question")
+                let historyForAPI = self.voiceConversationHistoryForAPI()
+
                 // Only attach screenshots when the utterance actually needs
                 // visual context. Text-only turns should not pay the capture,
                 // base64, upload, and vision-processing latency tax.
                 let captureStartedAt = Date()
-                let shouldAttachScreenContext = Self.shouldAttachScreenContext(to: transcript)
+                let shouldAttachScreenContext = Self.shouldAttachScreenContext(
+                    to: transcript,
+                    recentConversationHistory: historyForAPI
+                )
                 let screenCaptures: [CompanionScreenCapture]
                 if shouldAttachScreenContext {
                     screenCaptures = try await captureAllScreensForVoiceResponseIfAvailable()
@@ -10892,9 +10983,6 @@ final class CompanionManager: ObservableObject {
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
                 }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = self.voiceConversationHistoryForAPI()
 
                 let userPromptForClaude: String
                 if labeledImages.isEmpty {
@@ -11802,7 +11890,12 @@ final class CompanionManager: ObservableObject {
         return false
     }
 
-    private static func shouldAttachScreenContext(to transcript: String) -> Bool {
+    private static let visualFollowUpHistoryDepth = 3
+
+    private static func shouldAttachScreenContext(
+        to transcript: String,
+        recentConversationHistory: [(userPlaceholder: String, assistantResponse: String)] = []
+    ) -> Bool {
         let normalized = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
@@ -11815,7 +11908,9 @@ final class CompanionManager: ObservableObject {
             "this window", "that window", "current window", "active window",
             "this app", "that app", "this page", "that page", "this button", "that button",
             "this field", "that field", "this menu", "that menu",
-            "where is", "where's", "point to", "show me where", "highlight",
+            "where is", "where's", "point to", "show me where", "highlight", "logo",
+            "layout", "spacing", "padding", "margin", "margins", "green symbol",
+            "green mark",
             "click", "press", "select", "open this", "open that"
         ]
         if explicitVisualPhrases.contains(where: { normalized.contains($0) || commandText.contains($0) }) {
@@ -11825,10 +11920,37 @@ final class CompanionManager: ObservableObject {
         let visualTokens: Set<String> = [
             "screen", "window", "button", "field", "menu", "dialog", "popup",
             "page", "tab", "cursor", "visible", "shown", "displayed", "image",
-            "screenshot", "icon", "link", "sidebar", "toolbar", "dock"
+            "screenshot", "icon", "link", "sidebar", "toolbar", "dock", "logo",
+            "layout", "spacing", "padding", "margin", "margins", "size", "sized",
+            "left", "right", "top", "bottom", "symbol", "mark", "green"
         ]
         let tokens = commandText.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         if tokens.contains(where: { visualTokens.contains($0) }) { return true }
+
+        let visualFollowUps: Set<String> = [
+            "how about now",
+            "what about now",
+            "try again",
+            "check again",
+            "look again",
+            "can you try again",
+            "can you check again",
+            "can you look again"
+        ]
+        if visualFollowUps.contains(commandText),
+           recentConversationHistory
+           .suffix(visualFollowUpHistoryDepth)
+           .contains(where: { turn in
+               let recentText = "\(turn.userPlaceholder) \(turn.assistantResponse)"
+                   .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                   .lowercased()
+               return explicitVisualPhrases.contains(where: recentText.contains)
+                   || recentText
+                   .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                   .contains(where: { visualTokens.contains(String($0)) })
+           }) {
+            return true
+        }
 
         return false
     }
@@ -12117,14 +12239,16 @@ final class CompanionManager: ObservableObject {
         guard !Self.isExpectedCancellation(error) else { return }
         let message = userFacingResponseFailureMessage(for: error)
         print("⚠️ Voice response failure (silent — no system-voice fallback): \(message)")
+        var fields: [String: Any] = [
+            "error": error.localizedDescription,
+            "message": message
+        ]
+        fields.merge(ttsFailureDiagnosticFields(for: error), uniquingKeysWith: { _, new in new })
         OpenClickyMessageLogStore.shared.append(
             lane: "voice",
             direction: "incoming",
             event: "voice.response_failure_silent",
-            fields: [
-                "error": error.localizedDescription,
-                "message": message
-            ]
+            fields: fields
         )
         latestVoiceResponseCard = ClickyResponseCard(
             source: .voice,
@@ -12162,11 +12286,44 @@ final class CompanionManager: ObservableObject {
             return "Claude returned an error. Check the app log for the exact response."
         case "ElevenLabsTTS":
             return "Voice playback failed, but the Claude response completed. Check the app log for the TTS error."
+        case "DeepgramTTS":
+            if nsError.code == Self.deepgramNotConfiguredErrorCode {
+                return "Deepgram is not configured. Add a Deepgram API key in Settings."
+            }
+            return "Deepgram voice playback failed. Check the app log for the TTS error."
         case "CompanionScreenCapture":
             return "Screen capture failed. Grant Screen Recording to this exact app, then quit and reopen."
         default:
             return "Something went wrong. Check the app log for the exact error."
         }
+    }
+
+    private func ttsFailureDiagnosticFields(for error: Error) -> [String: Any] {
+        let nsError = error as NSError
+        var fields: [String: Any] = [
+            "ttsProvider": selectedTTSProvider.rawValue
+        ]
+
+        if selectedTTSProvider == .deepgram || nsError.domain == "DeepgramTTS" {
+            let currentSnapshot = DeepgramTTSConfigurationSnapshot.current()
+            fields["deepgramKeyConfigured"] = currentSnapshot.hasAPIKey
+            fields["deepgramVoiceID"] = currentSnapshot.voiceID
+            fields["deepgramSnapshotMatchesClient"] = (cachedDeepgramTTSSnapshot == currentSnapshot)
+
+            if nsError.domain == "DeepgramTTS", nsError.code == Self.deepgramNotConfiguredErrorCode {
+                fields["ttsFailureKind"] = currentSnapshot.hasAPIKey ? "stale_client" : "missing_key"
+            } else if nsError.domain == "DeepgramTTS" {
+                fields["ttsFailureKind"] = "playback_failure"
+            } else {
+                fields["ttsFailureKind"] = "unknown"
+            }
+            return fields
+        }
+
+        if nsError.domain == "ElevenLabsTTS" || nsError.domain == "CartesiaTTS" {
+            fields["ttsFailureKind"] = "playback_failure"
+        }
+        return fields
     }
 
     // MARK: - Point Tag Parsing
@@ -12609,7 +12766,7 @@ final class CompanionManager: ObservableObject {
     #if DEBUG
     func debugTestCursorFlight() {
         ensureCursorOverlayVisibleForAgentTask()
-        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screen = NSScreen.screen(containingOrNearestTo: NSEvent.mouseLocation)
         guard let screen else { return }
 
         detectedElementScreenLocation = CGPoint(x: screen.frame.midX, y: screen.frame.midY)
@@ -12617,7 +12774,7 @@ final class CompanionManager: ObservableObject {
         detectedElementBubbleText = "Developer test"
         latestVoiceResponseCard = ClickyResponseCard(
             source: .voice,
-            rawText: "Developer cursor flight test armed at the center of the main screen.",
+            rawText: "Developer cursor flight test armed at the center of the cursor screen.",
             contextTitle: "Developer"
         )
     }
@@ -12767,7 +12924,7 @@ final class ClickyTextModeWindowManager {
     private func positionPanel(near cursorLocation: CGPoint) {
         guard let panel else { return }
 
-        let targetScreen = NSScreen.screens.first { $0.frame.contains(cursorLocation) } ?? NSScreen.main
+        let targetScreen = NSScreen.screen(containingOrNearestTo: cursorLocation)
         let visibleFrame = targetScreen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
         let proposedOrigin = CGPoint(
             x: cursorLocation.x + 18,
@@ -12784,7 +12941,7 @@ final class ClickyTextModeWindowManager {
     private func positionPanel(at origin: CGPoint) {
         guard let panel else { return }
 
-        let targetScreen = NSScreen.screens.first { $0.frame.contains(origin) } ?? NSScreen.main
+        let targetScreen = NSScreen.screen(containingOrNearestTo: origin)
         let visibleFrame = targetScreen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
         let clampedOrigin = CGPoint(
             x: min(max(origin.x, visibleFrame.minX + 10), visibleFrame.maxX - panelSize.width - 10),

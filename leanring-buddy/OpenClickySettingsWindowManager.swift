@@ -156,6 +156,7 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userDeepgramVoiceAgentThinkModelDefaultsKey) private var userDeepgramVoiceAgentThinkModel = "gpt-4o-mini"
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionsEnabledDefaultsKey) private var voiceResponseCaptionsEnabled = false
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionFontDefaultsKey) private var voiceResponseCaptionFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.openClickyVoicePlaybackVolumeDefaultsKey) private var openClickyVoicePlaybackVolume = AppBundleConfiguration.voicePlaybackVolume()
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
     @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
     @AppStorage(AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey) private var userDeepgramAPIKey = ""
@@ -562,6 +563,26 @@ struct OpenClickySettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 4)
+                }
+
+                editableFieldRow(
+                    title: "OpenClicky volume",
+                    subtitle: "Controls spoken reply playback without changing macOS system volume.",
+                    systemImageName: "speaker.wave.2"
+                ) {
+                    HStack(spacing: 10) {
+                        Slider(
+                            value: Binding(
+                                get: { openClickyVoicePlaybackVolume },
+                                set: { openClickyVoicePlaybackVolume = min(max($0, 0.0), 1.0) }
+                            ),
+                            in: 0...1
+                        )
+                        Text("\(Int((openClickyVoicePlaybackVolume * 100).rounded()))%")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 42, alignment: .trailing)
+                    }
                 }
 
                 switch companionManager.selectedTTSProvider {
