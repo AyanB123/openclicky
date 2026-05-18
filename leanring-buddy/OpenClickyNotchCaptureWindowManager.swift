@@ -99,6 +99,9 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainPanel: OpenClickyNotchCapturePanel?
     private var contentView: OpenClickyNotchCaptureRootView?
     private var mainHostingView: NSHostingView<OpenClickyNotchPanelView>?
+    private var mainPanelGlobalClickMonitor: Any?
+    private var mainPanelLocalClickMonitor: Any?
+    private var isMainPanelPinned = false
     private var activeMode: ActiveMode?
     private var persistentAccentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
     private var persistentSubmitText: ((String) -> Void)?
@@ -112,6 +115,8 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let mainPanelHeight: CGFloat = 620
     private static let collapsedPanelWidth: CGFloat = 188
     private static let collapsedPanelHeight: CGFloat = 18
+    private static let expandedHandleWidth: CGFloat = 96
+    private static let expandedHandleHeight: CGFloat = 10
     private static let textPanelHeight: CGFloat = 226
     private static let voicePanelHeight: CGFloat = 64
     private static let topGap: CGFloat = 0
@@ -175,8 +180,13 @@ final class OpenClickyNotchCaptureWindowManager {
 
     func hide() {
         panel?.orderOut(nil)
-        mainPanel?.orderOut(nil)
+        hideMainPanel()
         activeMode = nil
+    }
+
+    private func hideMainPanel() {
+        mainPanel?.orderOut(nil)
+        removeMainPanelClickOutsideMonitors()
     }
 
     private func collapseToPill(accentColor: NSColor, submitText: @escaping (String) -> Void) {
@@ -206,18 +216,32 @@ final class OpenClickyNotchCaptureWindowManager {
         contentView?.focusTextField()
     }
 
+    func showMainInterfacePanel(companionManager: CompanionManager) {
+        showMainPanel(companionManager: companionManager)
+    }
+
     private func showMainPanel(companionManager: CompanionManager) {
         ensureMainPanel()
         let notchPanelView = OpenClickyNotchPanelView(
             companionManager: companionManager,
-            isPanelPinned: false,
-            setPanelPinned: { _ in }
+            isPanelPinned: isMainPanelPinned,
+            setPanelPinned: { [weak self] isPinned in
+                self?.setMainPanelPinned(isPinned)
+            },
+            closePanel: { [weak self] in
+                self?.hideMainPanel()
+            }
         )
         let hostingView = NSHostingView(rootView: notchPanelView)
         hostingView.frame = NSRect(x: 0, y: 0, width: Self.mainPanelWidth, height: Self.mainPanelHeight)
         hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        hostingView.layer?.cornerRadius = 28
+        hostingView.layer?.masksToBounds = true
+        if #available(macOS 10.15, *) {
+            hostingView.layer?.cornerCurve = .continuous
+        }
         mainPanel?.contentView = hostingView
         mainHostingView = hostingView
         showMainPanelWindow(activating: true, width: Self.mainPanelWidth, height: Self.mainPanelHeight)
@@ -243,6 +267,65 @@ final class OpenClickyNotchCaptureWindowManager {
             mainPanel?.orderFrontRegardless()
         }
         mainPanel?.orderFrontRegardless()
+        installMainPanelClickOutsideMonitors()
+    }
+
+    private func setMainPanelPinned(_ isPinned: Bool) {
+        guard isMainPanelPinned != isPinned else { return }
+        isMainPanelPinned = isPinned
+
+        if isPinned {
+            removeMainPanelClickOutsideMonitors()
+            mainPanel?.makeKeyAndOrderFront(nil)
+            mainPanel?.orderFrontRegardless()
+        } else if mainPanel?.isVisible == true {
+            installMainPanelClickOutsideMonitors()
+        }
+    }
+
+    private func installMainPanelClickOutsideMonitors() {
+        removeMainPanelClickOutsideMonitors()
+        guard !isMainPanelPinned else { return }
+
+        mainPanelGlobalClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.dismissMainPanelIfClickIsOutside()
+            }
+        }
+
+        mainPanelLocalClickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.dismissMainPanelIfClickIsOutside()
+            }
+            return event
+        }
+    }
+
+    private func removeMainPanelClickOutsideMonitors() {
+        if let monitor = mainPanelGlobalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            mainPanelGlobalClickMonitor = nil
+        }
+        if let monitor = mainPanelLocalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            mainPanelLocalClickMonitor = nil
+        }
+    }
+
+    private func dismissMainPanelIfClickIsOutside() {
+        guard !isMainPanelPinned, let mainPanel, mainPanel.isVisible else { return }
+        let clickLocation = NSEvent.mouseLocation
+        if mainPanel.frame.contains(clickLocation) {
+            return
+        }
+        if let panel, panel.isVisible, panel.frame.contains(clickLocation) {
+            return
+        }
+        hideMainPanel()
     }
 
     private func ensurePanel() {
@@ -335,14 +418,8 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func positionPanel(size: NSSize) {
         guard let panel, let screen = Self.preferredAnchorScreen() else { return }
-        let fullFrame = screen.frame
-        let visibleFrame = screen.visibleFrame
-        let topEdge = fullFrame.maxY
-        let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
-        let unclampedX = fullFrame.midX - size.width / 2
-        let maxX = usableFrame.maxX - size.width - Self.screenEdgePadding
-        let x = min(max(unclampedX, usableFrame.minX + Self.screenEdgePadding), maxX)
-        let y = topEdge - size.height - Self.topGap
+        let x = Self.centeredX(for: size, on: screen)
+        let y = screen.frame.maxY - size.height - Self.topGap
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
@@ -350,16 +427,28 @@ final class OpenClickyNotchCaptureWindowManager {
         guard let mainPanel, let screen = Self.preferredAnchorScreen() else { return }
         let fullFrame = screen.frame
         let visibleFrame = screen.visibleFrame
-        let topEdge = fullFrame.maxY
         let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
         let captureHeight = panel?.isVisible == true ? panel?.frame.height ?? Self.collapsedPanelHeight : Self.collapsedPanelHeight
-        let unclampedX = fullFrame.midX - size.width / 2
-        let maxX = usableFrame.maxX - size.width - Self.screenEdgePadding
-        let x = min(max(unclampedX, usableFrame.minX + Self.screenEdgePadding), maxX)
-        let preferredY = topEdge - captureHeight - Self.mainPanelGapBelowCapture - size.height
+        let x = Self.centeredX(for: size, on: screen)
+        let preferredY = screen.frame.maxY - captureHeight - Self.mainPanelGapBelowCapture - size.height
         let minY = usableFrame.minY + Self.screenEdgePadding
         let y = max(preferredY, minY)
         mainPanel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private static func centeredX(for size: NSSize, on screen: NSScreen) -> CGFloat {
+        let fullFrame = screen.frame
+        let visibleFrame = screen.visibleFrame
+        let usableFrame = visibleFrame.isEmpty ? fullFrame : visibleFrame
+        let centeredX = fullFrame.midX - size.width / 2
+
+        guard size.width + (Self.screenEdgePadding * 2) > usableFrame.width else {
+            return centeredX
+        }
+
+        let minX = usableFrame.minX + Self.screenEdgePadding
+        let maxX = usableFrame.maxX - size.width - Self.screenEdgePadding
+        return min(max(centeredX, minX), maxX)
     }
 
     private static func voicePanelWidth(for screen: NSScreen?) -> CGFloat {
@@ -370,8 +459,20 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private static func preferredAnchorScreen() -> NSScreen? {
         let screens = NSScreen.screens
-        if screens.count > 1, let main = NSScreen.main {
-            return main
+
+        if let keyWindow = NSApp.keyWindow,
+           !(keyWindow is OpenClickyNotchCapturePanel),
+           let keyWindowScreen = keyWindow.screen {
+            return keyWindowScreen
+        }
+        if let mainWindow = NSApp.mainWindow,
+           !(mainWindow is OpenClickyNotchCapturePanel),
+           let mainWindowScreen = mainWindow.screen {
+            return mainWindowScreen
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        if let screenUnderPointer = screens.first(where: { $0.frame.contains(mouseLocation) }) {
+            return screenUnderPointer
         }
         if let main = NSScreen.main {
             return main
@@ -540,10 +641,9 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellView.translatesAutoresizingMaskIntoConstraints = false
         shellView.fillColor = NSColor(calibratedRed: 0.025, green: 0.036, blue: 0.032, alpha: 0.96)
         shellView.borderColor = NSColor.white.withAlphaComponent(0.085)
-        shellView.shadow = NSShadow()
-        shellView.shadow?.shadowBlurRadius = 16
-        shellView.shadow?.shadowOffset = NSSize(width: 0, height: -8)
-        shellView.shadow?.shadowColor = NSColor.black.withAlphaComponent(0.46)
+        shellView.roundedShadowColor = NSColor.black.withAlphaComponent(0.46)
+        shellView.roundedShadowBlurRadius = 16
+        shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
         addSubview(shellView)
 
         configureTextStack()
@@ -915,13 +1015,17 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
 private final class OpenClickyRoundedView: NSView {
     var fillColor: NSColor = .clear { didSet { needsDisplay = true } }
     var borderColor: NSColor = .clear { didSet { needsDisplay = true } }
-    var cornerRadius: CGFloat { didSet { needsDisplay = true } }
+    var cornerRadius: CGFloat { didSet { updateLayerShape(); needsDisplay = true } }
+    var roundedShadowColor: NSColor? { didSet { updateLayerShape() } }
+    var roundedShadowBlurRadius: CGFloat = 0 { didSet { updateLayerShape() } }
+    var roundedShadowOffset: NSSize = .zero { didSet { updateLayerShape() } }
 
     init(cornerRadius: CGFloat) {
         self.cornerRadius = cornerRadius
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
+        updateLayerShape()
     }
 
     required init?(coder: NSCoder) {
@@ -929,9 +1033,15 @@ private final class OpenClickyRoundedView: NSView {
         super.init(coder: coder)
         wantsLayer = true
         layer?.masksToBounds = false
+        updateLayerShape()
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func layout() {
+        super.layout()
+        updateLayerShape()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: cornerRadius, yRadius: cornerRadius)
@@ -941,6 +1051,32 @@ private final class OpenClickyRoundedView: NSView {
             borderColor.setStroke()
             path.lineWidth = 1
             path.stroke()
+        }
+    }
+
+    private func updateLayerShape() {
+        guard let layer else { return }
+        layer.backgroundColor = NSColor.clear.cgColor
+        layer.cornerRadius = cornerRadius
+        layer.masksToBounds = false
+        if #available(macOS 10.15, *) {
+            layer.cornerCurve = .continuous
+        }
+
+        if let roundedShadowColor {
+            layer.shadowColor = roundedShadowColor.cgColor
+            layer.shadowOpacity = Float(roundedShadowColor.alphaComponent)
+            layer.shadowRadius = roundedShadowBlurRadius
+            layer.shadowOffset = roundedShadowOffset
+            layer.shadowPath = CGPath(
+                roundedRect: bounds,
+                cornerWidth: cornerRadius,
+                cornerHeight: cornerRadius,
+                transform: nil
+            )
+        } else {
+            layer.shadowOpacity = 0
+            layer.shadowPath = nil
         }
     }
 }

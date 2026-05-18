@@ -18,14 +18,30 @@ struct OpenClickyNotchPanelView: View {
     @State private var isShowingHatchSheet = false
     @State private var hatchPetName = ""
     @State private var hatchPetDescription = ""
+    @State private var isPanelPinned: Bool
 
-    let isPanelPinned: Bool
     let setPanelPinned: (Bool) -> Void
+    let closePanel: () -> Void
 
     @State private var selectedTab: OpenClickyNotchTab = .home
+    @State private var quickPromptMode: OpenClickyQuickPromptMode = .ask
     @State private var quickPrompt: String = ""
     @State private var gogStatus: OpenClickyGogCLIStatus = .unknown
     @State private var hasLoadedGogStatus = false
+
+    init(
+        companionManager: CompanionManager,
+        isPanelPinned: Bool,
+        setPanelPinned: @escaping (Bool) -> Void,
+        closePanel: @escaping () -> Void = {
+            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+        }
+    ) {
+        self.companionManager = companionManager
+        self.setPanelPinned = setPanelPinned
+        self.closePanel = closePanel
+        _isPanelPinned = State(initialValue: isPanelPinned)
+    }
 
     private var activeVoiceLabel: String {
         switch companionManager.voiceState {
@@ -63,7 +79,7 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var visibleAgentSessions: [CodexAgentSession] {
-        Array(companionManager.codexAgentSessions.prefix(4))
+        Array(companionManager.codexAgentSessions)
     }
 
     private var runningAgentCount: Int {
@@ -178,7 +194,6 @@ struct OpenClickyNotchPanelView: View {
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
                         .stroke(Color.white.opacity(0.11), lineWidth: 1)
                 )
-                .shadow(color: Color.black.opacity(0.55), radius: 30, x: 0, y: 22)
         )
         .overlay(alignment: .top) {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -193,6 +208,9 @@ struct OpenClickyNotchPanelView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 1)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .shadow(color: Color.black.opacity(0.55), radius: 30, x: 0, y: 22)
     }
 
     private var topStatusRail: some View {
@@ -217,7 +235,7 @@ struct OpenClickyNotchPanelView: View {
 
     private var tabStrip: some View {
         HStack(spacing: 6) {
-            ForEach(OpenClickyNotchTab.allCases) { tab in
+            ForEach(OpenClickyNotchTab.primaryTabs) { tab in
                 Button {
                     withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
                         selectedTab = tab
@@ -243,45 +261,79 @@ struct OpenClickyNotchPanelView: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            panelChromeButton(
+                systemImageName: selectedTab == .settings ? "gearshape.fill" : "gearshape",
+                accessibilityLabel: "Open OpenClicky panel settings"
+            ) {
+                withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+                    selectedTab = .settings
+                }
+            }
+
+            panelChromeButton(
+                systemImageName: isPanelPinned ? "pin.slash.fill" : "pin.fill",
+                accessibilityLabel: isPanelPinned ? "Unpin OpenClicky panel" : "Pin OpenClicky panel"
+            ) {
+                let nextValue = !isPanelPinned
+                isPanelPinned = nextValue
+                setPanelPinned(nextValue)
+            }
+
+            panelChromeButton(
+                systemImageName: "xmark",
+                accessibilityLabel: "Close OpenClicky panel",
+                action: closePanel
+            )
         }
+    }
+
+    private func panelChromeButton(systemImageName: String, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImageName)
+                .font(.system(size: 10, weight: .heavy))
+                .foregroundColor(DS.Colors.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(0.055))
+                )
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var homeTab: some View {
         VStack(spacing: 12) {
             OpenClickyNotchHeroCard(
-                title: "Ask from anywhere",
-                subtitle: "Menu-bar notch surface, existing fast voice stack, local agent handoff.",
-                systemImageName: "sparkles",
+                title: quickPromptMode.title,
+                subtitle: quickPromptMode.subtitle,
+                systemImageName: quickPromptMode.systemImageName,
                 accent: DS.Colors.accentText
             ) {
                 VStack(spacing: 9) {
                     quickPromptField
                     HStack(spacing: 8) {
-                        primaryActionButton(title: "Ask", systemImageName: "paperplane.fill") {
-                            submitQuickPrompt()
-                        }
-                        secondaryActionButton(title: "Text", systemImageName: "text.cursor") {
-                            companionManager.showQuickTextInputFromMenuBar()
-                        }
-                        secondaryActionButton(title: "Agent", systemImageName: "terminal.fill") {
+                        quickPromptModeButton(.ask)
+                        quickPromptModeButton(.agent)
+                        secondaryActionButton(title: "Chat", systemImageName: "bubble.left.and.bubble.right.fill") {
                             companionManager.showCodexHUD()
                         }
                     }
                 }
             }
 
-            cursorBuddySection
-            if shouldShowCursorColorSection {
-                cursorColorSection
-            }
-
-            activationShortcutRow
+            topStatusRail
         }
     }
 
     private var agentsTab: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
                 OpenClickyNotchMetricCard(
                     title: "Sessions",
                     value: "\(companionManager.codexAgentSessions.count)",
@@ -298,22 +350,26 @@ struct OpenClickyNotchPanelView: View {
                 )
             }
 
-            VStack(spacing: 7) {
-                if visibleAgentSessions.isEmpty {
-                    OpenClickyNotchEmptyState(
-                        systemImageName: "terminal",
-                        title: "No agent sessions yet",
-                        subtitle: "Start one from the notch or open the full HUD."
-                    )
-                } else {
-                    ForEach(visibleAgentSessions) { session in
-                        agentRow(session)
+            if visibleAgentSessions.isEmpty {
+                OpenClickyNotchEmptyState(
+                    systemImageName: "terminal",
+                    title: "No agent sessions yet",
+                    subtitle: "Start one from the notch or open the full HUD."
+                )
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 6) {
+                        ForEach(visibleAgentSessions) { session in
+                            agentRow(session)
+                        }
                     }
+                    .padding(.trailing, 2)
                 }
+                .frame(maxHeight: 224)
             }
 
             HStack(spacing: 8) {
-                primaryActionButton(title: "Open HUD", systemImageName: "macwindow.on.rectangle") {
+                primaryActionButton(title: "Open Chat", systemImageName: "macwindow.on.rectangle") {
                     companionManager.showCodexHUD()
                 }
                 secondaryActionButton(title: "New prompt", systemImageName: "plus.message.fill") {
@@ -325,7 +381,6 @@ struct OpenClickyNotchPanelView: View {
 
     private var connectionsTab: some View {
         VStack(spacing: 10) {
-            activationShortcutRow
             OpenClickyNotchEmptyState(
                 systemImageName: "point.3.connected.trianglepath.dotted",
                 title: "Connections stay local",
@@ -341,29 +396,40 @@ struct OpenClickyNotchPanelView: View {
         VStack(spacing: 10) {
             cursorBuddySection
             cursorColorSection
-            activationShortcutRow
 
-            HStack(spacing: 8) {
-                primaryActionButton(title: "Full settings", systemImageName: "gearshape.fill") {
-                    companionManager.showSettingsWindow()
-                }
-                secondaryActionButton(title: isPanelPinned ? "Unpin" : "Pin", systemImageName: isPanelPinned ? "pin.slash.fill" : "pin.fill") {
-                    setPanelPinned(!isPanelPinned)
-                }
+            primaryActionButton(title: "Full settings", systemImageName: "gearshape.fill") {
+                companionManager.showSettingsWindow()
             }
         }
     }
 
     private var quickPromptField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "text.bubble.fill")
+            Image(systemName: quickPromptMode.fieldSystemImageName)
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(DS.Colors.accentText)
-            TextField("Ask OpenClicky…", text: $quickPrompt)
+            TextField(quickPromptMode.placeholder, text: $quickPrompt)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(DS.Colors.textPrimary)
                 .onSubmit(submitQuickPrompt)
+            Button(action: submitQuickPrompt) {
+                HStack(spacing: 5) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 10, weight: .black))
+                    Text("Send")
+                        .font(.system(size: 11, weight: .heavy))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(LinearGradient(colors: [DS.Colors.accent, DS.Colors.accentHover], startPoint: .topLeading, endPoint: .bottomTrailing))
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Send Ask from Anywhere prompt")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -372,6 +438,21 @@ struct OpenClickyNotchPanelView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func quickPromptModeButton(_ mode: OpenClickyQuickPromptMode) -> some View {
+        let action = {
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.86)) {
+                quickPromptMode = mode
+            }
+        }
+
+        if quickPromptMode == mode {
+            primaryActionButton(title: mode.buttonTitle, systemImageName: mode.buttonSystemImageName, action: action)
+        } else {
+            secondaryActionButton(title: mode.buttonTitle, systemImageName: mode.buttonSystemImageName, action: action)
+        }
     }
 
     private var currentCursorAvatarStyle: ClickyCursorAvatarStyle {
@@ -456,23 +537,6 @@ struct OpenClickyNotchPanelView: View {
                 }
             }
         }
-    }
-
-    private var activationShortcutRow: some View {
-        HStack(spacing: 9) {
-            Image(systemName: companionManager.isActivationShortcutEnabled ? "keyboard.badge.eye" : "keyboard.badge.ellipsis")
-                .font(.system(size: 12, weight: .heavy))
-                .foregroundColor(DS.Colors.textOnAccent)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(DS.Colors.accent))
-            Text(companionManager.isActivationShortcutEnabled ? "Activation key on" : "Activation key off")
-                .font(.system(size: 12, weight: .heavy))
-                .foregroundColor(DS.Colors.textSecondary)
-            Spacer()
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.055)))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
     }
 
     private var emptyBuddiesHintTile: some View {
@@ -788,10 +852,31 @@ struct OpenClickyNotchPanelView: View {
         .buttonStyle(.plain)
     }
 
-    private func submitQuickPrompt() {
+    private func submitQuickAskPrompt() {
         let trimmedPrompt = quickPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else {
             companionManager.showQuickTextInputFromMenuBar()
+            return
+        }
+
+        quickPrompt = ""
+        companionManager.submitTextPrompt(trimmedPrompt)
+    }
+
+    private func submitQuickPrompt() {
+        switch quickPromptMode {
+        case .ask:
+            submitQuickAskPrompt()
+        case .agent:
+            submitQuickAgentPrompt()
+        }
+    }
+
+    private func submitQuickAgentPrompt() {
+        let trimmedPrompt = quickPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else {
+            selectedTab = .agents
+            notifyPanelSizeChanged()
             return
         }
 
@@ -832,6 +917,8 @@ private enum OpenClickyNotchTab: String, CaseIterable, Identifiable {
     case connections
     case settings
 
+    static let primaryTabs: [OpenClickyNotchTab] = [.home, .agents, .connections]
+
     var id: String { rawValue }
 
     var title: String {
@@ -849,6 +936,62 @@ private enum OpenClickyNotchTab: String, CaseIterable, Identifiable {
         case .agents: return "terminal.fill"
         case .connections: return "point.3.connected.trianglepath.dotted"
         case .settings: return "slider.horizontal.3"
+        }
+    }
+}
+
+private enum OpenClickyQuickPromptMode: Equatable {
+    case ask
+    case agent
+
+    var title: String {
+        switch self {
+        case .ask: return "Ask from anywhere"
+        case .agent: return "Task an agent"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .ask:
+            return "Menu-bar notch surface, existing fast voice stack, and quick local answers."
+        case .agent:
+            return "Write the task here, then press Return to launch an OpenClicky background agent."
+        }
+    }
+
+    var systemImageName: String {
+        switch self {
+        case .ask: return "sparkles"
+        case .agent: return "terminal.fill"
+        }
+    }
+
+    var fieldSystemImageName: String {
+        switch self {
+        case .ask: return "text.bubble.fill"
+        case .agent: return "terminal.fill"
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .ask: return "Ask OpenClicky…"
+        case .agent: return "Task an agent…"
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .ask: return "Ask"
+        case .agent: return "Agent"
+        }
+    }
+
+    var buttonSystemImageName: String {
+        switch self {
+        case .ask: return "paperplane.fill"
+        case .agent: return "terminal.fill"
         }
     }
 }
@@ -939,33 +1082,40 @@ private struct OpenClickyNotchMetricCard: View {
     let systemImageName: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: systemImageName)
-                    .font(.system(size: 12, weight: .black))
+                    .font(.system(size: 11, weight: .black))
                     .foregroundColor(color)
-                Spacer()
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 9, weight: .black))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .textCase(.uppercase)
-                Text(value)
-                    .font(.system(size: 15, weight: .black))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .lineLimit(1)
-                Text(detail)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(DS.Colors.textSecondary)
-                    .lineLimit(2)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(color.opacity(0.13)))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text(value)
+                            .font(.system(size: 16, weight: .black))
+                            .foregroundColor(DS.Colors.textPrimary)
+                            .lineLimit(1)
+                        Text(title)
+                            .font(.system(size: 9, weight: .black))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .textCase(.uppercase)
+                            .lineLimit(1)
+                    }
+                    Text(detail)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(11)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white.opacity(0.052)))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.052)))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(color.opacity(0.18), lineWidth: 1)
         )
     }

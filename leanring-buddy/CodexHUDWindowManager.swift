@@ -168,7 +168,6 @@ struct CodexHUDView: View {
     var close: () -> Void
     var chromeMode: ChromeMode = .standalone
     @State private var prompt = ""
-    @State private var hiddenOverlayDockItemID: UUID?
     @State private var expandedCommandGroupIDs: Set<String> = []
     @State private var droppedAttachments: [HUDDraftAttachment] = []
     @State private var isDropTargeted = false
@@ -179,46 +178,13 @@ struct CodexHUDView: View {
     }
 
     private var activeDockItem: ClickyAgentDockItem? {
-        companionManager.agentDockItems
-            .reversed()
-            .first {
-                $0.sessionID == session.id &&
-                $0.id != hiddenOverlayDockItemID
-            }
+        companionManager.agentDockItems.last { $0.sessionID == session.id }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if chromeMode == .standalone { header }
             agentTeamStrip
-            if let item = activeDockItem {
-                ClickyAgentDockHoverCard(
-                    item: item,
-                    canOpenDashboard: false,
-                    chat: {},
-                    text: {
-                        companionManager.showTextFollowUpForAgentDockItem(item.id)
-                    },
-                    voice: {
-                        companionManager.prepareVoiceFollowUpForAgentDockItem(item.id)
-                    },
-                    close: {
-                        hiddenOverlayDockItemID = item.id
-                    },
-                    stop: {
-                        companionManager.stopAgentDockItem(item.id)
-                    },
-                    dismiss: {
-                        companionManager.dismissAgentDockItem(item.id)
-                    },
-                    runSuggestedAction: { actionTitle in
-                        companionManager.runSuggestedNextAction(actionTitle, forAgentDockItem: item.id)
-                    }
-                )
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-            }
             if !session.queuedFollowUpPrompts.isEmpty {
                 queuedFollowUpDrawer
                     .padding(.horizontal, 10)
@@ -278,9 +244,6 @@ struct CodexHUDView: View {
         .animation(.easeOut(duration: DS.Animation.fast), value: isDropTargeted)
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
             timestampNow = now
-        }
-        .onChange(of: session.id) {
-            hiddenOverlayDockItemID = nil
         }
     }
 

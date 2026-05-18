@@ -172,7 +172,7 @@ final class MenuBarPanelManager: NSObject {
                 hidePanel()
             }
         } else {
-            showPanel()
+            showMainInterfacePanel()
         }
     }
 
@@ -260,6 +260,15 @@ final class MenuBarPanelManager: NSObject {
     // MARK: - Panel Lifecycle
 
     private func showPanel() {
+        showMainInterfacePanel()
+    }
+
+    private func showMainInterfacePanel() {
+        hidePanel()
+        companionManager.notchCaptureWindowManager.showMainInterfacePanel(companionManager: companionManager)
+    }
+
+    private func showLegacyStatusItemPanel() {
         let isCreatingPanel = panel == nil
         if panel == nil {
             createPanel()
