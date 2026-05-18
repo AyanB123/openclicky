@@ -10070,11 +10070,16 @@ final class CompanionManager: ObservableObject {
 
             do {
                 OpenClickyApplicationUsageLogStore.shared.recordFrontmostApplication(source: "voice_question")
+                let historyForAPI = self.voiceConversationHistoryForAPI()
+
                 // Only attach screenshots when the utterance actually needs
                 // visual context. Text-only turns should not pay the capture,
                 // base64, upload, and vision-processing latency tax.
                 let captureStartedAt = Date()
-                let shouldAttachScreenContext = Self.shouldAttachScreenContext(to: transcript)
+                let shouldAttachScreenContext = Self.shouldAttachScreenContext(
+                    to: transcript,
+                    recentConversationHistory: historyForAPI
+                )
                 let screenCaptures: [CompanionScreenCapture]
                 if shouldAttachScreenContext {
                     screenCaptures = try await captureAllScreensForVoiceResponseIfAvailable()
@@ -10111,9 +10116,6 @@ final class CompanionManager: ObservableObject {
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
                 }
-
-                // Pass conversation history so Claude remembers prior exchanges
-                let historyForAPI = self.voiceConversationHistoryForAPI()
 
                 let userPromptForClaude: String
                 if labeledImages.isEmpty {
@@ -11011,7 +11013,10 @@ final class CompanionManager: ObservableObject {
         return false
     }
 
-    private static func shouldAttachScreenContext(to transcript: String) -> Bool {
+    private static func shouldAttachScreenContext(
+        to transcript: String,
+        recentConversationHistory: [(userPlaceholder: String, assistantResponse: String)] = []
+    ) -> Bool {
         let normalized = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
@@ -11024,7 +11029,9 @@ final class CompanionManager: ObservableObject {
             "this window", "that window", "current window", "active window",
             "this app", "that app", "this page", "that page", "this button", "that button",
             "this field", "that field", "this menu", "that menu",
-            "where is", "where's", "point to", "show me where", "highlight",
+            "where is", "where's", "point to", "show me where", "highlight", "logo",
+            "layout", "spacing", "padding", "margin", "margins", "green symbol",
+            "green mark",
             "click", "press", "select", "open this", "open that"
         ]
         if explicitVisualPhrases.contains(where: { normalized.contains($0) || commandText.contains($0) }) {
@@ -11034,10 +11041,37 @@ final class CompanionManager: ObservableObject {
         let visualTokens: Set<String> = [
             "screen", "window", "button", "field", "menu", "dialog", "popup",
             "page", "tab", "cursor", "visible", "shown", "displayed", "image",
-            "screenshot", "icon", "link", "sidebar", "toolbar", "dock"
+            "screenshot", "icon", "link", "sidebar", "toolbar", "dock", "logo",
+            "layout", "spacing", "padding", "margin", "margins", "size", "sized",
+            "left", "right", "top", "bottom", "symbol", "mark", "green"
         ]
         let tokens = commandText.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         if tokens.contains(where: { visualTokens.contains($0) }) { return true }
+
+        let visualFollowUps: Set<String> = [
+            "how about now",
+            "what about now",
+            "try again",
+            "check again",
+            "look again",
+            "can you try again",
+            "can you check again",
+            "can you look again"
+        ]
+        if visualFollowUps.contains(commandText),
+           recentConversationHistory
+           .suffix(3)
+           .contains(where: { turn in
+               let recentText = "\(turn.userPlaceholder) \(turn.assistantResponse)"
+                   .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                   .lowercased()
+               return explicitVisualPhrases.contains(where: recentText.contains)
+                   || recentText
+                   .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                   .contains(where: { visualTokens.contains(String($0)) })
+           }) {
+            return true
+        }
 
         return false
     }
