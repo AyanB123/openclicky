@@ -108,6 +108,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private var isMainPanelUserResizing = false
     private var mainPanelUserPreferredSize: NSSize?
     private var mainPanelPreferredContentHeight: CGFloat?
+    private var mainPanelCurrentMinimumSize = OpenClickyNotchCaptureWindowManager.mainPanelMinimumSize
     private var isMainPanelPinned = false
     private var activeMode: ActiveMode?
     private var persistentAccentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
@@ -215,6 +216,7 @@ final class OpenClickyNotchCaptureWindowManager {
                 if let preferredHeight {
                     self?.mainPanelPreferredContentHeight = preferredHeight
                 }
+                self?.refreshMainPanelMinimumSize(preferredHeight: preferredHeight)
                 self?.resizeVisibleMainPanelToCurrentContent(animated: true)
             }
         }
@@ -488,7 +490,8 @@ final class OpenClickyNotchCaptureWindowManager {
                 userInfo: ["isResizing": false]
             )
             self?.mainPanelUserPreferredSize = self?.constrainedMainPanelSize(size)
-            self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
+            let constrainedSize = self?.constrainedMainPanelSize(size) ?? size
+            self?.mainHostingView?.frame = NSRect(origin: .zero, size: constrainedSize)
             self?.mainHostingView?.needsLayout = true
         }
         resizeContainer.addSubview(hostingView)
@@ -728,8 +731,8 @@ final class OpenClickyNotchCaptureWindowManager {
         interfacePanel.isMovableByWindowBackground = true
         interfacePanel.titleVisibility = .hidden
         interfacePanel.titlebarAppearsTransparent = true
-        interfacePanel.minSize = Self.mainPanelMinimumSize
-        interfacePanel.contentMinSize = Self.mainPanelMinimumSize
+        interfacePanel.minSize = mainPanelCurrentMinimumSize
+        interfacePanel.contentMinSize = mainPanelCurrentMinimumSize
         interfacePanel.maxSize = Self.mainPanelMaximumSize
         interfacePanel.contentMaxSize = Self.mainPanelMaximumSize
 
@@ -958,9 +961,9 @@ final class OpenClickyNotchCaptureWindowManager {
         }
 
         guard let fittingHeight = mainHostingView?.fittingSize.height, fittingHeight > 0 else {
-            return NSSize(width: Self.mainPanelWidth, height: Self.mainPanelHeight)
+            return constrainedMainPanelSize(NSSize(width: Self.mainPanelWidth, height: Self.mainPanelHeight))
         }
-        let height = min(max(ceil(fittingHeight), Self.mainPanelMinimumSize.height), Self.mainPanelMaximumHeight)
+        let height = min(max(ceil(fittingHeight), mainPanelCurrentMinimumSize.height), Self.mainPanelMaximumHeight)
         return NSSize(width: width, height: height)
     }
 
@@ -980,9 +983,20 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func constrainedMainPanelSize(_ size: NSSize) -> NSSize {
         NSSize(
-            width: min(max(size.width, Self.mainPanelMinimumSize.width), Self.mainPanelMaximumSize.width),
-            height: min(max(size.height, Self.mainPanelMinimumSize.height), Self.mainPanelMaximumSize.height)
+            width: min(max(size.width, mainPanelCurrentMinimumSize.width), Self.mainPanelMaximumSize.width),
+            height: min(max(size.height, mainPanelCurrentMinimumSize.height), Self.mainPanelMaximumSize.height)
         )
+    }
+
+    private func refreshMainPanelMinimumSize(preferredHeight: CGFloat?) {
+        let minimumHeight = min(
+            max((preferredHeight ?? Self.mainPanelMinimumSize.height).rounded(.up), Self.mainPanelMinimumSize.height),
+            Self.mainPanelMaximumSize.height
+        )
+        mainPanelCurrentMinimumSize = NSSize(width: Self.mainPanelMinimumSize.width, height: minimumHeight)
+        guard let mainPanel else { return }
+        mainPanel.minSize = mainPanelCurrentMinimumSize
+        mainPanel.contentMinSize = mainPanelCurrentMinimumSize
     }
 
     private func applyMainPanelResizeBehavior() {
@@ -1003,8 +1017,8 @@ final class OpenClickyNotchCaptureWindowManager {
         mainPanel.titleVisibility = .hidden
         mainPanel.titlebarAppearsTransparent = true
         hideMainPanelWindowControls()
-        mainPanel.minSize = Self.mainPanelMinimumSize
-        mainPanel.contentMinSize = Self.mainPanelMinimumSize
+        mainPanel.minSize = mainPanelCurrentMinimumSize
+        mainPanel.contentMinSize = mainPanelCurrentMinimumSize
         mainPanel.maxSize = Self.mainPanelMaximumSize
         mainPanel.contentMaxSize = Self.mainPanelMaximumSize
         if let contentView = mainPanel.contentView {

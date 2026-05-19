@@ -455,10 +455,13 @@ struct OpenClickyNotchPanelView: View {
             if !quickPromptAttachments.isEmpty {
                 return 430
             }
-            return 340
+            if hasHomeConversationActivity {
+                return 340
+            }
+            return 560
         case .agents:
             if expandedAgentSessionID != nil {
-                return 700
+                return hasExpandedAgentChatExpansionRoom ? 760 : 700
             }
             return agentPanelSelection == .specialists ? 430 : 500
         case .connections:
@@ -1961,7 +1964,7 @@ struct OpenClickyNotchPanelView: View {
                     }
                     .padding(9)
                 }
-                .frame(maxHeight: 170)
+                .frame(minHeight: expandedAgentConversationMinHeight, maxHeight: expandedAgentConversationMaxHeight)
                 .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.black.opacity(0.22)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 15, style: .continuous)
@@ -1982,6 +1985,18 @@ struct OpenClickyNotchPanelView: View {
 
             agentReplyField(for: session)
         }
+    }
+
+    private var hasExpandedAgentChatExpansionRoom: Bool {
+        visibleAgentSessions.count <= 2
+    }
+
+    private var expandedAgentConversationMinHeight: CGFloat {
+        hasExpandedAgentChatExpansionRoom ? 340 : 170
+    }
+
+    private var expandedAgentConversationMaxHeight: CGFloat {
+        hasExpandedAgentChatExpansionRoom ? 420 : 220
     }
 
     private func agentReplyField(for session: CodexAgentSession) -> some View {
@@ -2064,7 +2079,7 @@ struct OpenClickyNotchPanelView: View {
             displayEntry.text = compactChatDisplayText(from: entry.text)
             return displayEntry.text.isEmpty ? nil : displayEntry
         }
-        return Array(visibleEntries.suffix(6))
+        return Array(visibleEntries.suffix(hasExpandedAgentChatExpansionRoom ? 14 : 6))
     }
 
     private func submitExpandedAgentPromptFromKeyboard(to session: CodexAgentSession) {
