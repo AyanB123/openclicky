@@ -307,6 +307,8 @@ final class CompanionManager: ObservableObject {
     let wikiViewerPanelManager = WikiViewerPanelManager()
     @Published private(set) var bundledKnowledgeIndex = WikiManager.Index.empty
     @Published private(set) var latestVoiceResponseCard: ClickyResponseCard?
+    @Published private(set) var homeChatEntries: [CodexTranscriptEntry] = []
+    @Published private(set) var isHomeChatModeActive = false
     @Published private(set) var handoffQueue: [HandoffQueuedRegionScreenshot] = []
     @Published private(set) var agentDockItems: [ClickyAgentDockItem] = []
     // Response text is now displayed inline on the cursor overlay via
@@ -666,6 +668,74 @@ final class CompanionManager: ObservableObject {
     private static let activeVoiceConversationHistoryLimit = 8
     private static let compactedVoiceConversationArchiveCharacterLimit = 2_400
 
+    func setHomeChatModeActive(_ isActive: Bool, source: String) {
+        guard isHomeChatModeActive != isActive else { return }
+        isHomeChatModeActive = isActive
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "internal",
+            event: "openclicky.home_chat.mode_changed",
+            fields: [
+                "source": source,
+                "isActive": isActive
+            ]
+        )
+    }
+
+    func submitHomeChatPromptFromUI(_ prompt: String, source: String = "open_clicky_panel_chat") {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+        setHomeChatModeActive(true, source: source)
+        submitHomeChatPromptToAskAgent(trimmedPrompt, source: source)
+    }
+
+    @discardableResult
+    private func submitHomeChatVoiceTranscriptIfNeeded(_ transcript: String, source: String) -> Bool {
+        guard isHomeChatModeActive else { return false }
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return false }
+        submitHomeChatPromptToAskAgent(trimmedTranscript, source: source)
+        return true
+    }
+
+    private func submitHomeChatPromptToAskAgent(_ prompt: String, source: String) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+        let session = codexAgentSession
+        OpenClickyMessageLogStore.shared.append(
+            lane: "agent",
+            direction: "incoming",
+            event: "openclicky.home_chat.ask_agent_prompt",
+            fields: [
+                "source": source,
+                "sessionID": session.id.uuidString,
+                "title": session.title,
+                "instructionLength": trimmedPrompt.count
+            ]
+        )
+        if session.isTurnActiveForChatQueue {
+            session.submitPromptFromUI(trimmedPrompt, screenContext: nil)
+        } else {
+            stageDashboardAgentSubmission(prompt: trimmedPrompt, session: session)
+            submitAgentPrompt(trimmedPrompt, to: session)
+        }
+    }
+
+    private func appendHomeChatEntry(role: CodexTranscriptEntry.Role, text: String) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+        if let last = homeChatEntries.last,
+           last.role == role,
+           Self.normalizedSpokenCommandText(last.text) == Self.normalizedSpokenCommandText(trimmedText),
+           Date().timeIntervalSince(last.createdAt) < 4 {
+            return
+        }
+        homeChatEntries.append(CodexTranscriptEntry(role: role, text: trimmedText))
+        if homeChatEntries.count > 24 {
+            homeChatEntries.removeFirst(homeChatEntries.count - 24)
+        }
+    }
+
     private func rememberVoiceExchange(userTranscript: String, assistantResponse: String, reason: String) {
         let trimmedUserTranscript = userTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAssistantResponse = assistantResponse.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -689,6 +759,9 @@ final class CompanionManager: ObservableObject {
                 ]
             )
         }
+
+        appendHomeChatEntry(role: .user, text: trimmedUserTranscript)
+        appendHomeChatEntry(role: .assistant, text: trimmedAssistantResponse)
 
         conversationHistory.append((
             userTranscript: trimmedUserTranscript,
@@ -814,6 +887,7 @@ final class CompanionManager: ObservableObject {
 
         lastVoiceUserTranscript = trimmedTranscript
         lastVoiceUserTranscriptAt = Date()
+        appendHomeChatEntry(role: .user, text: trimmedTranscript)
 
         OpenClickyMessageLogStore.shared.append(
             lane: "voice",
@@ -2418,7 +2492,15 @@ final class CompanionManager: ObservableObject {
     /// are preserved; the sidebar groups archived sessions under a separate header.
     func archiveSession(_ sessionID: UUID) {
         guard let session = codexAgentSessions.first(where: { $0.id == sessionID }) else { return }
-        guard !Self.isSteerableAgentStatus(session.status), !session.isTurnActiveForChatQueue else {
+        let isActivelyRunning: Bool = {
+            switch session.status {
+            case .starting, .running:
+                return true
+            case .stopped, .ready, .failed:
+                return false
+            }
+        }()
+        guard !isActivelyRunning, !session.isTurnActiveForChatQueue else {
             OpenClickyMessageLogStore.shared.append(
                 lane: "agent",
                 direction: "incoming",
@@ -2909,7 +2991,7 @@ final class CompanionManager: ObservableObject {
             OpenClickyMessageLogStore.shared.append(
                 lane: "voice",
                 direction: "internal",
-                event: "voice.realtime_bidirectional.barge_in",
+                event: "voice.realtime_bidirectional.start_deferred",
                 fields: [
                     "source": source,
                     "speechModel": selectedModel,
@@ -2919,10 +3001,10 @@ final class CompanionManager: ObservableObject {
                     "ttsPlaying": voiceTTSClient.isPlaying,
                     "openAIRealtimePlaying": openAIRealtimeSpeechClient.isPlaying,
                     "deepgramVoiceAgentPlaying": deepgramVoiceAgentClient.isPlaying,
-                    "reason": "new_capture_interrupts_previous_response"
+                    "reason": "previous_voice_turn_still_speaking"
                 ]
             )
-            interruptCurrentVoiceResponse()
+            return
         } else if voiceState == .processing {
             OpenClickyMessageLogStore.shared.append(
                 lane: "voice",
@@ -3213,6 +3295,10 @@ final class CompanionManager: ObservableObject {
             ]
         )
 
+        if submitHomeChatVoiceTranscriptIfNeeded(trimmedTranscript, source: "realtime_home_chat") {
+            return true
+        }
+
         if routeFinalVoiceTranscriptActionIfNeeded(
             trimmedTranscript,
             source: "realtime_voice",
@@ -3294,6 +3380,10 @@ final class CompanionManager: ObservableObject {
         speculativeStabilityDwellTask = nil
         lastObservedPartial = nil
         lastObservedPartialAt = nil
+
+        if submitHomeChatVoiceTranscriptIfNeeded(finalTranscript, source: "voice_home_chat") {
+            return
+        }
 
         if routeFinalVoiceTranscriptActionIfNeeded(
             finalTranscript,

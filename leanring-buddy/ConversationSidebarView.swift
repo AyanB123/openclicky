@@ -167,41 +167,50 @@ struct ConversationSidebarView: View {
 
   private func row(session: CodexAgentSession, isArchived: Bool) -> some View {
     let isActive = session.id == companion.activeCodexAgentSessionID
-    return Button(action: { companion.selectCodexAgentSession(session.id) }) {
-      HStack(spacing: 8) {
-        Text(session.title)
-          .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .regular))
-          .foregroundColor(isActive ? Self.textPrimary : Self.textPrimary.opacity(0.85))
-          .lineLimit(1)
-        Spacer()
-        if isArchived {
-          Button(action: { companion.unarchiveSession(session.id) }) {
-            Image(systemName: "tray.and.arrow.up")
-              .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
-              .foregroundColor(Self.textSecondary)
-          }
-          .buttonStyle(.plain)
-          .help("Unarchive")
-        } else {
-          Button(action: { companion.archiveSession(session.id) }) {
-            Image(systemName: "archivebox")
-              .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
-              .foregroundColor(Self.textSecondary)
-          }
-          .buttonStyle(.plain)
-          .help("Archive")
+    return HStack(spacing: 0) {
+      Button(action: { companion.selectCodexAgentSession(session.id) }) {
+        HStack(spacing: 8) {
+          Text(session.title)
+            .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .regular))
+            .foregroundColor(isActive ? Self.textPrimary : Self.textPrimary.opacity(0.85))
+            .lineLimit(1)
+          Spacer()
         }
+        .contentShape(Rectangle())
+        .padding(.leading, 10)
+        .padding(.vertical, 7)
       }
-      .padding(.horizontal, 10)
-      .padding(.vertical, 7)
-      .background(
-        RoundedRectangle(cornerRadius: 7, style: .continuous)
-          .fill(isActive ? Self.activeRow : Color.clear)
-      )
-      .padding(.horizontal, 6)
+      .buttonStyle(.plain)
+      .help(session.title)
+
+      if isArchived {
+        Button(action: { companion.unarchiveSession(session.id) }) {
+          Image(systemName: "tray.and.arrow.up")
+            .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
+            .foregroundColor(Self.textSecondary)
+            .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help("Unarchive")
+        .accessibilityLabel("Unarchive \(session.title)")
+      } else {
+        Button(action: { companion.archiveSession(session.id) }) {
+          Image(systemName: "archivebox")
+            .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
+            .foregroundColor(Self.textSecondary)
+            .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help("Archive")
+        .accessibilityLabel("Archive \(session.title)")
+      }
     }
-    .buttonStyle(.plain)
-    .help(session.title)
+    .padding(.trailing, 8)
+    .background(
+      RoundedRectangle(cornerRadius: 7, style: .continuous)
+        .fill(isActive ? Self.activeRow : Color.clear)
+    )
+    .padding(.horizontal, 6)
   }
 
   private var footer: some View {

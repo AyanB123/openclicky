@@ -20,8 +20,8 @@ struct ClickyCodexConfigTemplate: Equatable {
         modelInstructionsFileName: String = "OpenClickyModelInstructions.md",
         bundledSkillsDirectoryName: String = "OpenClickyBundledSkills",
         learnedSkillsDirectoryName: String = "OpenClickyLearnedSkills",
-        includeOpenAIDeveloperDocsMCP: Bool = true,
-        cuaDriverMCPCommand: String? = CuaDriverMCPConfiguration.resolvedCommandPath()
+        includeOpenAIDeveloperDocsMCP: Bool = false,
+        cuaDriverMCPCommand: String? = nil
     ) {
         self.model = model
         self.reasoningEffort = reasoningEffort

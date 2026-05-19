@@ -18,6 +18,7 @@ extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
     static let clickyShowPanel = Notification.Name("clickyShowPanel")
     static let clickyPanelContentSizeDidChange = Notification.Name("clickyPanelContentSizeDidChange")
+    static let clickyMainPanelResizeStateDidChange = Notification.Name("clickyMainPanelResizeStateDidChange")
 }
 
 /// Custom NSPanel subclass that can become the key window even with

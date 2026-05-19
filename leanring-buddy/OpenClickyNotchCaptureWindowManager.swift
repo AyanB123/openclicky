@@ -107,6 +107,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainPanelContentSizeObserver: NSObjectProtocol?
     private var isMainPanelUserResizing = false
     private var mainPanelUserPreferredSize: NSSize?
+    private var mainPanelPreferredContentHeight: CGFloat?
     private var isMainPanelPinned = false
     private var activeMode: ActiveMode?
     private var persistentAccentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
@@ -135,7 +136,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let expandedPanelWidth: CGFloat = 520
     private static let mainPanelWidth: CGFloat = 475
     private static let mainPanelHeight: CGFloat = 620
-    private static let mainPanelMinimumSize = NSSize(width: 320, height: 300)
+    private static let mainPanelMinimumSize = NSSize(width: 475, height: 340)
     private static let mainPanelMaximumSize = NSSize(width: 620, height: 820)
     private static let statusPanelWidthScale: CGFloat = 0.12
     private static let statusPanelHorizontalNudge: CGFloat = 0
@@ -208,8 +209,12 @@ final class OpenClickyNotchCaptureWindowManager {
             forName: .clickyPanelContentSizeDidChange,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let preferredHeight = Self.mainPanelPreferredHeight(from: notification)
             Task { @MainActor [weak self] in
+                if let preferredHeight {
+                    self?.mainPanelPreferredContentHeight = preferredHeight
+                }
                 self?.resizeVisibleMainPanelToCurrentContent(animated: true)
             }
         }
@@ -454,6 +459,7 @@ final class OpenClickyNotchCaptureWindowManager {
         hostingView.frame = NSRect(origin: .zero, size: initialSize)
         hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
+        hostingView.layerContentsRedrawPolicy = .duringViewResize
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.cornerRadius = 28
         hostingView.layer?.masksToBounds = true
@@ -465,14 +471,22 @@ final class OpenClickyNotchCaptureWindowManager {
         resizeContainer.isResizeEnabled = { true }
         resizeContainer.onResizeBegan = { [weak self] in
             self?.isMainPanelUserResizing = true
+            NotificationCenter.default.post(
+                name: .clickyMainPanelResizeStateDidChange,
+                object: nil,
+                userInfo: ["isResizing": true]
+            )
         }
         resizeContainer.onResizeFrameChanged = { [weak self] size in
             self?.mainPanelUserPreferredSize = self?.constrainedMainPanelSize(size)
-            self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
-            self?.mainHostingView?.needsLayout = true
         }
         resizeContainer.onResizeEnded = { [weak self] size in
             self?.isMainPanelUserResizing = false
+            NotificationCenter.default.post(
+                name: .clickyMainPanelResizeStateDidChange,
+                object: nil,
+                userInfo: ["isResizing": false]
+            )
             self?.mainPanelUserPreferredSize = self?.constrainedMainPanelSize(size)
             self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
             self?.mainHostingView?.needsLayout = true
@@ -933,6 +947,12 @@ final class OpenClickyNotchCaptureWindowManager {
         if isMainPanelPinned, let mainPanel {
             return constrainedMainPanelSize(mainPanel.frame.size)
         }
+        let width = mainPanelUserPreferredSize?.width ?? Self.mainPanelWidth
+
+        if let mainPanelPreferredContentHeight {
+            return constrainedMainPanelSize(NSSize(width: width, height: mainPanelPreferredContentHeight))
+        }
+
         if let mainPanelUserPreferredSize {
             return constrainedMainPanelSize(mainPanelUserPreferredSize)
         }
@@ -941,7 +961,21 @@ final class OpenClickyNotchCaptureWindowManager {
             return NSSize(width: Self.mainPanelWidth, height: Self.mainPanelHeight)
         }
         let height = min(max(ceil(fittingHeight), Self.mainPanelMinimumSize.height), Self.mainPanelMaximumHeight)
-        return NSSize(width: Self.mainPanelWidth, height: height)
+        return NSSize(width: width, height: height)
+    }
+
+    private static func mainPanelPreferredHeight(from notification: Notification) -> CGFloat? {
+        let value = notification.userInfo?["preferredPanelHeight"]
+        if let preferredHeight = value as? CGFloat {
+            return preferredHeight
+        }
+        if let preferredHeight = value as? Double {
+            return CGFloat(preferredHeight)
+        }
+        if let preferredHeight = value as? NSNumber {
+            return CGFloat(truncating: preferredHeight)
+        }
+        return nil
     }
 
     private func constrainedMainPanelSize(_ size: NSSize) -> NSSize {
@@ -2610,9 +2644,10 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
     private(set) var isUserResizing = false
 
     private let edgeHitWidth: CGFloat = 18
+    private let topResizeHitHeight: CGFloat = 8
     private let cornerHitLength: CGFloat = 40
     private let bottomRightHitSize: CGFloat = 58
-    private let topDragHitHeight: CGFloat = 18
+    private let topDragHitHeight: CGFloat = 42
     private let resizeHandleView = OpenClickyMainPanelResizeHandleView(frame: .zero)
     private var activeEdges: ResizeEdges = []
     private var dragStartMouseLocation: NSPoint = .zero
@@ -2631,6 +2666,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
 
     private func commonInit() {
         wantsLayer = true
+        layerContentsRedrawPolicy = .duringViewResize
         addSubview(resizeHandleView)
     }
 
@@ -2674,7 +2710,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         addCursorRect(NSRect(x: 0, y: 0, width: edgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
         addCursorRect(NSRect(x: bounds.maxX - edgeHitWidth, y: 0, width: edgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
         addCursorRect(NSRect(x: 0, y: 0, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
-        addCursorRect(NSRect(x: 0, y: bounds.maxY - edgeHitWidth, width: bounds.width, height: edgeHitWidth), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: 0, y: bounds.maxY - topResizeHitHeight, width: bounds.width, height: topResizeHitHeight), cursor: .resizeUpDown)
         addCursorRect(NSRect(x: bounds.maxX - bottomRightHitSize, y: 0, width: bottomRightHitSize, height: bottomRightHitSize), cursor: .resizeLeftRight)
     }
 
@@ -2739,6 +2775,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         if let window {
             window.isMovableByWindowBackground = windowWasMovableByBackground
             onResizeEnded?(window.frame.size)
+            window.displayIfNeeded()
             if let contentView = window.contentView {
                 window.invalidateCursorRects(for: contentView)
             }
@@ -2760,7 +2797,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        window.setFrame(alignedFrame, display: true, animate: false)
+        window.setFrame(alignedFrame, display: false, animate: false)
         CATransaction.commit()
         onResizeFrameChanged?(alignedFrame.size)
     }
@@ -2773,7 +2810,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
         let nearLeft = point.x <= edgeHitWidth
         let nearRight = point.x >= bounds.maxX - edgeHitWidth
         let nearBottom = point.y <= edgeHitWidth
-        let nearTop = point.y >= bounds.maxY - edgeHitWidth
+        let nearTop = point.y >= bounds.maxY - topResizeHitHeight
         let inLowerCornerBand = point.y <= cornerHitLength
         let inUpperCornerBand = point.y >= bounds.maxY - cornerHitLength
         let inLeftCornerBand = point.x <= cornerHitLength

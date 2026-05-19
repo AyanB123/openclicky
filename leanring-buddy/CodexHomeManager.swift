@@ -133,17 +133,7 @@ final class CodexHomeManager {
             try copyReplacingItem(at: agentsSource, to: home.appendingPathComponent("AGENTS.md", isDirectory: false))
         }
 
-        let config = ClickyCodexConfigTemplate(
-            model: model,
-            reasoningEffort: reasoningEffort,
-            workerBaseURL: workerBaseURL,
-            modelInstructionsFileName: modelInstructionsFileName,
-            bundledSkillsDirectoryName: bundledSkillsDirectoryName,
-            learnedSkillsDirectoryName: learnedSkillsDirectoryName,
-            includeOpenAIDeveloperDocsMCP: true
-        )
-        let configFile = home.appendingPathComponent("config.toml", isDirectory: false)
-        try config.render().write(to: configFile, atomically: true, encoding: .utf8)
+        let configFile = try writeCodexConfigFromSettings()
         try writeRuntimeMap(
             home: home,
             configFile: configFile,
@@ -167,6 +157,28 @@ final class CodexHomeManager {
             persistentMemoryFile: persistentMemoryFile,
             archivesDirectory: archivesDirectory
         )
+    }
+
+    @discardableResult
+    func writeCodexConfigFromSettings() throws -> URL {
+        try fileManager.createDirectory(at: codexHomeDirectory, withIntermediateDirectories: true)
+
+        let cuaDriverCommand = AppBundleConfiguration.mcpComputerUseEnabled()
+            ? AppBundleConfiguration.mcpCuaDriverCommand()
+            : nil
+        let config = ClickyCodexConfigTemplate(
+            model: model,
+            reasoningEffort: reasoningEffort,
+            workerBaseURL: workerBaseURL,
+            modelInstructionsFileName: modelInstructionsFileName,
+            bundledSkillsDirectoryName: bundledSkillsDirectoryName,
+            learnedSkillsDirectoryName: learnedSkillsDirectoryName,
+            includeOpenAIDeveloperDocsMCP: AppBundleConfiguration.mcpDeveloperDocsEnabled(),
+            cuaDriverMCPCommand: cuaDriverCommand
+        )
+        let configFile = codexHomeDirectory.appendingPathComponent("config.toml", isDirectory: false)
+        try config.render().write(to: configFile, atomically: true, encoding: .utf8)
+        return configFile
     }
 
     func appendPersistentMemoryEvent(userRequest: String, agentResponse: String, createdAt: Date = Date()) throws {

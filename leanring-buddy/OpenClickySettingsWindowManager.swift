@@ -6,6 +6,7 @@ final class OpenClickySettingsWindowManager {
     private var window: NSWindow?
     private let windowSize = NSSize(width: 1120, height: 760)
     private let minimumWindowSize = NSSize(width: 1040, height: 660)
+    private let settingsWindowLevel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
 
     func show(companionManager: CompanionManager) {
         if window == nil {
@@ -26,7 +27,9 @@ final class OpenClickySettingsWindowManager {
     }
 
     private func bringSettingsWindowToFront(_ settingsWindow: NSWindow, shouldCenter: Bool) {
-        settingsWindow.level = .floating
+        // The main OpenClicky panel uses `.statusBar`, so Settings must sit one
+        // level above it instead of the default floating level.
+        settingsWindow.level = settingsWindowLevel
         settingsWindow.collectionBehavior.insert(.moveToActiveSpace)
         settingsWindow.collectionBehavior.insert(.fullScreenAuxiliary)
         ensureSettingsWindowFitsContent(settingsWindow, shouldCenter: shouldCenter)
@@ -75,7 +78,7 @@ final class OpenClickySettingsWindowManager {
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.titlebarAppearsTransparent = true
         settingsWindow.toolbarStyle = .unified
-        settingsWindow.level = .floating
+        settingsWindow.level = settingsWindowLevel
         settingsWindow.collectionBehavior.insert(.moveToActiveSpace)
         settingsWindow.collectionBehavior.insert(.fullScreenAuxiliary)
         settingsWindow.center()
@@ -98,7 +101,7 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
     case agentMode
     case agents
     case automations
-    case googleWorkspace
+    case connections
     case memory
     case app
 
@@ -114,7 +117,7 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
         case .agentMode: return "Providers"
         case .agents: return "Agents"
         case .automations: return "Automations"
-        case .googleWorkspace: return "Google"
+        case .connections: return "Connections"
         case .memory: return "Memory"
         case .app: return "App"
         }
@@ -130,7 +133,7 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
         case .agentMode: return "terminal"
         case .agents: return "person.2"
         case .automations: return "calendar.badge.clock"
-        case .googleWorkspace: return "globe.americas.fill"
+        case .connections: return "cable.connector"
         case .memory: return "books.vertical"
         case .app: return "app.badge"
         }
@@ -166,6 +169,9 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
     @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
     @AppStorage(AppBundleConfiguration.userDeepgramAPIKeyDefaultsKey) private var userDeepgramAPIKey = ""
+    @AppStorage(AppBundleConfiguration.userMCPDeveloperDocsEnabledDefaultsKey) private var mcpDeveloperDocsEnabled = false
+    @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
+    @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
     @AppStorage(AppBundleConfiguration.userWidgetsEnabledDefaultsKey) private var widgetsEnabled = false
     @AppStorage(AppBundleConfiguration.userWidgetsIncludeAgentTaskNamesDefaultsKey) private var widgetsIncludeAgentTaskNames = false
     @AppStorage(AppBundleConfiguration.userWidgetsIncludeMemorySnippetsDefaultsKey) private var widgetsIncludeMemorySnippets = false
@@ -173,6 +179,7 @@ struct OpenClickySettingsView: View {
     @State private var selectedSection: OpenClickySettingsSection = .general
     @State private var gogCLIStatus = OpenClickyGogCLIStatus.unknown
     @State private var isRefreshingGogCLIStatus = false
+    @State private var codexConfigSyncMessage = "MCP servers are written into Codex config.toml for new Agent Mode sessions."
     private static let openAIRealtimeVoiceIDs = [
         "marin", "cedar", "alloy", "ash", "ballad",
         "coral", "echo", "sage", "shimmer", "verse"
@@ -232,7 +239,7 @@ struct OpenClickySettingsView: View {
         .font(appUIFont(size: bodyFontSize, weight: .regular))
         .lineSpacing(appTextLineSpacing)
         .onChange(of: selectedSection) { _, newSection in
-            if newSection == .googleWorkspace, !gogCLIStatus.isInstalled, !isRefreshingGogCLIStatus {
+            if newSection == .connections, !gogCLIStatus.isInstalled, !isRefreshingGogCLIStatus {
                 refreshGogCLIStatus()
             }
         }
@@ -305,8 +312,8 @@ struct OpenClickySettingsView: View {
             return "Specialist agents with their own soul, memory, instructions, and inherited or custom skills and tools."
         case .automations:
             return "Scheduled prompts and workflows. Interval (every N minutes) or 5-field cron, optionally bound to a specialist agent."
-        case .googleWorkspace:
-            return "Local Google Workspace connection through gogcli. No hosted Google login or key sync."
+        case .connections:
+            return "Local app and MCP connections OpenClicky can expose to Agent Mode."
         case .memory:
             return "Persistent memory, learned workflow skills, and local knowledge tools."
         case .app:
@@ -333,8 +340,8 @@ struct OpenClickySettingsView: View {
             agentsPanel
         case .automations:
             automationsPanel
-        case .googleWorkspace:
-            googleWorkspacePanel
+        case .connections:
+            connectionsPanel
         case .memory:
             memoryPanel
         case .app:
@@ -1088,7 +1095,7 @@ struct OpenClickySettingsView: View {
         }
     }
 
-    private var googleWorkspacePanel: some View {
+    private var connectionsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             settingsGroup("Google Workspace") {
                 googleConnectionHeader
@@ -1123,12 +1130,71 @@ struct OpenClickySettingsView: View {
                 )
             }
 
-            settingsGroup("Action") {
-                actionRow(title: isRefreshingGogCLIStatus ? "Refreshing…" : "Refresh", systemImageName: "arrow.clockwise") {
+            settingsGroup("MCP servers") {
+                toggleRow(
+                    title: "OpenAI developer docs",
+                    subtitle: "Optional. Adds official OpenAI docs to new agents, but can slow agent startup.",
+                    systemImageName: "book.pages",
+                    isOn: Binding(
+                        get: { mcpDeveloperDocsEnabled },
+                        set: { newValue in
+                            mcpDeveloperDocsEnabled = newValue
+                            syncCodexMCPSettings()
+                        }
+                    )
+                )
+
+                toggleRow(
+                    title: "OpenClicky computer-use MCP",
+                    subtitle: "Optional. Exposes the local cuaDriver bridge to new agents when installed.",
+                    systemImageName: "cursorarrow.motionlines",
+                    isOn: Binding(
+                        get: { mcpComputerUseEnabled },
+                        set: { newValue in
+                            mcpComputerUseEnabled = newValue
+                            syncCodexMCPSettings()
+                        }
+                    )
+                )
+
+                textFieldRow(
+                    title: "cuaDriver command",
+                    subtitle: mcpCuaDriverStatusText,
+                    systemImageName: "terminal",
+                    placeholder: CuaDriverMCPConfiguration.resolvedCommandPath() ?? "/Applications/CuaDriver.app/Contents/MacOS/cua-driver",
+                    text: Binding(
+                        get: { mcpCuaDriverCommand },
+                        set: { newValue in
+                            mcpCuaDriverCommand = newValue
+                            syncCodexMCPSettings()
+                        }
+                    ),
+                    openPath: { mcpCuaDriverEffectiveCommand }
+                )
+
+                valueRow(
+                    title: "Codex config",
+                    subtitle: companionManager.codexHomeManager.codexHomeDirectory.appendingPathComponent("config.toml", isDirectory: false).path,
+                    systemImageName: "doc.text",
+                    openPath: companionManager.codexHomeManager.codexHomeDirectory.appendingPathComponent("config.toml", isDirectory: false).path
+                )
+
+                valueRow(
+                    title: "Sync status",
+                    subtitle: codexConfigSyncMessage,
+                    systemImageName: "checkmark.circle"
+                )
+            }
+
+            settingsGroup("Actions") {
+                actionRow(title: isRefreshingGogCLIStatus ? "Refresh Google status…" : "Refresh Google status", systemImageName: "arrow.clockwise") {
                     refreshGogCLIStatus()
                 }
+                actionRow(title: "Sync MCP config", systemImageName: "arrow.clockwise") {
+                    syncCodexMCPSettings()
+                }
                 if !gogCLIStatus.isInstalled || !gogCLIStatus.credentialsExist {
-                    actionRow(title: "Copy setup commands", systemImageName: "doc.on.doc") {
+                    actionRow(title: "Copy Google setup commands", systemImageName: "doc.on.doc") {
                         copyGoogleWorkspaceSetupCommands()
                     }
                 }
@@ -1321,6 +1387,38 @@ struct OpenClickySettingsView: View {
                     NSApp.terminate(nil)
                 }
             }
+        }
+    }
+
+    private var mcpCuaDriverEffectiveCommand: String {
+        let trimmed = mcpCuaDriverCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        return CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
+    }
+
+    private var mcpCuaDriverStatusText: String {
+        guard mcpComputerUseEnabled else {
+            return "Disabled. Turn this on to expose OpenClicky's computer-use path to Agent Mode."
+        }
+
+        let command = mcpCuaDriverEffectiveCommand
+        guard !command.isEmpty else {
+            return "No cuaDriver command found. Install cuaDriver or paste the command path."
+        }
+
+        if FileManager.default.fileExists(atPath: normalizedSettingsPath(command)) {
+            return "Ready: \(command)"
+        }
+
+        return "Command will be written to config.toml, but the path was not found yet."
+    }
+
+    private func syncCodexMCPSettings() {
+        do {
+            let configFile = try companionManager.codexHomeManager.writeCodexConfigFromSettings()
+            codexConfigSyncMessage = "Synced MCP settings to \(configFile.path). Restart active agents to pick up changes."
+        } catch {
+            codexConfigSyncMessage = "Could not sync MCP settings: \(error.localizedDescription)"
         }
     }
 

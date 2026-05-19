@@ -39,6 +39,9 @@ nonisolated enum AppBundleConfiguration {
     static let userAdvancedModeDefaultsKey = "openClickyAdvancedModeEnabled"
     static let userComputerUseBackendDefaultsKey = "openClickyComputerUseBackend"
     static let userNativeComputerUseDefaultsKey = "openClickyNativeComputerUseEnabled"
+    static let userMCPDeveloperDocsEnabledDefaultsKey = "openClickyMCPDeveloperDocsEnabled"
+    static let userMCPComputerUseEnabledDefaultsKey = "openClickyMCPComputerUseEnabled"
+    static let userMCPCuaDriverCommandDefaultsKey = "openClickyMCPCuaDriverCommand"
     static let userWidgetsEnabledDefaultsKey = "openClickyWidgetsEnabled"
     static let userWidgetsIncludeAgentTaskNamesDefaultsKey = "openClickyWidgetsIncludeAgentTaskNames"
     static let userWidgetsIncludeMemorySnippetsDefaultsKey = "openClickyWidgetsIncludeMemorySnippets"
@@ -88,6 +91,24 @@ nonisolated enum AppBundleConfiguration {
             forKey: "OpenClickyGogPath",
             environmentKeys: ["OPENCLICKY_GOG_PATH"]
         ) ?? localDevelopmentEnvironmentValue(forKey: "OPENCLICKY_GOG_PATH")
+    }
+
+    static func mcpDeveloperDocsEnabled() -> Bool {
+        userDefaultsBool(forKey: userMCPDeveloperDocsEnabledDefaultsKey, defaultValue: false)
+    }
+
+    static func mcpComputerUseEnabled() -> Bool {
+        userDefaultsBool(forKey: userMCPComputerUseEnabledDefaultsKey, defaultValue: false)
+    }
+
+    static func mcpCuaDriverCommand() -> String? {
+        userDefaultsValue(forKey: userMCPCuaDriverCommandDefaultsKey)
+            ?? stringValue(
+                forKey: "OpenClickyCuaDriverMCPCommand",
+                environmentKeys: [CuaDriverMCPConfiguration.environmentOverrideKey]
+            )
+            ?? localDevelopmentEnvironmentValue(forKey: CuaDriverMCPConfiguration.environmentOverrideKey)
+            ?? CuaDriverMCPConfiguration.resolvedCommandPath()
     }
 
     static func assemblyAIAPIKey() -> String? {
@@ -200,6 +221,11 @@ nonisolated enum AppBundleConfiguration {
         ) ?? localDevelopmentEnvironmentValue(forKey: "MICROSOFT_EDGE_VOICE_ID")
             ?? localDevelopmentEnvironmentValue(forKey: "EDGE_TTS_VOICE")
         ?? "en-US-EmmaMultilingualNeural"
+    }
+
+    private static func userDefaultsBool(forKey key: String, defaultValue: Bool) -> Bool {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return UserDefaults.standard.bool(forKey: key)
     }
 
     private static func userDefaultsValue(forKey key: String) -> String? {

@@ -70,6 +70,9 @@ struct OpenClickyNotchPanelView: View {
     @State private var quickPrompt: String = ""
     @State private var quickPromptAttachments: [PanelDraftAttachment] = []
     @State private var isQuickPromptDropTargeted = false
+    @State private var isPanelDropTargeted = false
+    @State private var isPanelUserResizing = false
+    @State private var suppressNextHomeSuggestionResize = false
 
     private var appFont: OpenClickyResponseCaptionFont {
         OpenClickyResponseCaptionFont.resolved(appFontRawValue)
@@ -187,7 +190,22 @@ struct OpenClickyNotchPanelView: View {
             displayEntry.text = compactChatDisplayText(from: entry.text)
             return displayEntry.text.isEmpty ? nil : displayEntry
         }
-        return Array(visibleEntries.suffix(6))
+        return Array(visibleEntries.suffix(8))
+    }
+
+    private var homeAgentTaskSessions: [CodexAgentSession] {
+        companionManager.codexAgentSessions.filter { session in
+            !companionManager.archivedSessionIDs.contains(session.id) && session.hasVisibleActivity
+        }.sorted { leftSession, rightSession in
+            if leftSession.latestActivityDate != rightSession.latestActivityDate {
+                return leftSession.latestActivityDate > rightSession.latestActivityDate
+            }
+            return leftSession.createdAt > rightSession.createdAt
+        }
+    }
+
+    private var isHomeChatBusy: Bool {
+        companionManager.codexAgentSession.isTurnActiveForChatQueue
     }
 
     private var runningAgentCount: Int {
@@ -256,25 +274,36 @@ struct OpenClickyNotchPanelView: View {
     }
 
     var body: some View {
+        resizeAwarePanel(panelLifecycle(panelDialogs(panelRoot)))
+    }
+
+    private var panelRoot: some View {
         VStack(spacing: 0) {
             mainSurface
         }
-        .frame(minWidth: 356, maxWidth: .infinity, alignment: .topLeading)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(minWidth: 475, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
+    }
+
+    private var stopTaskDialogBinding: Binding<Bool> {
+        Binding(
+            get: { pendingStopAgentSessionID != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingStopAgentSessionID = nil
+                }
+            }
+        )
+    }
+
+    private func panelDialogs<Content: View>(_ content: Content) -> some View {
+        content
         .sheet(isPresented: $isShowingHatchSheet) {
             hatchPetSheet
         }
         .confirmationDialog(
             "Stop this running OpenClicky task?",
-            isPresented: Binding(
-                get: { pendingStopAgentSessionID != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        pendingStopAgentSessionID = nil
-                    }
-                }
-            ),
+            isPresented: stopTaskDialogBinding,
             titleVisibility: .visible
         ) {
             Button("Stop task", role: .destructive) {
@@ -286,9 +315,16 @@ struct OpenClickyNotchPanelView: View {
         } message: {
             Text("Running tasks cannot be archived. Stop it first if you want to move it out of the active list.")
         }
+    }
+
+    private func panelLifecycle<Content: View>(_ content: Content) -> some View {
+        content
         .onAppear {
+            syncHomeChatMode(source: "panel_appear")
+            syncCompactChatVisibility()
             focusQuickPromptIfHome()
             focusExpandedAgentPromptIfNeeded()
+            notifyPanelSizeChanged()
         }
         .task {
             await refreshGogStatus()
@@ -296,11 +332,19 @@ struct OpenClickyNotchPanelView: View {
             focusExpandedAgentPromptIfNeeded()
         }
         .onChange(of: selectedTab) {
+            syncHomeChatMode(source: "panel_tab_changed")
+            syncCompactChatVisibility()
             focusQuickPromptIfHome()
             focusExpandedAgentPromptIfNeeded()
             notifyPanelSizeChanged()
         }
         .onChange(of: quickPromptMode) {
+            syncHomeChatMode(source: "panel_mode_changed")
+            syncCompactChatVisibility()
+            if suppressNextHomeSuggestionResize && selectedTab == .home {
+                suppressNextHomeSuggestionResize = false
+                return
+            }
             notifyPanelSizeChanged()
         }
         .onChange(of: quickPromptAttachments.count) {
@@ -311,10 +355,12 @@ struct OpenClickyNotchPanelView: View {
         }
         .onChange(of: companionManager.codexAgentSession.entries.count) {
             guard quickPromptMode == .chat else { return }
+            syncCompactChatVisibility()
             notifyPanelSizeChanged()
         }
         .onChange(of: companionManager.codexAgentSession.isTurnActiveForChatQueue) {
             guard quickPromptMode == .chat else { return }
+            syncCompactChatVisibility()
             notifyPanelSizeChanged()
         }
         .onChange(of: expandedAgentSessionID) {
@@ -330,17 +376,31 @@ struct OpenClickyNotchPanelView: View {
         }
     }
 
+    private func resizeAwarePanel<Content: View>(_ content: Content) -> some View {
+        content
+        .onReceive(NotificationCenter.default.publisher(for: .clickyMainPanelResizeStateDidChange)) { notification in
+            isPanelUserResizing = (notification.userInfo?["isResizing"] as? Bool) ?? false
+        }
+        .transaction { transaction in
+            if isPanelUserResizing {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
+    }
+
     private var mainSurface: some View {
         VStack(spacing: 12) {
             tabStrip
 
             tabContent
                 .id(selectedTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
-                .animation(.spring(response: 0.24, dampingFraction: 0.90), value: selectedTab)
+                .animation(isPanelUserResizing ? nil : .spring(response: 0.24, dampingFraction: 0.90), value: selectedTab)
         }
         .padding(14)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(
@@ -353,8 +413,46 @@ struct OpenClickyNotchPanelView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .animation(.spring(response: 0.24, dampingFraction: 0.88), value: quickPromptMode)
-        .animation(.spring(response: 0.24, dampingFraction: 0.88), value: isCompactChatExpanded)
+        .overlay {
+            if isPanelDropTargeted && !isQuickPromptDropTargeted && !isExpandedAgentDropTargeted {
+                dropTargetOverlay
+                    .padding(14)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(
+            of: Self.supportedAttachmentDropTypes,
+            isTargeted: $isPanelDropTargeted,
+            perform: handlePanelAttachmentDrop
+        )
+        .animation(.easeOut(duration: 0.16), value: isPanelDropTargeted)
+        .animation(isPanelUserResizing ? nil : .spring(response: 0.24, dampingFraction: 0.88), value: quickPromptMode)
+        .animation(isPanelUserResizing ? nil : .spring(response: 0.24, dampingFraction: 0.88), value: isCompactChatExpanded)
+    }
+
+    private var preferredPanelHeightForSelectedTab: CGFloat {
+        switch selectedTab {
+        case .home:
+            if quickPromptMode == .chat && isCompactChatExpanded {
+                return homeAgentTaskSessions.isEmpty ? 620 : 680
+            }
+            if !homeAgentTaskSessions.isEmpty {
+                return 450
+            }
+            if !quickPromptAttachments.isEmpty {
+                return 430
+            }
+            return 340
+        case .agents:
+            if expandedAgentSessionID != nil {
+                return 700
+            }
+            return agentPanelSelection == .specialists ? 430 : 500
+        case .connections:
+            return 710
+        case .settings:
+            return 520
+        }
     }
 
     @ViewBuilder
@@ -513,23 +611,170 @@ struct OpenClickyNotchPanelView: View {
                 systemImageName: quickPromptMode.systemImageName,
                 accent: DS.Colors.accentText
             ) {
-                VStack(spacing: 9) {
-                    quickPromptField
+                VStack(spacing: 10) {
                     if quickPromptMode == .chat && isCompactChatExpanded {
                         compactChatPane
                             .transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        homePromptSuggestions
                     }
 
-                    HStack(spacing: 8) {
-                        quickPromptModeButton(.ask)
-                        quickPromptModeButton(.agent)
-                        quickPromptModeButton(.chat)
+                    if !homeAgentTaskSessions.isEmpty {
+                        homeAgentTaskChipRow
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    Spacer(minLength: 18)
+
+                    VStack(spacing: 9) {
+                        quickPromptField
+
+                        HStack(spacing: 8) {
+                            quickPromptModeButton(.ask)
+                            quickPromptModeButton(.agent)
+                            quickPromptModeButton(.chat)
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             topStatusRail
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var homeAgentTaskChipRow: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundColor(DS.Colors.accentText)
+                Text("Agent tasks")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Spacer(minLength: 0)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(Array(homeAgentTaskSessions.prefix(4))) { session in
+                        homeAgentTaskChip(session)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.white.opacity(0.045)))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 1))
+    }
+
+    private func homeAgentTaskChip(_ session: CodexAgentSession) -> some View {
+        Button {
+            openAgentSessionFromHome(session)
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(agentStatusColor(session.status))
+                    .frame(width: 7, height: 7)
+                    .shadow(color: agentStatusColor(session.status).opacity(0.7), radius: 4, x: 0, y: 0)
+                Text(session.title)
+                    .font(appUIFont(size: max(9, subtextFontSize - 1), weight: .heavy))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .black))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(Capsule(style: .continuous).fill(Color.white.opacity(0.07)))
+            .overlay(Capsule(style: .continuous).stroke(agentStatusColor(session.status).opacity(0.22), lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Open agent chat for \(session.title)")
+        .help("Open \(session.title) in Agents")
+    }
+
+    private func openAgentSessionFromHome(_ session: CodexAgentSession) {
+        companionManager.selectCodexAgentSession(session.id)
+        agentPanelSelection = .sessions
+        agentSessionFilter = .active
+        expandedAgentSessionID = session.id
+        selectedTab = .agents
+        notifyPanelSizeChanged()
+    }
+
+    private var homePromptSuggestions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "lightbulb.fill")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundColor(DS.Colors.accentText)
+                Text("Suggestions")
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 7) {
+                homeSuggestionButton("Summarise screen", systemImageName: "rectangle.and.text.magnifyingglass")
+                homeSuggestionButton("Start an agent", systemImageName: "terminal.fill")
+                homeSuggestionButton("Open settings", systemImageName: "gearshape.fill")
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 15, style: .continuous).fill(Color.white.opacity(0.045)))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 1))
+    }
+
+    private func homeSuggestionButton(_ title: String, systemImageName: String) -> some View {
+        Button {
+            applyHomeSuggestion(title)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: systemImageName)
+                    .font(.system(size: 10, weight: .black))
+                Text(title)
+                    .font(.system(size: 9, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .foregroundColor(DS.Colors.textPrimary)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(Capsule(style: .continuous).fill(Color.white.opacity(0.065)))
+            .overlay(Capsule(style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .help(title)
+    }
+
+    private func applyHomeSuggestion(_ title: String) {
+        switch title {
+        case "Summarise screen":
+            if quickPromptMode != .ask {
+                suppressNextHomeSuggestionResize = true
+            }
+            quickPromptMode = .ask
+            quickPrompt = "Summarise what’s on my screen."
+        case "Start an agent":
+            if quickPromptMode != .agent {
+                suppressNextHomeSuggestionResize = true
+            }
+            quickPromptMode = .agent
+            quickPrompt = "Look at the current OpenClicky screen context and fix the visible issue."
+        case "Open settings":
+            selectedTab = .settings
+        default:
+            quickPrompt = title
+        }
+        focusQuickPromptIfHome()
     }
 
     private var agentsTab: some View {
@@ -541,8 +786,10 @@ struct OpenClickyNotchPanelView: View {
                 agentSessionsPanel
             case .specialists:
                 specialistAgentGrid
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var agentPanelSelector: some View {
@@ -596,29 +843,38 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var agentSessionsPanel: some View {
-        VStack(spacing: 8) {
-            if visibleAgentSessions.isEmpty {
-                OpenClickyNotchEmptyState(
-                    systemImageName: agentSessionFilter.emptyStateSystemImageName,
-                    title: agentSessionFilter.emptyStateTitle,
-                    subtitle: agentSessionFilter.emptyStateSubtitle
-                )
-            } else {
-                agentSessionScrollView
-            }
+        GeometryReader { geometry in
+            VStack(spacing: 8) {
+                agentSessionContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: visibleAgentSessions.isEmpty ? .center : .top)
 
-            agentsFooter
+                agentsFooter
+                    .frame(maxWidth: .infinity, alignment: .bottom)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    @ViewBuilder
+    private var agentSessionContent: some View {
+        if visibleAgentSessions.isEmpty {
+            OpenClickyNotchEmptyState(
+                systemImageName: agentSessionFilter.emptyStateSystemImageName,
+                title: agentSessionFilter.emptyStateTitle,
+                subtitle: agentSessionFilter.emptyStateSubtitle
+            )
+        } else {
+            agentSessionScrollView
         }
     }
 
     private var agentSessionScrollView: some View {
-        let maxHeight: CGFloat = expandedAgentSessionID == nil ? 224 : 430
-
-        return ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 agentSessionRows
             }
-            .frame(maxHeight: maxHeight, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .onChange(of: expandedAgentSessionID) { _, sessionID in
                 guard let sessionID else { return }
                 DispatchQueue.main.async {
@@ -1105,7 +1361,7 @@ struct OpenClickyNotchPanelView: View {
                             Text("Chat stays here")
                                 .font(.system(size: 12, weight: .heavy))
                                 .foregroundColor(DS.Colors.textPrimary)
-                            Text("Type a message and Send; this panel expands into the active OpenClicky chat without opening the separate HUD.")
+                            Text("Type or speak while Chat is selected; Home mirrors the active Ask Agent chat.")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(DS.Colors.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1120,12 +1376,12 @@ struct OpenClickyNotchPanelView: View {
                         }
                     }
 
-                    if companionManager.codexAgentSession.isTurnActiveForChatQueue {
+                    if isHomeChatBusy {
                         HStack(spacing: 7) {
                             ProgressView()
                                 .controlSize(.small)
                                 .scaleEffect(0.72)
-                            Text(companionManager.codexAgentSession.progressStage.label)
+                            Text(activeVoiceLabel)
                                 .font(appUIFont(size: max(10, subtextFontSize), weight: .heavy))
                                 .foregroundColor(DS.Colors.textSecondary)
                         }
@@ -1144,7 +1400,7 @@ struct OpenClickyNotchPanelView: View {
                     .stroke(Color.white.opacity(0.08), lineWidth: 1)
             )
             .onChange(of: companionManager.codexAgentSession.entries.count) {
-                let targetID = compactChatEntries.last?.id ?? (companionManager.codexAgentSession.isTurnActiveForChatQueue ? "compact-chat-status" : nil)
+                let targetID = compactChatEntries.last?.id ?? (isHomeChatBusy ? "compact-chat-status" : nil)
                 guard let targetID else { return }
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
@@ -1230,6 +1486,17 @@ struct OpenClickyNotchPanelView: View {
             primaryActionButton(title: mode.buttonTitle, systemImageName: mode.buttonSystemImageName, action: action)
         } else {
             secondaryActionButton(title: mode.buttonTitle, systemImageName: mode.buttonSystemImageName, action: action)
+        }
+    }
+
+    private func syncHomeChatMode(source: String) {
+        companionManager.setHomeChatModeActive(selectedTab == .home && quickPromptMode == .chat, source: source)
+    }
+
+    private func syncCompactChatVisibility() {
+        guard quickPromptMode == .chat else { return }
+        if !compactChatEntries.isEmpty || isHomeChatBusy {
+            isCompactChatExpanded = true
         }
     }
 
@@ -1490,7 +1757,7 @@ struct OpenClickyNotchPanelView: View {
         let isArchived = companionManager.archivedSessionIDs.contains(session.id)
         let isRunning = isAgentSessionRunning(session)
         let canStop = !isArchived && isRunning
-        let canArchive = !isArchived && !isRunning && session.progressStage == .completed
+        let canArchive = !isArchived && !isRunning
         let showsTerminalControl = canStop || canArchive || isArchived
         return VStack(spacing: 0) {
             HStack(spacing: 6) {
@@ -1567,8 +1834,8 @@ struct OpenClickyNotchPanelView: View {
                 } else if canArchive {
                     agentArchiveButton(
                         systemImageName: "archivebox.fill",
-                        accessibilityLabel: "Archive completed task \(session.title)",
-                        helpText: "Archive this completed OpenClicky task"
+                        accessibilityLabel: "Archive task \(session.title)",
+                        helpText: "Archive this OpenClicky task"
                     ) {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                             if expandedAgentSessionID == session.id {
@@ -1971,7 +2238,7 @@ struct OpenClickyNotchPanelView: View {
         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
             isCompactChatExpanded = true
         }
-        companionManager.submitNewAgentTaskFromUI(
+        companionManager.submitHomeChatPromptFromUI(
             promptWithAttachments(trimmedPrompt, attachments: attachments),
             source: "open_clicky_panel_chat"
         )
@@ -2056,6 +2323,22 @@ struct OpenClickyNotchPanelView: View {
                     .overlay(Capsule(style: .continuous).stroke(Color.white.opacity(0.13), lineWidth: 0.6))
                 }
             }
+        }
+    }
+
+    private func handlePanelAttachmentDrop(_ providers: [NSItemProvider]) -> Bool {
+        if selectedTab == .agents, expandedAgentSessionID != nil {
+            return handleAttachmentDrop(providers) { url, kind in
+                addExpandedAgentAttachment(url, forcedKind: kind)
+            }
+        }
+
+        if selectedTab != .home {
+            selectedTab = .home
+        }
+
+        return handleAttachmentDrop(providers) { url, kind in
+            addQuickPromptAttachment(url, forcedKind: kind)
         }
     }
 
@@ -2190,7 +2473,11 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private func notifyPanelSizeChanged() {
-        NotificationCenter.default.post(name: .clickyPanelContentSizeDidChange, object: nil)
+        NotificationCenter.default.post(
+            name: .clickyPanelContentSizeDidChange,
+            object: nil,
+            userInfo: ["preferredPanelHeight": preferredPanelHeightForSelectedTab]
+        )
     }
 
     private func focusQuickPromptIfHome() {
@@ -2466,6 +2753,7 @@ private struct OpenClickyNotchHeroCard<Content: View>: View {
             content
         }
         .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(
