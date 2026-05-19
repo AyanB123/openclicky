@@ -1067,9 +1067,6 @@ struct OpenClickySettingsView: View {
 
             if companionManager.isAdvancedModeEnabled {
                 settingsGroup("Agent tools") {
-                    actionRow(title: "Open Agent chat", systemImageName: "message") {
-                        companionManager.showCodexHUD()
-                    }
                     actionRow(title: "Warm up Agent Mode", systemImageName: "bolt") {
                         companionManager.warmUpCodexAgentMode()
                     }
@@ -1077,6 +1074,9 @@ struct OpenClickySettingsView: View {
 
                 #if DEBUG
                 settingsGroup("Developer tools") {
+                    actionRow(title: "Open Agent HUD", systemImageName: "message") {
+                        companionManager.showDeveloperCodexHUD()
+                    }
                     actionRow(title: "Test cursor flight", systemImageName: "arrow.up.right") {
                         companionManager.debugTestCursorFlight()
                     }

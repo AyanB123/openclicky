@@ -9902,7 +9902,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func briefCompletionSummary(_ summary: String) -> String {
-        cleanedNaturalSpeech(summary, maxLength: 120)
+        cleanedNaturalSpeech(summary, maxLength: 180)
     }
 
     /// For completion TTS, use a short cleaned final-response summary after
@@ -9964,6 +9964,12 @@ final class CompanionManager: ObservableObject {
     /// robotic when read aloud.
     private static func cleanedNaturalSpeech(_ text: String, maxLength: Int) -> String {
         var value = text
+        value = trimmedCompletionSpeechBeforeTechnicalTail(value)
+        value = value.replacingOccurrences(
+            of: #"(?is)\s+(?:in|at|under|inside)\s+`?(?:/Users|/Volumes|~)/[^\s,;:()\[\]{}<>"]+`?"#,
+            with: " ",
+            options: .regularExpression
+        )
         value = value.replacingOccurrences(of: #"(?i)\b(?:/Users|/Volumes|~)/[^\s,;:()\[\]{}<>"]+"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"(?i)\b\S+\.(swift|md|json|jsonl|toml|yaml|yml|txt|csv|ts|tsx|js|jsx|py|sh)\b"#, with: " ", options: .regularExpression)
         value = value.replacingOccurrences(of: #"`[^`]*`"#, with: " ", options: .regularExpression)
@@ -9982,6 +9988,25 @@ final class CompanionManager: ObservableObject {
             return String(prefix[..<lastSpace]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Agent final replies often include useful transcript detail like
+    /// "Verified with `swiftc -parse` and `git diff --check`". That is good
+    /// on-screen, but TTS used to read up to "verified with" and then lose the
+    /// code-like command names. Stop before those verification tails so the
+    /// spoken completion stays natural.
+    private static func trimmedCompletionSpeechBeforeTechnicalTail(_ text: String) -> String {
+        var value = text
+        let technicalTailPatterns = [
+            #"(?is)\s*(?:[,.]\s*)?(?:and\s+)?(?:I\s+)?verified\s+(?:it\s+)?with\s+`?(?:swiftc|git|xcodebuild|swift|npm|pnpm|yarn|pytest|python|cargo)\b.*$"#,
+            #"(?is)\s*(?:[,.]\s*)?(?:and\s+)?verified\s+with\s+`?(?:swiftc|git|xcodebuild|swift|npm|pnpm|yarn|pytest|python|cargo)\b.*$"#,
+            #"(?is)\s*(?:[,.]\s*)?(?:and\s+)?(?:I\s+)?(?:checked|tested)\s+(?:it\s+)?with\s+`?(?:swiftc|git|xcodebuild|swift|npm|pnpm|yarn|pytest|python|cargo)\b.*$"#,
+            #"(?is)\s*(?:[,.]\s*)?(?:and\s+)?(?:I\s+)?verified\b[^.!?]*(?:swiftc|git\s+diff|diff\s+--check|xcodebuild|npm|pnpm|yarn|pytest|python|cargo)\b.*$"#
+        ]
+        for pattern in technicalTailPatterns {
+            value = value.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func openAgentDockItem(_ itemID: UUID) {
@@ -12760,8 +12785,16 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    func showCodexHUD() {
-        guard isAdvancedModeEnabled else { return }
+    private static var allowsDeveloperHUD: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    func showCodexHUD(developerRequested: Bool = false) {
+        guard isAdvancedModeEnabled, developerRequested, Self.allowsDeveloperHUD else { return }
         codexHUDWindowManager.show(
             companionManager: self,
             openMemory: { [weak self] in
@@ -12774,6 +12807,12 @@ final class CompanionManager: ObservableObject {
             }
         )
     }
+
+    #if DEBUG
+    func showDeveloperCodexHUD() {
+        showCodexHUD(developerRequested: true)
+    }
+    #endif
 
     func showMemoryWindow() {
         wikiViewerPanelManager.show(
@@ -12956,7 +12995,6 @@ final class CompanionManager: ObservableObject {
     func warmUpCodexAgentMode() {
         guard isAdvancedModeEnabled else { return }
         codexAgentSession.warmUp()
-        showCodexHUD()
     }
 
     #if DEBUG

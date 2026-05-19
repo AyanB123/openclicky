@@ -136,7 +136,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let expandedPanelWidth: CGFloat = 520
     private static let mainPanelWidth: CGFloat = 475
     private static let mainPanelHeight: CGFloat = 620
-    private static let mainPanelMinimumSize = NSSize(width: 475, height: 340)
+    private static let mainPanelMinimumSize = NSSize(width: 390, height: 340)
     private static let mainPanelMaximumSize = NSSize(width: 620, height: 820)
     private static let statusPanelWidthScale: CGFloat = 0.12
     private static let statusPanelHorizontalNudge: CGFloat = 0
@@ -2647,7 +2647,7 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
     private let topResizeHitHeight: CGFloat = 8
     private let cornerHitLength: CGFloat = 40
     private let bottomRightHitSize: CGFloat = 58
-    private let topDragHitHeight: CGFloat = 42
+    private let topDragHitHeight: CGFloat = 18
     private let resizeHandleView = OpenClickyMainPanelResizeHandleView(frame: .zero)
     private var activeEdges: ResizeEdges = []
     private var dragStartMouseLocation: NSPoint = .zero

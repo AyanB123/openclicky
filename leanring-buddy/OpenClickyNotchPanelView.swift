@@ -168,6 +168,7 @@ struct OpenClickyNotchPanelView: View {
 
     private var visibleAgentSessions: [CodexAgentSession] {
         companionManager.codexAgentSessions.filter { session in
+            shouldShowAgentSessionInPanel(session) &&
             agentSessionFilter.includes(session: session, archivedSessionIDs: companionManager.archivedSessionIDs)
         }.sorted { leftSession, rightSession in
             if leftSession.latestActivityDate != rightSession.latestActivityDate {
@@ -175,6 +176,14 @@ struct OpenClickyNotchPanelView: View {
             }
             return leftSession.title.localizedStandardCompare(rightSession.title) == .orderedAscending
         }
+    }
+
+    private var visibleAgentSessionCount: Int {
+        companionManager.codexAgentSessions.filter(shouldShowAgentSessionInPanel).count
+    }
+
+    private func shouldShowAgentSessionInPanel(_ session: CodexAgentSession) -> Bool {
+        session.hasVisibleActivity
     }
 
     private var completedUnarchivedAgentSessions: [CodexAgentSession] {
@@ -208,6 +217,10 @@ struct OpenClickyNotchPanelView: View {
         companionManager.codexAgentSession.isTurnActiveForChatQueue
     }
 
+    private var hasHomeConversationActivity: Bool {
+        !compactChatEntries.isEmpty || isHomeChatBusy || !homeAgentTaskSessions.isEmpty
+    }
+
     private var runningAgentCount: Int {
         companionManager.codexAgentSessions.filter { session in
             switch session.status {
@@ -236,7 +249,7 @@ struct OpenClickyNotchPanelView: View {
             ),
             OpenClickyNotchConnectionRow(
                 title: "Agent Mode",
-                detail: "\(companionManager.codexAgentSessions.count) sessions · \(agentStore.agents.count) specialist agents · model \(companionManager.codexAgentSession.model)",
+                detail: "\(visibleAgentSessionCount) sessions · \(agentStore.agents.count) specialist agents · model \(companionManager.codexAgentSession.model)",
                 state: companionManager.codexAgentSessions.isEmpty ? .needsAttention : .ready,
                 systemImageName: "terminal.fill"
             ),
@@ -281,7 +294,7 @@ struct OpenClickyNotchPanelView: View {
         VStack(spacing: 0) {
             mainSurface
         }
-        .frame(minWidth: 475, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(minWidth: 390, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
     }
 
@@ -437,7 +450,7 @@ struct OpenClickyNotchPanelView: View {
                 return homeAgentTaskSessions.isEmpty ? 620 : 680
             }
             if !homeAgentTaskSessions.isEmpty {
-                return 450
+                return 360
             }
             if !quickPromptAttachments.isEmpty {
                 return 430
@@ -536,8 +549,10 @@ struct OpenClickyNotchPanelView: View {
                         Capsule(style: .continuous)
                             .stroke(selectedTab == tab ? Color.white.opacity(0.08) : Color.white.opacity(0.05), lineWidth: 1)
                     )
+                    .contentShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .contentShape(Capsule(style: .continuous))
                 .accessibilityLabel("Show \(tab.title)")
                 .help("Show \(tab.title)")
             }
@@ -615,7 +630,7 @@ struct OpenClickyNotchPanelView: View {
                     if quickPromptMode == .chat && isCompactChatExpanded {
                         compactChatPane
                             .transition(.opacity.combined(with: .move(edge: .top)))
-                    } else {
+                    } else if !hasHomeConversationActivity {
                         homePromptSuggestions
                     }
 
@@ -657,13 +672,12 @@ struct OpenClickyNotchPanelView: View {
                 Spacer(minLength: 0)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(Array(homeAgentTaskSessions.prefix(4))) { session in
-                        homeAgentTaskChip(session)
-                    }
+            FlowLayout(spacing: 7, rowSpacing: 7) {
+                ForEach(Array(homeAgentTaskSessions.prefix(4))) { session in
+                    homeAgentTaskChip(session)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -719,7 +733,7 @@ struct OpenClickyNotchPanelView: View {
                 Spacer(minLength: 0)
             }
 
-            HStack(spacing: 7) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 7)], spacing: 7) {
                 homeSuggestionButton("Summarise screen", systemImageName: "rectangle.and.text.magnifyingglass")
                 homeSuggestionButton("Start an agent", systemImageName: "terminal.fill")
                 homeSuggestionButton("Open settings", systemImageName: "gearshape.fill")
@@ -797,7 +811,7 @@ struct OpenClickyNotchPanelView: View {
             agentPanelSelectorButton(
                 selection: .sessions,
                 title: "Sessions",
-                value: "\(companionManager.codexAgentSessions.count)",
+                value: "\(visibleAgentSessionCount)",
                 detail: "\(runningAgentCount) running now",
                 color: DS.Colors.accentText,
                 systemImageName: "rectangle.stack.fill"
@@ -1042,6 +1056,7 @@ struct OpenClickyNotchPanelView: View {
     private func agentFilterButton(_ filter: OpenClickyAgentSessionFilter) -> some View {
         let isSelected = agentSessionFilter == filter
         let count = companionManager.codexAgentSessions.filter { session in
+            shouldShowAgentSessionInPanel(session) &&
             filter.includes(session: session, archivedSessionIDs: companionManager.archivedSessionIDs)
         }.count
 
@@ -2160,6 +2175,8 @@ struct OpenClickyNotchPanelView: View {
                     .font(.system(size: 11, weight: .heavy))
             }
             .foregroundColor(DS.Colors.textOnAccent)
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(
@@ -2181,6 +2198,8 @@ struct OpenClickyNotchPanelView: View {
                     .font(.system(size: 11, weight: .heavy))
             }
             .foregroundColor(DS.Colors.textPrimary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.07)))
