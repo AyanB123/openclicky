@@ -76,7 +76,7 @@ struct OpenClickyAgentsSettingsSection: View {
   private func row(agent: OpenClickyAgentDefinition) -> some View {
     Button(action: { selectedSlug = agent.slug }) {
       HStack(spacing: 6) {
-        Image(systemName: agent.isUserDefined ? "person.crop.circle.fill" : "person.crop.circle")
+        Image(systemName: agent.isProtectedSystemAgent ? "lock.shield.fill" : (agent.isUserDefined ? "person.crop.circle.fill" : "person.crop.circle"))
           .foregroundColor(agent.isUserDefined ? .accentColor : .secondary)
         VStack(alignment: .leading, spacing: 1) {
           Text(agent.metadata.displayName)
@@ -86,8 +86,8 @@ struct OpenClickyAgentsSettingsSection: View {
             .foregroundColor(.secondary)
         }
         Spacer()
-        if !agent.isUserDefined {
-          Text("built-in")
+        if agent.isProtectedSystemAgent || !agent.isUserDefined {
+          Text(agent.isProtectedSystemAgent ? "system" : "built-in")
             .font(.system(size: 9, weight: .medium))
             .foregroundColor(.secondary)
             .padding(.horizontal, 5)
@@ -179,16 +179,24 @@ private struct AgentEditorView: View {
       HStack {
         Button("Launch as session") { launch() }
           .buttonStyle(.bordered)
-        Button("Schedule heartbeat") { scheduleHeartbeat() }
-          .buttonStyle(.bordered)
-          .help("Create an automation that runs this agent's heartbeat check-in every 30 minutes.")
+        if !agent.isProtectedSystemAgent {
+          Button("Schedule heartbeat") { scheduleHeartbeat() }
+            .buttonStyle(.bordered)
+            .help("Create an automation that runs this agent's heartbeat check-in every 30 minutes.")
+        }
         Spacer()
-        if agent.isUserDefined {
+        if agent.isProtectedSystemAgent {
+          Label("Required by OpenClicky", systemImage: "lock.fill")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+        } else if agent.isUserDefined {
           Button(role: .destructive) { delete() } label: { Text("Delete user copy") }
             .buttonStyle(.bordered)
         }
-        Button("Save") { save() }
-          .buttonStyle(.borderedProminent)
+        if !agent.isProtectedSystemAgent {
+          Button("Save") { save() }
+            .buttonStyle(.borderedProminent)
+        }
       }
     }
     .padding(14)
@@ -200,16 +208,21 @@ private struct AgentEditorView: View {
 
   private var titleRow: some View {
     HStack(spacing: 8) {
-      Image(systemName: agent.isUserDefined ? "person.crop.circle.fill" : "person.crop.circle")
+      Image(systemName: agent.isProtectedSystemAgent ? "lock.shield.fill" : (agent.isUserDefined ? "person.crop.circle.fill" : "person.crop.circle"))
       VStack(alignment: .leading, spacing: 0) {
         Text(agent.metadata.displayName)
           .font(.system(size: 14, weight: .semibold))
-        Text("slug: \(agent.slug)" + (agent.isUserDefined ? "" : "  ·  built-in (saving creates a user override)"))
+        Text("slug: \(agent.slug)" + agentTitleSuffix)
           .font(.system(size: 10))
           .foregroundColor(.secondary)
       }
       Spacer()
     }
+  }
+
+  private var agentTitleSuffix: String {
+    if agent.isProtectedSystemAgent { return "  ·  required system agent" }
+    return agent.isUserDefined ? "" : "  ·  built-in (saving creates a user override)"
   }
 
   private func field(_ label: String, text: Binding<String>) -> some View {

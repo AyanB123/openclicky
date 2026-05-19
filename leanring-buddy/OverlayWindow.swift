@@ -533,6 +533,15 @@ struct BlueCursorView: View {
         }
     }
 
+    /// Cursor samples already arrive at display cadence. Restarting a spring
+    /// on every sample looks playful on paper but creates visible lag and
+    /// extra SwiftUI work. Use a tiny linear interpolation while following the
+    /// real cursor, and disable implicit position animation during scripted
+    /// flights where the bezier timer owns each frame.
+    private var cursorFollowAnimation: Animation? {
+        buddyNavigationMode == .followingCursor ? .linear(duration: 1.0 / 120.0) : nil
+    }
+
     private var normalizedCursorAvatarSizeScale: CGFloat {
         CGFloat(
             min(
@@ -586,7 +595,7 @@ struct BlueCursorView: View {
                     )
                     .opacity(bubbleOpacity)
                     .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    .animation(cursorFollowAnimation, value: cursorPosition)
                     .animation(.easeOut(duration: 0.5), value: bubbleOpacity)
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
                         bubbleSize = newSize
@@ -621,7 +630,7 @@ struct BlueCursorView: View {
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
                     .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    .animation(cursorFollowAnimation, value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
                     .onPreferenceChange(NavigationBubbleSizePreferenceKey.self) { newSize in
@@ -675,7 +684,7 @@ struct BlueCursorView: View {
                     )
                     .position(x: bubblePosition.x, y: bubblePosition.y)
                     .opacity(cursorOpacity)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    .animation(cursorFollowAnimation, value: cursorPosition)
                     .animation(.easeOut(duration: 0.16), value: cursorState.agentTaskBubbleText)
                     .onPreferenceChange(AgentTaskBubbleSizePreferenceKey.self) { newSize in
                         agentTaskBubbleSize = newSize
@@ -745,7 +754,7 @@ struct BlueCursorView: View {
             )
                 .opacity(buddyIsVisibleOnThisScreen && cursorState.voiceState == .listening ? cursorOpacity : 0)
                 .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                .animation(cursorFollowAnimation, value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: cursorState.voiceState)
 
             // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
@@ -755,7 +764,7 @@ struct BlueCursorView: View {
             )
                 .opacity(buddyIsVisibleOnThisScreen && cursorState.voiceState == .processing ? cursorOpacity : 0)
                 .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                .animation(cursorFollowAnimation, value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: cursorState.voiceState)
 
         }
@@ -948,28 +957,30 @@ struct BlueCursorView: View {
     private func startTrackingCursor() {
         // Sample `NSEvent.mouseLocation` (thread-safe) on a high-priority
         // background queue so cursor tracking is independent of main-actor
-        // pressure. A previous version moved this to `Task { @MainActor in
-        // ... try? await Task.sleep(...) }` — that re-introduced the
-        // exact freeze it was meant to fix because every wake-up landed
-        // back on main, contending with SwiftUI animation work and TTS
-        // scheduling during agent spawn.
-        //
-        // We only hop to main when the cursor actually moved. If main is
-        // busy, multiple hops may queue up, but each one re-reads
-        // `NSEvent.mouseLocation` when it runs, so the buddy never lags
-        // behind reality — it just catches up in a burst.
+        // pressure. Keep the producer off main, but coalesce delivery so a
+        // busy SwiftUI/TTS/agent-start moment cannot build a backlog of stale
+        // 60Hz cursor updates that replay as visible jank.
         cursorTrackingTimer?.cancel()
 
         let queue = DispatchQueue(label: "openclicky.cursor.tracker", qos: .userInteractive)
         let dispatchTimer = DispatchSource.makeTimerSource(queue: queue)
-        dispatchTimer.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(2))
+        dispatchTimer.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(3))
         var lastSampledPoint: CGPoint = .zero
+        var updateQueuedOnMain = false
+
         dispatchTimer.setEventHandler {
             let mouseLocation = NSEvent.mouseLocation
-            if mouseLocation == lastSampledPoint { return }
+            guard mouseLocation != lastSampledPoint else { return }
             lastSampledPoint = mouseLocation
+
+            guard !updateQueuedOnMain else { return }
+            updateQueuedOnMain = true
+
             DispatchQueue.main.async {
                 updateCursorTracking()
+                queue.async {
+                    updateQueuedOnMain = false
+                }
             }
         }
         dispatchTimer.resume()
@@ -1159,7 +1170,7 @@ struct BlueCursorView: View {
         let arcHeight = min(distance * 0.2, 80.0)
         let controlPoint = CGPoint(x: midPoint.x, y: midPoint.y - arcHeight)
 
-        navigationAnimationTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { _ in
+        let animationTimer = Timer(timeInterval: frameInterval, repeats: true) { _ in
             currentFrame += 1
 
             if currentFrame > totalFrames {
@@ -1203,6 +1214,8 @@ struct BlueCursorView: View {
             let scalePulse = sin(linearProgress * .pi)
             self.buddyFlightScale = 1.0 + scalePulse * 0.3
         }
+        navigationAnimationTimer = animationTimer
+        RunLoop.main.add(animationTimer, forMode: .common)
     }
 
     /// Transitions to pointing mode — shows a speech bubble with a bouncy
@@ -1370,7 +1383,7 @@ private struct BlueCursorWaveformView: View {
     @ViewBuilder
     var body: some View {
         if isActive {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timelineContext in
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timelineContext in
                 bars(timelineDate: timelineContext.date)
             }
         } else {
@@ -1393,7 +1406,7 @@ private struct BlueCursorWaveformView: View {
             }
         }
         .shadow(color: cursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
-        .animation(.linear(duration: 0.04), value: audioPowerLevel)
+        .animation(.linear(duration: 0.06), value: audioPowerLevel)
     }
 
     private func barHeight(for barIndex: Int, timelineDate: Date) -> CGFloat {
@@ -1468,6 +1481,7 @@ private struct ClickyAgentDockStackView: View {
     private let dockItemSlotSize: CGFloat = 92
     private let dockItemSpacing: CGFloat = 14
     private let hoverCardHeight: CGFloat = 236
+    private let hoverExitGraceDelay: TimeInterval = 0.42
     // Leave generous transparent overdraw room above the first parked avatar.
     // The avatar glow/status pulse intentionally paints outside the 52pt
     // circle; without this inset, the panel can crop the first parked task
@@ -1716,7 +1730,11 @@ private struct ClickyAgentDockStackView: View {
             }
         }
         pendingHoverExit = exitWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: exitWorkItem)
+        // AppKit can briefly report a leave from the parked icon before the
+        // newly revealed hover card/bridge receives its enter event. Keep a
+        // small grace window so the card stays open while the pointer travels
+        // into the actions, but still collapses naturally after a real exit.
+        DispatchQueue.main.asyncAfter(deadline: .now() + hoverExitGraceDelay, execute: exitWorkItem)
     }
 }
 

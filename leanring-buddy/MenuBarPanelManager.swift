@@ -578,7 +578,7 @@ final class AgentMenuBarStatusManager: NSObject {
 
     func sync(companionManager: CompanionManager) {
         self.companionManager = companionManager
-        let visibleItems = Array(companionManager.agentDockItems.suffix(5))
+        let visibleItems = menuBarItems(from: companionManager)
         latestItemsByID = Dictionary(uniqueKeysWithValues: visibleItems.map { ($0.id, $0) })
 
         let visibleIDs = Set(visibleItems.map(\.id))
@@ -593,6 +593,59 @@ final class AgentMenuBarStatusManager: NSObject {
             let statusItem = statusItemsByItemID[item.id] ?? makeStatusItem(for: item)
             statusItemsByItemID[item.id] = statusItem
             update(statusItem: statusItem, with: item)
+        }
+    }
+
+    private func menuBarItems(from companionManager: CompanionManager) -> [ClickyAgentDockItem] {
+        var dockItemsBySessionID: [UUID: ClickyAgentDockItem] = [:]
+        for item in companionManager.agentDockItems {
+            if let sessionID = item.sessionID {
+                dockItemsBySessionID[sessionID] = item
+            }
+        }
+
+        let sessionItems = companionManager.codexAgentSessions
+            .filter { session in
+                session.hasVisibleActivity && !companionManager.archivedSessionIDs.contains(session.id)
+            }
+            .map { session -> ClickyAgentDockItem in
+                if let existingItem = dockItemsBySessionID[session.id] {
+                    return existingItem
+                }
+
+                return ClickyAgentDockItem(
+                    id: session.id,
+                    sessionID: session.id,
+                    title: session.title,
+                    userInstruction: session.title,
+                    accentTheme: session.accentTheme,
+                    status: Self.dockStatus(for: session.status),
+                    progressStageLabel: session.progressStage.label,
+                    progressStepText: session.latestActivityDisplaySummary ?? session.latestActivitySummary,
+                    activityStatusLines: session.activityStatusLines,
+                    caption: session.latestActivityDisplaySummary ?? session.latestActivitySummary,
+                    suggestedNextActions: session.latestResponseCard?.suggestedNextActions ?? [],
+                    createdAt: session.createdAt
+                )
+            }
+
+        let unsessionedItems = companionManager.agentDockItems.filter { $0.sessionID == nil }
+        let combinedItems = (sessionItems + unsessionedItems)
+            .sorted { $0.createdAt < $1.createdAt }
+
+        return Array(combinedItems.suffix(5))
+    }
+
+    private static func dockStatus(for status: CodexAgentSessionStatus) -> ClickyAgentDockStatus {
+        switch status {
+        case .starting:
+            return .starting
+        case .running:
+            return .running
+        case .ready:
+            return .done
+        case .stopped, .failed:
+            return .failed
         }
     }
 
@@ -646,11 +699,11 @@ final class AgentMenuBarStatusManager: NSObject {
         let rootView = ClickyAgentDockHoverCard(
             item: item,
             canOpenDashboard: companionManager.isAdvancedModeEnabled,
-            chat: { [weak companionManager] in
-                companionManager?.openAgentDockItem(item.id)
+            chat: { [weak self, weak companionManager] in
+                self?.openMenuBarAgent(item, companionManager: companionManager)
             },
-            text: { [weak companionManager] in
-                companionManager?.showTextFollowUpForAgentDockItem(item.id)
+            text: { [weak self, weak companionManager] in
+                self?.openMenuBarAgentTextFollowUp(item, companionManager: companionManager)
             },
             voice: { [weak companionManager] in
                 companionManager?.prepareVoiceFollowUpForAgentDockItem(item.id)
@@ -658,17 +711,17 @@ final class AgentMenuBarStatusManager: NSObject {
             close: { [weak popover] in
                 popover?.performClose(nil)
             },
-            stop: { [weak companionManager, weak popover] in
+            stop: { [weak self, weak companionManager, weak popover] in
                 popover?.performClose(nil)
-                companionManager?.stopAgentDockItem(item.id)
+                self?.stopMenuBarAgent(item, companionManager: companionManager)
             },
-            dismiss: { [weak companionManager, weak popover] in
+            dismiss: { [weak self, weak companionManager, weak popover] in
                 // Close == dismiss the finished item: hide the popover
                 // and remove the dock entry. dismissAgentDockItem is
                 // UI-only — it does NOT send a cancel signal (the agent
                 // is already terminal here).
                 popover?.performClose(nil)
-                companionManager?.dismissAgentDockItem(item.id)
+                self?.dismissMenuBarAgent(item, companionManager: companionManager)
             },
             runSuggestedAction: { [weak companionManager, weak popover] actionTitle in
                 popover?.performClose(nil)
@@ -681,6 +734,50 @@ final class AgentMenuBarStatusManager: NSObject {
         popover.contentSize = NSSize(width: 560, height: 360)
         activePopover = popover
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+    }
+
+    private func openMenuBarAgent(_ item: ClickyAgentDockItem, companionManager: CompanionManager?) {
+        guard let companionManager else { return }
+        if companionManager.agentDockItems.contains(where: { $0.id == item.id }) {
+            companionManager.openAgentDockItem(item.id)
+            return
+        }
+        if let sessionID = item.sessionID {
+            companionManager.selectCodexAgentSession(sessionID)
+        }
+        companionManager.showCodexHUD()
+    }
+
+    private func openMenuBarAgentTextFollowUp(_ item: ClickyAgentDockItem, companionManager: CompanionManager?) {
+        guard let companionManager else { return }
+        if companionManager.agentDockItems.contains(where: { $0.id == item.id }) {
+            companionManager.showTextFollowUpForAgentDockItem(item.id)
+            return
+        }
+        guard let sessionID = item.sessionID else { return }
+        companionManager.selectCodexAgentSession(sessionID)
+        companionManager.notchCaptureWindowManager.showMainInterfacePanel(
+            companionManager: companionManager,
+            focusedAgentSessionID: sessionID
+        )
+    }
+
+    private func stopMenuBarAgent(_ item: ClickyAgentDockItem, companionManager: CompanionManager?) {
+        guard let companionManager else { return }
+        if companionManager.agentDockItems.contains(where: { $0.id == item.id }) {
+            companionManager.stopAgentDockItem(item.id)
+            return
+        }
+        if let sessionID = item.sessionID {
+            companionManager.stopCodexAgentSession(sessionID, reason: "agent_menu_bar_stop")
+        }
+    }
+
+    private func dismissMenuBarAgent(_ item: ClickyAgentDockItem, companionManager: CompanionManager?) {
+        guard let companionManager else { return }
+        if companionManager.agentDockItems.contains(where: { $0.id == item.id }) {
+            companionManager.dismissAgentDockItem(item.id)
+        }
     }
 
     private func installDropTarget(on button: NSStatusBarButton, itemID: UUID) {
@@ -786,7 +883,11 @@ final class AgentMenuBarStatusManager: NSObject {
 
     @objc private func quickReplyToAgentFromMenu(_ sender: NSMenuItem) {
         guard let itemID = sender.representedObject as? UUID else { return }
-        companionManager?.showTextFollowUpForAgentDockItem(itemID)
+        if let item = latestItemsByID[itemID] {
+            openMenuBarAgentTextFollowUp(item, companionManager: companionManager)
+        } else {
+            companionManager?.showTextFollowUpForAgentDockItem(itemID)
+        }
     }
 
     @objc private func openSettingsFromAgentMenu() {

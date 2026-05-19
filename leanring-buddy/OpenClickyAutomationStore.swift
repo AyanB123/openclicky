@@ -15,6 +15,45 @@ import Combine
 @MainActor
 final class OpenClickyAutomationStore: ObservableObject {
   static let shared = OpenClickyAutomationStore()
+  static let skillDiscoveryAutomationName = "App skill discovery"
+
+  static var skillDiscoverySuggestionsURL: URL {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+    return appSupport
+      .appendingPathComponent("OpenClicky", isDirectory: true)
+      .appendingPathComponent("skill-discovery-suggestions.json", isDirectory: false)
+  }
+
+  static var skillDiscoveryAutomationPrompt: String {
+    """
+    OpenClicky scheduled skill discovery pass.
+
+    Goal: find useful Agent Mode skills for the apps and workflows the user is actively using, then surface install/connect options in the OpenClicky Connect tab.
+
+    Be efficient:
+    1. Identify likely active apps/workflows from recent OpenClicky logs, current screen/window context if provided, and obvious local project folders. Do not scan huge folders blindly.
+    2. Search local skills first under ~/Library/Application Support/OpenClicky/AgentMode/CodexHome/OpenClickyBundledSkills, ~/Library/Application Support/OpenClicky/AgentMode/CodexHome/OpenClickyLearnedSkills, ~/.codex/skills, ~/.agents/skills, ~/Documents/GitHub/*/skills, and any directly relevant repo skill folders. Prefer `find`/metadata over reading every large file.
+    3. Only then do targeted web research for public skills or official app integrations that match those apps. Use current sources and avoid broad marketplace scraping.
+    4. Recommend only practical, low-risk options that OpenClicky can install locally or connect through existing app/tool routes.
+
+    Write a compact JSON array to:
+    \(Self.skillDiscoverySuggestionsURL.path)
+
+    Schema:
+    [
+      {
+        "id": "stable-slug",
+        "title": "Skill or integration name",
+        "detail": "Why it matches the current apps/workflow",
+        "source": "local|online|installed",
+        "installPrompt": "Exact OpenClicky Agent Mode prompt to install or connect it"
+      }
+    ]
+
+    Keep at most 8 suggestions, deduplicate installed skills, and prefer local matches over online ones.
+    """
+  }
 
   @Published private(set) var automations: [OpenClickyAutomation] = []
 
@@ -29,6 +68,7 @@ final class OpenClickyAutomationStore: ObservableObject {
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     self.storeURL = dir.appendingPathComponent("automations.json")
     load()
+    ensureSkillDiscoveryAutomationInstalled()
   }
 
   // MARK: lifecycle
@@ -61,6 +101,7 @@ final class OpenClickyAutomationStore: ObservableObject {
 
   func update(_ automation: OpenClickyAutomation) {
     guard let idx = automations.firstIndex(where: { $0.id == automation.id }) else { return }
+    guard !isProtectedSystemAutomation(automations[idx]) else { return }
     var a = automation
     a.nextRun = a.computingNextRun(after: Date())
     automations[idx] = a
@@ -68,7 +109,7 @@ final class OpenClickyAutomationStore: ObservableObject {
   }
 
   func remove(id: UUID) {
-    automations.removeAll { $0.id == id }
+    automations.removeAll { $0.id == id && !isProtectedSystemAutomation($0) }
     save()
   }
 
@@ -77,6 +118,46 @@ final class OpenClickyAutomationStore: ObservableObject {
     automations[idx].enabled = enabled
     automations[idx].nextRun = enabled ? automations[idx].computingNextRun(after: Date()) : nil
     save()
+  }
+
+  @discardableResult
+  func ensureSkillDiscoveryAutomationInstalled() -> OpenClickyAutomation {
+    _ = OpenClickyAgentStore.shared.ensureSkillDiscoveryAgentInstalled()
+
+    if let idx = automations.firstIndex(where: { isProtectedSystemAutomation($0) || $0.name == Self.skillDiscoveryAutomationName }) {
+      let existing = automations[idx]
+      if existing.name != Self.skillDiscoveryAutomationName ||
+          existing.prompt != Self.skillDiscoveryAutomationPrompt ||
+          existing.agentSlug != OpenClickyAgentStore.skillDiscoveryAgentSlug {
+        var repaired = existing
+        repaired.name = Self.skillDiscoveryAutomationName
+        repaired.prompt = Self.skillDiscoveryAutomationPrompt
+        repaired.agentSlug = OpenClickyAgentStore.skillDiscoveryAgentSlug
+        repaired.nextRun = repaired.enabled ? repaired.computingNextRun(after: Date()) : nil
+        automations[idx] = repaired
+        save()
+        return repaired
+      }
+      return existing
+    }
+
+    let automation = OpenClickyAutomation(
+      name: Self.skillDiscoveryAutomationName,
+      schedule: .interval(seconds: 6 * 60 * 60),
+      prompt: Self.skillDiscoveryAutomationPrompt,
+      agentSlug: OpenClickyAgentStore.skillDiscoveryAgentSlug,
+      enabled: true
+    )
+    add(automation)
+    return automation
+  }
+
+  var skillDiscoveryAutomation: OpenClickyAutomation? {
+    automations.first(where: { isProtectedSystemAutomation($0) })
+  }
+
+  func isProtectedSystemAutomation(_ automation: OpenClickyAutomation) -> Bool {
+    automation.name == Self.skillDiscoveryAutomationName || automation.agentSlug == OpenClickyAgentStore.skillDiscoveryAgentSlug
   }
 
   // MARK: tick
@@ -130,6 +211,46 @@ final class OpenClickyAutomationStore: ObservableObject {
       try data.write(to: storeURL, options: [.atomic])
     } catch {
       print("automation save failed: \(error)")
+    }
+  }
+}
+
+struct OpenClickySkillDiscoverySuggestion: Codable, Identifiable, Equatable {
+  var id: String
+  var title: String
+  var detail: String
+  var source: String
+  var installPrompt: String
+
+  var sourceLabel: String {
+    switch source.lowercased() {
+    case "local": return "Local"
+    case "installed": return "Installed"
+    case "online": return "Online"
+    default: return source.isEmpty ? "Suggested" : source.capitalized
+    }
+  }
+}
+
+@MainActor
+final class OpenClickySkillDiscoveryStore: ObservableObject {
+  static let shared = OpenClickySkillDiscoveryStore()
+
+  @Published private(set) var suggestions: [OpenClickySkillDiscoverySuggestion] = []
+
+  private let storeURL = OpenClickyAutomationStore.skillDiscoverySuggestionsURL
+
+  private init() {
+    reload()
+  }
+
+  func reload() {
+    guard let data = try? Data(contentsOf: storeURL) else {
+      suggestions = []
+      return
+    }
+    if let decoded = try? JSONDecoder().decode([OpenClickySkillDiscoverySuggestion].self, from: data) {
+      suggestions = Array(decoded.prefix(8))
     }
   }
 }

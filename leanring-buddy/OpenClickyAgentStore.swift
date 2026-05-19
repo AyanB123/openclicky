@@ -13,6 +13,7 @@ import Combine
 @MainActor
 final class OpenClickyAgentStore: ObservableObject {
   static let shared = OpenClickyAgentStore()
+  static let skillDiscoveryAgentSlug = "skill-discovery"
 
   @Published private(set) var agents: [OpenClickyAgentDefinition] = []
 
@@ -35,6 +36,7 @@ final class OpenClickyAgentStore: ObservableObject {
   private func ensureRootsExist() {
     try? FileManager.default.createDirectory(at: builtinRoot, withIntermediateDirectories: true)
     try? FileManager.default.createDirectory(at: userRoot, withIntermediateDirectories: true)
+    ensureSkillDiscoveryAgentInstalled()
   }
 
   func reload() {
@@ -94,6 +96,9 @@ final class OpenClickyAgentStore: ObservableObject {
   /// Removes the user copy of an agent. If a built-in with the same slug
   /// exists, the agent reverts to the built-in version on next reload.
   func deleteUserCopy(slug: String) throws {
+    if slug == Self.skillDiscoveryAgentSlug {
+      throw NSError(domain: "OpenClickyAgentStore", code: 3, userInfo: [NSLocalizedDescriptionKey: "The Skill Discovery agent is required by OpenClicky and cannot be deleted."])
+    }
     let dir = userRoot.appendingPathComponent(slug, isDirectory: true)
     if FileManager.default.fileExists(atPath: dir.path) {
       try FileManager.default.removeItem(at: dir)
@@ -114,6 +119,60 @@ final class OpenClickyAgentStore: ObservableObject {
       .joined(separator: "-")
     return collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
   }
+
+  @discardableResult
+  func ensureSkillDiscoveryAgentInstalled() -> OpenClickyAgentDefinition? {
+    let slug = Self.skillDiscoveryAgentSlug
+    let dir = builtinRoot.appendingPathComponent(slug, isDirectory: true)
+    let metadataURL = dir.appendingPathComponent("agent.json")
+    let instructionsURL = dir.appendingPathComponent("instructions.md")
+
+    if FileManager.default.fileExists(atPath: metadataURL.path),
+       FileManager.default.fileExists(atPath: instructionsURL.path) {
+      return OpenClickyAgentDefinition.load(slug: slug, userRoot: userRoot, builtinRoot: builtinRoot)
+    }
+
+    do {
+      try OpenClickyAgentDefinition.write(
+        slug: slug,
+        in: builtinRoot,
+        metadata: OpenClickyAgentMetadata(
+          displayName: "Skill Discovery",
+          description: "Finds local and online skills for the apps OpenClicky sees you using.",
+          accentColorHex: "8B5CF6"
+        ),
+        soul: Self.skillDiscoveryAgentSoul,
+        instructions: Self.skillDiscoveryAgentInstructions,
+        memory: "Use concise JSON output for Connect tab suggestions. Prefer local, already-installed, and official integration paths.\n",
+        heartbeat: Self.defaultHeartbeatTemplate(displayName: "Skill Discovery"),
+        skills: OpenClickyAgentSkillSelection(enabledSkillIDs: ["skill-installer", "find-skills", "openai-docs"])
+      )
+      return OpenClickyAgentDefinition.load(slug: slug, userRoot: userRoot, builtinRoot: builtinRoot)
+    } catch {
+      print("OpenClicky skill discovery agent seed failed: \(error)")
+      return nil
+    }
+  }
+
+  private static let skillDiscoveryAgentSoul = """
+  You are OpenClicky's built-in Skill Discovery specialist.
+
+  Be quiet, efficient, and conservative. Your job is not to collect every possible tool; it is to find a small number of useful skill or connector options that match the apps and workflows OpenClicky sees the user using.
+  """
+
+  private static let skillDiscoveryAgentInstructions = """
+  Find useful OpenClicky Agent Mode skills for currently relevant apps and workflows.
+
+  Rules:
+  - Search local skill folders first.
+  - Prefer existing local skills, official integrations, and low-risk install paths.
+  - Use targeted online research only after local lookup.
+  - Do not scan huge home directories blindly.
+  - Write at most 8 deduplicated suggestions to the JSON path requested by the automation prompt.
+  - Each suggestion must include id, title, detail, source, and installPrompt.
+  - Keep installPrompt actionable for OpenClicky Agent Mode.
+  """
+
   /// Default HEARTBEAT.md scaffolding for a new agent. Mirrors the
   /// openclaw / grok-cli persona convention (last check-in + pending
   /// items + done log) so the agent can self-update across sessions.

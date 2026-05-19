@@ -14,6 +14,9 @@ struct ConversationSidebarView: View {
   @ObservedObject var companion: CompanionManager
   @State private var search: String = ""
   @State private var showArchived: Bool = false
+  @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+  @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+  @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
 
   // ChatGPT sidebar palette
   static let bg = Color(red: 0.106, green: 0.106, blue: 0.106)              // #1b1b1b
@@ -21,6 +24,17 @@ struct ConversationSidebarView: View {
   static let textPrimary = Color(red: 0.92, green: 0.92, blue: 0.93)
   static let textSecondary = Color(red: 0.62, green: 0.62, blue: 0.64)
   static let expandedWidth: CGFloat = 260
+
+  private var appFont: OpenClickyResponseCaptionFont {
+    OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+  }
+
+  private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+  private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+  private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+    appFont.swiftUIFont(size: size, weight: weight)
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -41,13 +55,13 @@ struct ConversationSidebarView: View {
         .frame(width: 22, height: 22)
         .overlay(
           Text("O")
-            .font(.system(size: 12, weight: .bold))
+            .font(appUIFont(size: max(12, subtextFontSize + 1), weight: .bold))
             .foregroundColor(.black)
         )
       Spacer()
       Button(action: newChat) {
         Image(systemName: "square.and.pencil")
-          .font(.system(size: 14, weight: .medium))
+          .font(appUIFont(size: max(14, subtextFontSize + 2), weight: .medium))
           .foregroundColor(Self.textSecondary)
           .frame(width: 28, height: 28)
       }
@@ -62,11 +76,11 @@ struct ConversationSidebarView: View {
   private var searchField: some View {
     HStack(spacing: 6) {
       Image(systemName: "magnifyingglass")
-        .font(.system(size: 11))
+        .font(appUIFont(size: max(11, subtextFontSize), weight: .medium))
         .foregroundColor(Self.textSecondary)
       TextField("Search", text: $search)
         .textFieldStyle(.plain)
-        .font(.system(size: 12))
+        .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .medium))
         .foregroundColor(Self.textPrimary)
     }
     .padding(.horizontal, 10)
@@ -103,11 +117,11 @@ struct ConversationSidebarView: View {
           Button(action: { showArchived.toggle() }) {
             HStack(spacing: 4) {
               Image(systemName: showArchived ? "chevron.down" : "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .semibold))
               Text("Archived")
-                .font(.system(size: 11, weight: .semibold))
+                .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
               Text("\(archivedSessions.count)")
-                .font(.system(size: 10))
+                .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
                 .foregroundColor(Self.textSecondary.opacity(0.7))
               Spacer()
             }
@@ -131,7 +145,7 @@ struct ConversationSidebarView: View {
 
   private func sectionLabel(_ text: String) -> some View {
     Text(text)
-      .font(.system(size: 11, weight: .semibold))
+      .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
       .foregroundColor(Self.textSecondary)
       .padding(.horizontal, 14)
       .padding(.top, 6)
@@ -143,14 +157,14 @@ struct ConversationSidebarView: View {
     return Button(action: { companion.selectCodexAgentSession(session.id) }) {
       HStack(spacing: 8) {
         Text(session.title)
-          .font(.system(size: 12, weight: .regular))
+          .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .regular))
           .foregroundColor(isActive ? Self.textPrimary : Self.textPrimary.opacity(0.85))
           .lineLimit(1)
         Spacer()
         if isArchived {
           Button(action: { companion.unarchiveSession(session.id) }) {
             Image(systemName: "tray.and.arrow.up")
-              .font(.system(size: 10))
+              .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
               .foregroundColor(Self.textSecondary)
           }
           .buttonStyle(.plain)
@@ -158,7 +172,7 @@ struct ConversationSidebarView: View {
         } else {
           Button(action: { companion.archiveSession(session.id) }) {
             Image(systemName: "archivebox")
-              .font(.system(size: 10))
+              .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
               .foregroundColor(Self.textSecondary)
           }
           .buttonStyle(.plain)
@@ -184,17 +198,17 @@ struct ConversationSidebarView: View {
         .frame(width: 26, height: 26)
         .overlay(
           Text("J")
-            .font(.system(size: 12, weight: .semibold))
+            .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .semibold))
             .foregroundColor(.white)
         )
       VStack(alignment: .leading, spacing: 0) {
         Text("Jason Kneen")
-          .font(.system(size: 12, weight: .semibold))
+          .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .semibold))
           .foregroundColor(Self.textPrimary)
       }
       Spacer()
       Image(systemName: "ellipsis")
-        .font(.system(size: 11, weight: .medium))
+        .font(appUIFont(size: max(11, subtextFontSize), weight: .medium))
         .foregroundColor(Self.textSecondary)
     }
     .padding(.horizontal, 12)

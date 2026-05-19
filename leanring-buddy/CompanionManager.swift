@@ -939,6 +939,7 @@ final class CompanionManager: ObservableObject {
     private var agentStatusCancellables: [UUID: AnyCancellable] = [:]
     private var agentActivityCancellables: [UUID: AnyCancellable] = [:]
     private var agentLoopActivityCancellables: [UUID: AnyCancellable] = [:]
+    private var agentProgressStageCancellables: [UUID: AnyCancellable] = [:]
     private var agentTitleCancellables: [UUID: AnyCancellable] = [:]
     private var pendingAgentActivityRefreshTasks: [UUID: Task<Void, Never>] = [:]
     private var tutorIdleCancellable: AnyCancellable?
@@ -1009,6 +1010,20 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private static func restoredInterruptedSessions(archivedSessionIDs: Set<UUID>) -> [CodexAgentSession] {
+        ChatWorkspaceArchiveStore.loadRelaunchableSnapshots().compactMap { snapshot in
+            guard !archivedSessionIDs.contains(snapshot.id) else { return nil }
+            let accentTheme = ClickyAccentTheme(rawValue: snapshot.accentThemeRawValue) ?? .blue
+            let session = CodexAgentSession(id: snapshot.id, title: snapshot.title, accentTheme: accentTheme)
+            session.restoreInterruptedRelaunchState(
+                entries: snapshot.entries,
+                activeThreadID: snapshot.activeThreadID,
+                lastSubmittedPrompt: snapshot.lastSubmittedPrompt
+            )
+            return session
+        }
+    }
+
     private let runtimeMode: OpenClickyCompanionRuntimeMode
 
     init(runtimeMode: OpenClickyCompanionRuntimeMode = .menuBar) {
@@ -1018,8 +1033,9 @@ final class CompanionManager: ObservableObject {
         let restoredArchiveIDs = ChatWorkspaceArchiveStore.load()
         archivedSessionIDs = restoredArchiveIDs
         let restoredArchivedSessions = Self.restoredArchivedSessions(from: restoredArchiveIDs)
-        codexAgentSessions = [initialAgentSession] + restoredArchivedSessions
-        activeCodexAgentSessionID = initialAgentSession.id
+        let restoredInterruptedSessions = Self.restoredInterruptedSessions(archivedSessionIDs: restoredArchiveIDs)
+        codexAgentSessions = [initialAgentSession] + restoredInterruptedSessions + restoredArchivedSessions
+        activeCodexAgentSessionID = restoredInterruptedSessions.first?.id ?? initialAgentSession.id
         OpenClickyMessageLogStore.shared.append(
             lane: "system",
             direction: "outgoing",
@@ -1027,7 +1043,8 @@ final class CompanionManager: ObservableObject {
             fields: [
                 "nativeCUARouterVersion": "direct-cua-explicit-agent-v4",
                 "agentAssignment": "explicit-only",
-                "computerUseBackend": selectedComputerUseBackendID
+                "computerUseBackend": selectedComputerUseBackendID,
+                "restoredInterruptedAgentTasks": restoredInterruptedSessions.count
             ]
         )
         // Bind the automation scheduler so cron / interval prompts can fire
@@ -1994,6 +2011,10 @@ final class CompanionManager: ObservableObject {
         pendingAgentActivityRefreshTasks.removeAll()
         pendingAgentDockItemRemovalTasks.values.forEach { $0.cancel() }
         pendingAgentDockItemRemovalTasks.removeAll()
+        agentStatusCancellables.removeAll()
+        agentActivityCancellables.removeAll()
+        agentLoopActivityCancellables.removeAll()
+        agentProgressStageCancellables.removeAll()
         agentTitleCancellables.removeAll()
         shortcutTransitionCancellable?.cancel()
         stopTutorIdleObservation()
@@ -2249,6 +2270,7 @@ final class CompanionManager: ObservableObject {
                 }
                 self.updateAgentDockItem(for: sessionID, status: status)
                 self.scheduleWidgetSnapshotPublish()
+                self.persistRelaunchableAgentSessions()
                 self.updateAgentProgressNarration()
             }
 
@@ -2256,6 +2278,7 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self, sessionID = session.id] _ in
                 self?.scheduleAgentActivityRefresh(for: sessionID)
+                self?.persistRelaunchableAgentSessions()
             }
 
         agentLoopActivityCancellables[session.id] = session.$activityStatusLines
@@ -2264,11 +2287,25 @@ final class CompanionManager: ObservableObject {
                 self?.scheduleAgentActivityRefresh(for: sessionID)
             }
 
+        agentProgressStageCancellables[session.id] = session.$progressStage
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.persistRelaunchableAgentSessions()
+            }
+
         agentTitleCancellables[session.id] = session.$title
             .receive(on: DispatchQueue.main)
             .sink { [weak self, sessionID = session.id] title in
                 self?.updateAgentDockTitle(for: sessionID, title: title)
+                self?.persistRelaunchableAgentSessions()
             }
+    }
+
+    private func persistRelaunchableAgentSessions() {
+        ChatWorkspaceArchiveStore.saveRelaunchableSnapshots(
+            for: codexAgentSessions,
+            archivedSessionIDs: archivedSessionIDs
+        )
     }
 
     private func updateAgentDockTitle(for sessionID: UUID, title: String) {
@@ -2310,6 +2347,7 @@ final class CompanionManager: ObservableObject {
         activeCodexAgentSessionID = session.id
         lastAgentContextSessionID = session.id
         scheduleWidgetSnapshotPublish()
+        persistRelaunchableAgentSessions()
         return session
     }
 
@@ -2380,9 +2418,24 @@ final class CompanionManager: ObservableObject {
     /// are preserved; the sidebar groups archived sessions under a separate header.
     func archiveSession(_ sessionID: UUID) {
         guard let session = codexAgentSessions.first(where: { $0.id == sessionID }) else { return }
-        archivedSessionIDs.insert(sessionID)
+        guard !Self.isSteerableAgentStatus(session.status), !session.isTurnActiveForChatQueue else {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "agent",
+                direction: "incoming",
+                event: "openclicky.agent_task.archive_blocked_running",
+                fields: [
+                    "sessionID": sessionID.uuidString,
+                    "title": session.title
+                ]
+            )
+            return
+        }
+        var updatedArchivedSessionIDs = archivedSessionIDs
+        updatedArchivedSessionIDs.insert(sessionID)
+        archivedSessionIDs = updatedArchivedSessionIDs
         ChatWorkspaceArchiveStore.save(archivedSessionIDs)
         ChatWorkspaceArchiveStore.saveSnapshot(for: session)
+        ChatWorkspaceArchiveStore.removeRelaunchableSnapshot(for: sessionID)
         if activeCodexAgentSessionID == sessionID {
             if let next = codexAgentSessions.first(where: { !archivedSessionIDs.contains($0.id) }) {
                 selectCodexAgentSession(next.id)
@@ -2395,9 +2448,12 @@ final class CompanionManager: ObservableObject {
     /// Restore a previously archived session.
     func unarchiveSession(_ sessionID: UUID) {
         guard archivedSessionIDs.contains(sessionID) else { return }
-        archivedSessionIDs.remove(sessionID)
+        var updatedArchivedSessionIDs = archivedSessionIDs
+        updatedArchivedSessionIDs.remove(sessionID)
+        archivedSessionIDs = updatedArchivedSessionIDs
         ChatWorkspaceArchiveStore.save(archivedSessionIDs)
         ChatWorkspaceArchiveStore.removeSnapshot(for: sessionID)
+        persistRelaunchableAgentSessions()
     }
 
     /// Pop the currently active session into a floating mini-chat NSPanel scoped to that session.
@@ -2432,14 +2488,18 @@ final class CompanionManager: ObservableObject {
         agentStatusCancellables.removeValue(forKey: sessionID)
         agentActivityCancellables.removeValue(forKey: sessionID)
         agentLoopActivityCancellables.removeValue(forKey: sessionID)
+        agentProgressStageCancellables.removeValue(forKey: sessionID)
         agentTitleCancellables.removeValue(forKey: sessionID)
         agentRequestTimingsBySessionID.removeValue(forKey: sessionID)
         agentExecutionStartDatesBySessionID.removeValue(forKey: sessionID)
         lastNarratedAgentOutcomeBySessionID.removeValue(forKey: sessionID)
 
-        archivedSessionIDs.remove(sessionID)
+        var updatedArchivedSessionIDs = archivedSessionIDs
+        updatedArchivedSessionIDs.remove(sessionID)
+        archivedSessionIDs = updatedArchivedSessionIDs
         ChatWorkspaceArchiveStore.save(archivedSessionIDs)
         ChatWorkspaceArchiveStore.removeSnapshot(for: sessionID)
+        ChatWorkspaceArchiveStore.removeRelaunchableSnapshot(for: sessionID)
 
         codexAgentSessions.remove(at: closingIndex)
         agentDockItems.removeAll { $0.sessionID == sessionID }
@@ -2474,6 +2534,7 @@ final class CompanionManager: ObservableObject {
             ]
         )
         scheduleWidgetSnapshotPublish()
+        persistRelaunchableAgentSessions()
     }
 
     private func beginRequestTiming(source: String, text: String) -> OpenClickyRequestTiming {
@@ -2834,7 +2895,26 @@ final class CompanionManager: ObservableObject {
 
     private func startBidirectionalRealtimeVoiceCapture(source: String) {
         guard !isRealtimeBidirectionalVoiceCaptureActive else { return }
-        if voiceState == .processing || voiceState == .responding || voiceTTSClient.isPlaying || openAIRealtimeSpeechClient.isPlaying || deepgramVoiceAgentClient.isPlaying {
+        let isPlayingResponse = voiceState == .responding || voiceTTSClient.isPlaying || openAIRealtimeSpeechClient.isPlaying || deepgramVoiceAgentClient.isPlaying
+        if isPlayingResponse {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.realtime_bidirectional.barge_in",
+                fields: [
+                    "source": source,
+                    "speechModel": selectedModel,
+                    "speechVoice": activeRealtimeSpeechVoiceID,
+                    "inputPath": activeRealtimeInputPath,
+                    "voiceState": voiceState.rawValue,
+                    "ttsPlaying": voiceTTSClient.isPlaying,
+                    "openAIRealtimePlaying": openAIRealtimeSpeechClient.isPlaying,
+                    "deepgramVoiceAgentPlaying": deepgramVoiceAgentClient.isPlaying,
+                    "reason": "new_capture_interrupts_previous_response"
+                ]
+            )
+            interruptCurrentVoiceResponse()
+        } else if voiceState == .processing {
             OpenClickyMessageLogStore.shared.append(
                 lane: "voice",
                 direction: "internal",
@@ -2848,7 +2928,7 @@ final class CompanionManager: ObservableObject {
                     "ttsPlaying": voiceTTSClient.isPlaying,
                     "openAIRealtimePlaying": openAIRealtimeSpeechClient.isPlaying,
                     "deepgramVoiceAgentPlaying": deepgramVoiceAgentClient.isPlaying,
-                    "reason": "previous_voice_turn_still_speaking"
+                    "reason": "previous_voice_turn_still_processing"
                 ]
             )
             return
@@ -2927,7 +3007,10 @@ final class CompanionManager: ObservableObject {
                         conversationHistory: historyForAPI,
                         onUserTranscript: onUserTranscript,
                         onAssistantTextChunk: onAssistantTextChunk,
-                        onPlaybackStarted: onPlaybackStarted
+                        onPlaybackStarted: onPlaybackStarted,
+                        onInputPowerLevel: { [weak self] powerLevel in
+                            self?.currentAudioPowerLevel = CGFloat(powerLevel)
+                        }
                     )
                 }
                 await MainActor.run {
@@ -5050,7 +5133,13 @@ final class CompanionManager: ObservableObject {
     }
 
     func showQuickTextInputFromMenuBar() {
-        showTextModeInputAtCursor()
+        // The legacy expandTextInput surface (with the "Ask OpenClicky / Voice
+        // / Text / Agent" buttons) is retired. Route the status-menu and
+        // pill-tap entry points to the modern main panel instead.
+        guard allPermissionsGranted else { return }
+        guard !buddyDictationManager.isKeyboardShortcutSessionActiveOrFinalizing else { return }
+        textModeWindowManager.hide()
+        notchCaptureWindowManager.showMainInterfacePanel(companionManager: self)
     }
 
     private func showMainOpenClickyPanelFromShortcut() {
@@ -6226,6 +6315,10 @@ final class CompanionManager: ObservableObject {
             ]
         )
         speakShortSystemResponse("cancelled \(session.spokenAgentName).")
+    }
+
+    func stopCodexAgentSession(_ sessionID: UUID, reason: String = "agent.stop_button") {
+        cancelAgentTask(sessionID: sessionID, removeDockItems: true, reason: reason)
     }
 
     private func cancelAgentTask(sessionID: UUID, removeDockItems: Bool, reason: String = "agent.cancel") {
@@ -12967,6 +13060,10 @@ private struct ClickyTextModeInputView: View {
             url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
         }
 
+        var chipTitle: String {
+            kind == .image ? "Image attached" : "File attached"
+        }
+
         var systemImage: String {
             kind == .image ? "photo" : "doc.text"
         }
@@ -13019,6 +13116,8 @@ private struct ClickyTextModeInputView: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .disabled(!canSubmit)
+                .accessibilityLabel("Send OpenClicky prompt")
+                .help("Send OpenClicky prompt")
 
                 Button(action: dismiss) {
                     Image(systemName: "xmark.circle.fill")
@@ -13027,6 +13126,8 @@ private struct ClickyTextModeInputView: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
+                .accessibilityLabel("Close OpenClicky prompt")
+                .help("Close OpenClicky prompt")
             }
 
             suggestionRow
@@ -13112,7 +13213,7 @@ private struct ClickyTextModeInputView: View {
                     HStack(spacing: 6) {
                         Image(systemName: attachment.systemImage)
                             .font(.system(size: 9, weight: .heavy))
-                        Text(attachment.displayName)
+                        Text(attachment.chipTitle)
                             .font(.system(size: 10, weight: .heavy))
                             .lineLimit(1)
                         Button {
@@ -13123,6 +13224,8 @@ private struct ClickyTextModeInputView: View {
                         }
                         .buttonStyle(.plain)
                         .pointerCursor()
+                        .accessibilityLabel("Remove attachment")
+                        .help("Remove attachment")
                     }
                     .foregroundColor(textColor.opacity(0.92))
                     .padding(.horizontal, 8)
@@ -13249,6 +13352,8 @@ private struct ClickyTextModeInputView: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
+                .accessibilityLabel("Use \(suggestion.title) suggestion")
+                .help(suggestion.title)
             }
             Spacer(minLength: 0)
         }

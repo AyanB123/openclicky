@@ -116,12 +116,22 @@ final class OpenClickyNotchCaptureWindowManager {
     private var foregroundAppActivationObserver: NSObjectProtocol?
     private var foregroundAppIcon: NSImage?
     private var foregroundAppName: String = "Current app"
+    // When the user drags or resizes a pill, this captures the resulting
+    // frame and locks it in for the rest of the session, keyed by the
+    // CGDirectDisplayID of the screen that pill is on. Auto-positioning
+    // (centeredX) and auto-sizing (collapsedPanelWidth) are bypassed for any
+    // display whose entry is non-nil. Foreground-app changes still refresh
+    // the displayed icon/name but no longer reflow geometry. If the primary
+    // pill moves between screens, each screen's lock is read independently.
+    private var userPillFrames: [CGDirectDisplayID: NSRect] = [:]
+    private var statsHUDPanel: NSPanel?
+    private var statsHUDLabel: NSTextField?
 
     // AppKit window frames are in points, not pixels. Keep these as real
     // point sizes; do not divide by backingScaleFactor or the content clips on
     // Retina displays.
     private static let expandedPanelWidth: CGFloat = 520
-    private static let mainPanelWidth: CGFloat = 360
+    private static let mainPanelWidth: CGFloat = 475
     private static let mainPanelHeight: CGFloat = 620
     private static let mainPanelMinimumSize = NSSize(width: 320, height: 300)
     private static let mainPanelMaximumSize = NSSize(width: 620, height: 820)
@@ -129,9 +139,13 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let statusPanelHorizontalNudge: CGFloat = 0
     private static let minimumBuiltInCollapsedPanelWidth: CGFloat = 76
     private static let minimumVoicePanelWidth: CGFloat = 92
-    private static let minimumExternalCollapsedPanelWidth: CGFloat = 88
-    private static let maximumExternalCollapsedPanelWidth: CGFloat = 88
-    private static let maximumExpandedStatusPanelWidth: CGFloat = 112
+    private static let minimumExternalCollapsedPanelWidth: CGFloat = 80
+    private static let maximumExternalCollapsedPanelWidth: CGFloat = 182
+    private static let maximumExpandedStatusPanelWidth: CGFloat = 182
+    private static let collapsedLabelFont = NSFont.systemFont(ofSize: 13, weight: .heavy)
+    private static let collapsedLabelMaxWidth: CGFloat = 132
+    // leading pad + icon (14) + stack spacing (4) + gap before trailing (4) + play/dots (14) + trailing pad
+    private static let collapsedChromeWidth: CGFloat = 7 + 14 + 4 + 4 + 14 + 12
     private static let statusLozengeHeight: CGFloat = 38
     private static let collapsedPanelHeight: CGFloat = statusLozengeHeight
     private static let expandedHandleWidth: CGFloat = 96
@@ -146,7 +160,48 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let screenEdgePadding: CGFloat = 12
     private static let escapeKeyCode: UInt16 = 53
 
+    private static let userPillFramesDefaultsKey = "OpenClickyUserPillFrames"
+
+    private func persistUserPillFrames() {
+        var encoded: [String: [String: Double]] = [:]
+        for (displayID, frame) in userPillFrames {
+            encoded[String(displayID)] = [
+                "x": Double(frame.origin.x),
+                "y": Double(frame.origin.y),
+                "w": Double(frame.size.width),
+                "h": Double(frame.size.height)
+            ]
+        }
+        UserDefaults.standard.set(encoded, forKey: Self.userPillFramesDefaultsKey)
+    }
+
+    private func loadPersistedUserPillFrames() {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.userPillFramesDefaultsKey)
+                as? [String: [String: Double]] else { return }
+        let screens = NSScreen.screens
+        for (idString, dict) in raw {
+            guard let id = UInt32(idString),
+                  let x = dict["x"], let y = dict["y"],
+                  let w = dict["w"], let h = dict["h"] else { continue }
+            let displayID = CGDirectDisplayID(id)
+            // Frame must (a) belong to a still-attached display and
+            // (b) genuinely intersect that display's frame. Pre-fix corruption
+            // wrote the same y to every screen's entry, putting some pills
+            // far off their own display; we drop those here so the user can
+            // recover by dragging once instead of editing UserDefaults.
+            guard let screen = screens.first(where: { $0.displayID == displayID }) else { continue }
+            let frame = NSRect(x: x, y: y, width: w, height: h)
+            guard screen.frame.intersects(frame) else { continue }
+            userPillFrames[displayID] = frame
+        }
+        if userPillFrames.count != raw.count {
+            // Persist the cleaned-up set so the bad entries don't come back.
+            persistUserPillFrames()
+        }
+    }
+
     init() {
+        loadPersistedUserPillFrames()
         mainPanelContentSizeObserver = NotificationCenter.default.addObserver(
             forName: .clickyPanelContentSizeDidChange,
             object: nil,
@@ -196,7 +251,7 @@ final class OpenClickyNotchCaptureWindowManager {
         submitText: @escaping (String) -> Void
     ) {
         activeMode = .collapsedText
-        let collapsedWidth = Self.collapsedPanelWidth(for: preferredAnchorScreen())
+        let collapsedWidth = Self.collapsedPanelWidth(for: preferredAnchorScreen(), appName: foregroundAppName)
         ensureCaptureContentView(width: collapsedWidth, height: Self.collapsedPanelHeight)
         let accentColor = Self.nsAccentColor(for: accentTheme)
         persistentHasRunningAgentWork = Self.hasRunningAgentWork(in: companionManager)
@@ -222,7 +277,9 @@ final class OpenClickyNotchCaptureWindowManager {
         syncMirroredStatusPanels(
             width: collapsedWidth,
             height: Self.collapsedPanelHeight,
-            widthForScreen: { Self.collapsedPanelWidth(for: $0) }
+            widthForScreen: { [weak self] screen in
+                Self.collapsedPanelWidth(for: screen, appName: self?.foregroundAppName ?? "Current app")
+            }
         ) { [weak self] view, screen in
             view.configureCollapsed(
                 accentColor: accentColor,
@@ -257,7 +314,7 @@ final class OpenClickyNotchCaptureWindowManager {
             guard activeMode != .text else { return }
             stopCollapsedHoverProbe()
             activeMode = .voice
-            ensureCaptureContentView(width: Self.voicePanelWidth(for: preferredAnchorScreen()), height: Self.voicePanelHeight)
+            ensureCaptureContentView(width: Self.voicePanelWidth(for: preferredAnchorScreen(), appName: foregroundAppName), height: Self.voicePanelHeight)
             contentView?.configureVoice(
                 phase: voicePhase,
                 audioPowerLevel: audioPowerLevel,
@@ -265,12 +322,14 @@ final class OpenClickyNotchCaptureWindowManager {
                 foregroundAppIcon: foregroundAppIcon,
                 foregroundAppName: foregroundAppName
             )
-            let voiceWidth = Self.voicePanelWidth(for: preferredAnchorScreen())
+            let voiceWidth = Self.voicePanelWidth(for: preferredAnchorScreen(), appName: foregroundAppName)
             showPanel(activating: false, width: voiceWidth, height: Self.voicePanelHeight)
             syncMirroredStatusPanels(
                 width: voiceWidth,
                 height: Self.voicePanelHeight,
-                widthForScreen: { Self.voicePanelWidth(for: $0) }
+                widthForScreen: { [weak self] screen in
+                    Self.voicePanelWidth(for: screen, appName: self?.foregroundAppName ?? "Current app")
+                }
             ) { [weak self] view, _ in
                 view.configureVoice(
                     phase: voicePhase,
@@ -309,7 +368,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func collapseToPill(accentColor: NSColor, submitText: @escaping (String) -> Void) {
         activeMode = .collapsedText
-        let collapsedWidth = Self.collapsedPanelWidth(for: preferredAnchorScreen())
+        let collapsedWidth = Self.collapsedPanelWidth(for: preferredAnchorScreen(), appName: foregroundAppName)
         ensureCaptureContentView(width: collapsedWidth, height: Self.collapsedPanelHeight)
         contentView?.configureCollapsed(
             accentColor: accentColor,
@@ -331,7 +390,9 @@ final class OpenClickyNotchCaptureWindowManager {
         syncMirroredStatusPanels(
             width: collapsedWidth,
             height: Self.collapsedPanelHeight,
-            widthForScreen: { Self.collapsedPanelWidth(for: $0) }
+            widthForScreen: { [weak self] screen in
+                Self.collapsedPanelWidth(for: screen, appName: self?.foregroundAppName ?? "Current app")
+            }
         ) { [weak self] view, screen in
             view.configureCollapsed(
                 accentColor: accentColor,
@@ -400,6 +461,14 @@ final class OpenClickyNotchCaptureWindowManager {
         let resizeContainer = OpenClickyMainPanelResizeContainerView(frame: NSRect(origin: .zero, size: initialSize))
         resizeContainer.autoresizingMask = [.width, .height]
         resizeContainer.isResizeEnabled = { [weak self] in self?.isMainPanelPinned == true }
+        resizeContainer.onResizeFrameChanged = { [weak self] size in
+            self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
+            self?.mainHostingView?.needsLayout = true
+        }
+        resizeContainer.onResizeEnded = { [weak self] size in
+            self?.mainHostingView?.frame = NSRect(origin: .zero, size: size)
+            self?.mainHostingView?.needsLayout = true
+        }
         resizeContainer.addSubview(hostingView)
         mainPanel?.contentView = resizeContainer
         mainHostingView = hostingView
@@ -429,15 +498,27 @@ final class OpenClickyNotchCaptureWindowManager {
             let screenWidth = widthForScreen?(screen) ?? width
             let statusPanel = mirroredStatusPanel(for: screen, width: screenWidth, height: height)
             guard let statusView = mirroredStatusContentViews[screen.displayID] else { continue }
-            let size = NSSize(width: screenWidth, height: height)
-            statusPanel.setFrame(NSRect(origin: statusPanel.frame.origin, size: size), display: true, animate: false)
+            // Respect the per-screen user lock so dragging the mirrored pill
+            // and then switching apps doesn't snap it back to centered/auto.
+            let userFrame = userPillFrames[screen.displayID]
+            let size: NSSize
+            let origin: NSPoint
+            if let userFrame {
+                size = userFrame.size
+                origin = userFrame.origin
+            } else {
+                size = NSSize(width: screenWidth, height: height)
+                origin = NSPoint(
+                    x: Self.centeredX(for: size, on: screen),
+                    y: Self.statusLozengeY(for: size, on: screen)
+                )
+            }
+            statusPanel.setFrame(NSRect(origin: origin, size: size), display: true, animate: false)
             statusView.setCanvas(size: size)
             configure(statusView, screen)
-            let x = Self.centeredX(for: size, on: screen)
-            let y = Self.statusLozengeY(for: size, on: screen)
-            statusPanel.setFrameOrigin(NSPoint(x: x, y: y))
             statusPanel.orderFrontRegardless()
         }
+        refreshStatsHUD()
     }
 
     private func mirroredStatusPanel(for screen: NSScreen, width: CGFloat, height: CGFloat) -> OpenClickyNotchCapturePanel {
@@ -447,6 +528,15 @@ final class OpenClickyNotchCaptureWindowManager {
         let statusPanel = Self.makeStatusPanel(width: width, height: height)
         let rootView = OpenClickyNotchCaptureRootView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         rootView.autoresizingMask = [.width, .height]
+        let displayID = screen.displayID
+        rootView.onPillFrameChanged = { [weak self] _ in
+            self?.refreshStatsHUD()
+        }
+        rootView.onPillFrameCommitted = { [weak self, displayID] frame in
+            self?.userPillFrames[displayID] = frame
+            self?.persistUserPillFrames()
+            self?.refreshStatsHUD()
+        }
         statusPanel.contentView = rootView
         mirroredStatusPanels[screen.displayID] = statusPanel
         mirroredStatusContentViews[screen.displayID] = rootView
@@ -578,6 +668,12 @@ final class OpenClickyNotchCaptureWindowManager {
         capturePanel.isMovableByWindowBackground = false
         capturePanel.titleVisibility = .hidden
         capturePanel.titlebarAppearsTransparent = true
+        // Defeat AppKit's implicit minSize derived from the initial
+        // contentRect (which is the expandedPanelWidth, 520pt). Without
+        // these the pill window refuses to shrink below the size it was
+        // created at, no matter what setFrame is called with.
+        capturePanel.minSize = NSSize(width: 20, height: 24)
+        capturePanel.contentMinSize = NSSize(width: 20, height: 24)
         return capturePanel
     }
 
@@ -624,22 +720,143 @@ final class OpenClickyNotchCaptureWindowManager {
         if contentView != nil { return }
         let rootView = OpenClickyNotchCaptureRootView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         rootView.autoresizingMask = [.width, .height]
+        // Drag ticks only refresh the HUD (so x/y/w/h follow the cursor live).
+        // The userPillFrames write happens once on commit (mouseUp), to avoid
+        // recording intermediate per-screen entries when a drag crosses
+        // monitors.
+        rootView.onPillFrameChanged = { [weak self] _ in
+            self?.refreshStatsHUD()
+        }
+        rootView.onPillFrameCommitted = { [weak self] frame in
+            guard let self else { return }
+            let displayID = self.panel?.screen?.displayID
+                ?? self.preferredAnchorScreen()?.displayID
+            if let displayID {
+                self.userPillFrames[displayID] = frame
+                self.persistUserPillFrames()
+            }
+            self.refreshStatsHUD()
+        }
         panel?.contentView = rootView
         contentView = rootView
         mainHostingView = nil
     }
 
+    private func ensureStatsHUD() -> NSPanel {
+        if let existing = statsHUDPanel { return existing }
+        let hud = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 220, height: 60),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        hud.isFloatingPanel = true
+        hud.level = .statusBar
+        hud.isOpaque = false
+        hud.backgroundColor = .clear
+        hud.hasShadow = true
+        hud.hidesOnDeactivate = false
+        hud.isReleasedWhenClosed = false
+        hud.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        hud.isMovableByWindowBackground = true
+
+        let container = OpenClickyRoundedView(cornerRadius: 10)
+        container.fillColor = NSColor.black.withAlphaComponent(0.85)
+        container.borderColor = NSColor.white.withAlphaComponent(0.15)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        hud.contentView?.addSubview(container)
+
+        let label = NSTextField(labelWithString: "")
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = NSColor.white.withAlphaComponent(0.95)
+        label.alignment = .left
+        label.maximumNumberOfLines = 2
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        if let contentView = hud.contentView {
+            NSLayoutConstraint.activate([
+                container.topAnchor.constraint(equalTo: contentView.topAnchor),
+                container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+                label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+                label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            ])
+        }
+
+        statsHUDPanel = hud
+        statsHUDLabel = label
+
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.maxX - 232
+            let y = screen.visibleFrame.maxY - 72
+            hud.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        return hud
+    }
+
+    // Builds one stats line per currently visible pill (primary + every
+    // mirror) so the HUD covers every screen the user might be working on.
+    private func refreshStatsHUD() {
+        let hud = ensureStatsHUD()
+        var lines: [String] = []
+        if let panel, panel.isVisible {
+            lines.append(statsLine(for: panel, label: screenLabel(for: panel.screen)))
+        }
+        let sortedMirrors = mirroredStatusPanels.sorted { $0.key < $1.key }
+        for (displayID, mirroredPanel) in sortedMirrors where mirroredPanel.isVisible {
+            let screen = NSScreen.screens.first { $0.displayID == displayID }
+            lines.append(statsLine(for: mirroredPanel, label: screenLabel(for: screen)))
+        }
+        if lines.isEmpty { lines.append("no pills visible") }
+        statsHUDLabel?.stringValue = lines.joined(separator: "\n")
+        if !hud.isVisible {
+            hud.orderFrontRegardless()
+        }
+    }
+
+    private func statsLine(for panel: NSPanel, label: String) -> String {
+        let frame = panel.frame
+        let displayID = panel.screen?.displayID
+        let lockState: String = displayID.flatMap { userPillFrames[$0] } != nil ? "locked" : "auto"
+        return String(
+            format: "%@  x=%5d  y=%5d  w=%4d  h=%2d  %@",
+            label.padding(toLength: 10, withPad: " ", startingAt: 0),
+            Int(frame.origin.x), Int(frame.origin.y),
+            Int(frame.width), Int(frame.height), lockState
+        )
+    }
+
+    private func screenLabel(for screen: NSScreen?) -> String {
+        guard let screen else { return "screen?" }
+        // Trim/shorten the OS-reported name so the HUD line stays readable.
+        let raw = screen.localizedName
+        if raw.isEmpty { return "scr \(screen.displayID)" }
+        return String(raw.prefix(10))
+    }
+
     private func resizeAndReposition(width: CGFloat, height: CGFloat) {
         guard let panel else { return }
-        let size = NSSize(width: width, height: height)
-        panel.setFrame(
-            NSRect(origin: panel.frame.origin, size: size),
-            display: true,
-            animate: false
-        )
+        let displayID = panel.screen?.displayID ?? preferredAnchorScreen()?.displayID
+        let userFrame = displayID.flatMap { userPillFrames[$0] }
+        let size: NSSize
+        let origin: NSPoint
+        if let userFrame {
+            size = userFrame.size
+            origin = userFrame.origin
+        } else {
+            size = NSSize(width: width, height: height)
+            origin = panel.frame.origin
+        }
+        panel.setFrame(NSRect(origin: origin, size: size), display: true, animate: false)
         contentView?.setCanvas(size: size)
-        positionPanel(size: size)
+        if userFrame == nil {
+            positionPanel(size: size)
+        }
         repositionMainPanelIfVisible()
+        refreshStatsHUD()
     }
 
     private func resizeAndRepositionMainPanel(width: CGFloat, height: CGFloat) {
@@ -656,6 +873,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func resizeVisibleMainPanelToCurrentContent(animated: Bool) {
         guard let mainPanel, mainPanel.isVisible else { return }
+        if (mainPanel.contentView as? OpenClickyMainPanelResizeContainerView)?.isUserResizing == true { return }
         if isMainPanelPinned {
             let size = constrainedMainPanelSize(mainPanel.frame.size)
             mainPanel.setFrame(
@@ -671,10 +889,12 @@ final class OpenClickyNotchCaptureWindowManager {
         let size = preferredMainPanelSize()
         let origin: NSPoint
         if animated {
-            // Keep the panel anchored where the user is already reading it.
-            // Tab/content changes should resize the dialog in place instead of
-            // walking the whole window up the screen as the fitted height changes.
-            origin = mainPanel.frame.origin
+            // Keep the top edge anchored where the user is already reading it.
+            // AppKit window frames grow upward when only the bottom-left origin
+            // is preserved, so tab/content changes like Agents or Settings must
+            // lower the origin by the height delta and extend the dialog down.
+            let topY = mainPanel.frame.maxY
+            origin = NSPoint(x: mainPanel.frame.origin.x, y: topY - size.height)
         } else {
             origin = mainPanelOrigin(for: size)
         }
@@ -723,10 +943,11 @@ final class OpenClickyNotchCaptureWindowManager {
     private func applyMainPanelResizeBehavior() {
         guard let mainPanel else { return }
         if isMainPanelPinned {
-            // Keep the panel visually custom and chrome-free. A borderless
-            // AppKit resize frame only exposes a tiny corner target, so the
-            // content container adds its own wider edge/corner resize handles.
-            mainPanel.styleMask.formUnion(.resizable)
+            // Keep the panel visually custom and chrome-free. Resizing is
+            // handled entirely by OpenClicky's edge/corner container below;
+            // leaving AppKit's resizable mask on lets the hidden system resize
+            // tracking fight our manual setFrame calls and makes drags hitch.
+            mainPanel.styleMask.remove(.resizable)
             mainPanel.styleMask.remove(.fullSizeContentView)
             mainPanel.styleMask.remove(.titled)
         } else {
@@ -791,7 +1012,7 @@ final class OpenClickyNotchCaptureWindowManager {
             pillBottomY = panel.frame.minY
         } else {
             let captureSize = NSSize(
-                width: Self.collapsedPanelWidth(for: screen),
+                width: Self.collapsedPanelWidth(for: screen, appName: foregroundAppName),
                 height: Self.collapsedPanelHeight
             )
             pillBottomY = Self.statusLozengeY(for: captureSize, on: screen)
@@ -844,7 +1065,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
         if anchorScreenOverride?.displayID != hoveredScreen.displayID {
             anchorScreenOverride = hoveredScreen
-            resizeAndReposition(width: Self.collapsedPanelWidth(for: hoveredScreen), height: Self.collapsedPanelHeight)
+            resizeAndReposition(width: Self.collapsedPanelWidth(for: hoveredScreen, appName: foregroundAppName), height: Self.collapsedPanelHeight)
         }
         persistentShowMainPanel?()
     }
@@ -863,12 +1084,14 @@ final class OpenClickyNotchCaptureWindowManager {
     private static func statusLozengeY(for size: NSSize, on screen: NSScreen) -> CGFloat {
         if notchReservedTopInset(on: screen) != nil {
             // On a MacBook notch screen the status bar should hug the physical
-            // notch at the top edge, not sit below the menu/notch safe area.
-            // Clipping a couple of points at the top also hides the top seam,
-            // matching the no-notch external-display treatment.
+            // notch at the top edge. Clipping a couple of points at the top
+            // hides the seam between the pill and the notch cutout.
             return screen.frame.maxY - size.height + Self.noNotchScreenTopOverlap
         }
-        return screen.frame.maxY - size.height - Self.topGap + Self.noNotchScreenTopOverlap
+        // External / no-notch screens: sit the pill TOP exactly at the screen
+        // top so the rounded top corners are visible. The previous +overlap
+        // pushed the top edge 2pt off-screen and clipped it flat.
+        return screen.frame.maxY - size.height - Self.topGap
     }
 
     private static func centeredX(for size: NSSize, on screen: NSScreen) -> CGFloat {
@@ -888,36 +1111,51 @@ final class OpenClickyNotchCaptureWindowManager {
         return min(max(centeredX, minX), maxX)
     }
 
-    private static func voicePanelWidth(for screen: NSScreen?) -> CGFloat {
+    private static func voicePanelWidth(for screen: NSScreen?, appName: String = "Current app") -> CGFloat {
         guard let screen else { return Self.minimumBuiltInCollapsedPanelWidth }
 
         if isLikelyBuiltInNotchScreen(screen) {
             // Voice should not fall back to the older tiny listening notch. The
             // built-in notch display keeps the same notch-surrounding bar.
-            return max(Self.minimumVoicePanelWidth, collapsedPanelWidth(for: screen))
+            return max(Self.minimumVoicePanelWidth, collapsedPanelWidth(for: screen, appName: appName))
         }
 
-        // External displays normally keep a compact centered bar. Voice states
-        // get the wider status canvas so the surface expands evenly left/right
-        // only when OpenClicky has labels and waveform content to show.
+        // External displays expand to fit the voice content (labels + waveform).
         return expandedStatusPanelWidth(for: screen)
     }
 
-    private static func collapsedPanelWidth(for screen: NSScreen?) -> CGFloat {
-        guard let screen else { return Self.minimumBuiltInCollapsedPanelWidth }
+    private static func isPlaceholderAppName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || trimmed == "Current app"
+    }
+
+    // Chrome with the name label hidden: leading pad + icon (14) + gap (4) + play/dots (14) + trailing pad
+    private static let compactCollapsedChromeWidth: CGFloat = 7 + 14 + 4 + 14 + 12
+
+    private static func intrinsicCollapsedWidth(forAppName name: String) -> CGFloat {
+        guard !isPlaceholderAppName(name) else {
+            return Self.compactCollapsedChromeWidth
+        }
+        let textWidth = (name as NSString).size(withAttributes: [.font: Self.collapsedLabelFont]).width
+        return Self.collapsedChromeWidth + ceil(textWidth)
+    }
+
+    private static func collapsedPanelWidth(for screen: NSScreen?, appName: String = "Current app") -> CGFloat {
+        guard let screen else { return Self.compactCollapsedChromeWidth }
+        let intrinsic = intrinsicCollapsedWidth(forAppName: appName)
+        // When there's no real foreground app (or the name didn't fit), drop
+        // straight to the compact icon+play width with no artificial floor --
+        // it should look small, not padded.
+        let floor: CGFloat = isPlaceholderAppName(appName) ? Self.compactCollapsedChromeWidth : (
+            isLikelyBuiltInNotchScreen(screen) ? Self.minimumBuiltInCollapsedPanelWidth : Self.minimumExternalCollapsedPanelWidth
+        )
 
         if isLikelyBuiltInNotchScreen(screen) {
-            let maximumSurroundingNotchWidth = max(Self.minimumBuiltInCollapsedPanelWidth, screen.visibleFrame.width - 48)
-            let notchSurroundWidth = (physicalNotchWidth(on: screen).map { $0 + 32 } ?? 220) * Self.statusPanelWidthScale
-            return min(
-                Self.maximumExpandedStatusPanelWidth,
-                max(Self.minimumBuiltInCollapsedPanelWidth, min(round(notchSurroundWidth), maximumSurroundingNotchWidth))
-            )
+            let upperBound = min(Self.maximumExpandedStatusPanelWidth, max(floor, screen.visibleFrame.width - 48))
+            return min(upperBound, max(floor, intrinsic))
         }
 
-        // External monitors: keep the persistent notch pill compact so it
-        // doesn't span too wide and truncate app names like "Ghostty".
-        return Self.maximumExternalCollapsedPanelWidth
+        return min(Self.maximumExternalCollapsedPanelWidth, max(floor, intrinsic))
     }
 
     private static func expandedStatusPanelWidth(for screen: NSScreen) -> CGFloat {
@@ -1024,6 +1262,51 @@ final class OpenClickyNotchCaptureWindowManager {
         foregroundAppName = name
         contentView?.updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName)
         mirroredStatusContentViews.values.forEach { $0.updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName) }
+        resizePillToCurrentAppName()
+    }
+
+    private func resizePillToCurrentAppName() {
+        guard let panel, panel.isVisible else { return }
+        let height: CGFloat
+        let widthForScreen: (NSScreen) -> CGFloat
+        switch activeMode {
+        case .voice:
+            height = Self.voicePanelHeight
+            widthForScreen = { [foregroundAppName] screen in
+                Self.voicePanelWidth(for: screen, appName: foregroundAppName)
+            }
+        case .collapsedText, .none:
+            height = Self.collapsedPanelHeight
+            widthForScreen = { [foregroundAppName] screen in
+                Self.collapsedPanelWidth(for: screen, appName: foregroundAppName)
+            }
+        case .text:
+            // Expanded text input has a fixed canvas; leave it alone.
+            return
+        }
+        let primaryScreen = preferredAnchorScreen() ?? NSScreen.main ?? panel.screen ?? NSScreen.screens.first
+        guard let primaryScreen else { return }
+        let primaryWidth = widthForScreen(primaryScreen)
+        resizeAndReposition(width: primaryWidth, height: height)
+        for (displayID, mirroredPanel) in mirroredStatusPanels {
+            guard let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) else { continue }
+            // Skip the mirror's reflow if the user has locked it -- otherwise
+            // foreground-app switches would snap the dragged mirror back to
+            // the auto-centered position.
+            if let userFrame = userPillFrames[displayID] {
+                mirroredPanel.setFrame(userFrame, display: true, animate: false)
+                mirroredStatusContentViews[displayID]?.setCanvas(size: userFrame.size)
+                continue
+            }
+            let width = widthForScreen(screen)
+            let size = NSSize(width: width, height: height)
+            mirroredPanel.setFrame(NSRect(origin: mirroredPanel.frame.origin, size: size), display: true, animate: false)
+            mirroredStatusContentViews[displayID]?.setCanvas(size: size)
+            let x = Self.centeredX(for: size, on: screen)
+            let y = Self.statusLozengeY(for: size, on: screen)
+            mirroredPanel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        refreshStatsHUD()
     }
 
     private static func detectForegroundApp() -> (icon: NSImage?, name: String) {
@@ -1095,6 +1378,26 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private var expand: (() -> Void)?
     private var accentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
 
+    // Pill drag/resize support. While in collapsed mode, mousing down anywhere
+    // on the pill begins tracking; if the user moves > 3pt horizontally we
+    // switch from "click to expand" to "drag/resize", reposition the panel
+    // frame, and notify the manager via onPillFrameChanged.
+    private struct PillDragState {
+        enum Mode { case move, resizeLeft, resizeRight }
+        let mode: Mode
+        let startMouse: NSPoint
+        let startFrame: NSRect
+        var hasDragged: Bool
+    }
+    private var pillDragState: PillDragState?
+    private let pillEdgeHitWidth: CGFloat = 16
+    private let pillMinWidth: CGFloat = 24
+    private let pillMaxWidth: CGFloat = 600
+    private let pillDragThreshold: CGFloat = 3
+    private static let collapsedLabelMaxWidth: CGFloat = 132
+    var onPillFrameChanged: ((NSRect) -> Void)?
+    var onPillFrameCommitted: ((NSRect) -> Void)?
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildViewHierarchy()
@@ -1114,8 +1417,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         self.dismiss = dismiss
         textStack.isHidden = true
         voiceStack.isHidden = true
+        let nameIsPlaceholder = foregroundAppName.trimmingCharacters(in: .whitespaces).isEmpty
+            || foregroundAppName == "Current app"
         collapsedAppIconView.isHidden = foregroundAppIcon == nil
-        collapsedAppNameLabel.isHidden = false
+        collapsedAppNameLabel.isHidden = nameIsPlaceholder
         collapsedPlayIconView.isHidden = hasRunningAgentWork
         collapsedPlayIconView.contentTintColor = accentColor
         collapsedAgentDotsView.isHidden = !hasRunningAgentWork
@@ -1134,10 +1439,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellView.roundedShadowOffset = .zero
         configureRightEdgeGradient(isVisible: true, intensity: hasRunningAgentWork ? 0.42 : 0.34)
         updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName)
-        collapsedAppIconView.isHidden = foregroundAppIcon == nil
-        collapsedAppNameLabel.isHidden = false
-        collapsedPlayIconView.isHidden = hasRunningAgentWork
-        collapsedAgentDotsView.isHidden = !hasRunningAgentWork
         needsDisplay = true
     }
 
@@ -1201,11 +1502,13 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     }
 
     func updateForegroundApp(icon: NSImage?, name: String) {
+        let nameIsPlaceholder = name.trimmingCharacters(in: .whitespaces).isEmpty
+            || name == "Current app"
         collapsedAppIconView.image = icon
         voiceAppIconView.image = icon
         collapsedAppNameLabel.stringValue = name
         collapsedAppIconView.isHidden = mode != .collapsed || icon == nil
-        collapsedAppNameLabel.isHidden = mode != .collapsed
+        collapsedAppNameLabel.isHidden = mode != .collapsed || nameIsPlaceholder
         collapsedPlayIconView.isHidden = mode != .collapsed || !collapsedAgentDotsView.isHidden
         if mode != .collapsed {
             collapsedAgentDotsView.isHidden = true
@@ -1227,6 +1530,9 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         needsLayout = true
         needsDisplay = true
         updateTrackingAreas()
+        // Force the resize-edge cursor rects to recompute against the new
+        // width so the hit zones track the pill as it grows/shrinks.
+        window?.invalidateCursorRects(for: self)
     }
 
     override func updateTrackingAreas() {
@@ -1267,8 +1573,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         shellView.roundedShadowBlurRadius = 16
         shellView.roundedShadowOffset = NSSize(width: 0, height: -8)
         addSubview(shellView)
-        let shellClickRecognizer = NSClickGestureRecognizer(target: self, action: #selector(handleCollapsedClick(_:)))
-        shellView.addGestureRecognizer(shellClickRecognizer)
+        // The shell-level click recognizer was removed in favor of the
+        // mouseDown/mouseUp drag-aware handling on the root view (see
+        // OpenClickyNotchCaptureRootView.mouseDown). A single source of truth
+        // avoids "drag fires expand as well" double-events.
 
         rightEdgeGradientView.translatesAutoresizingMaskIntoConstraints = false
         rightEdgeGradientView.isHidden = true
@@ -1340,17 +1648,20 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             collapsedAppIconView.heightAnchor.constraint(equalToConstant: 14),
             collapsedPlayIconView.widthAnchor.constraint(equalToConstant: 14),
             collapsedPlayIconView.heightAnchor.constraint(equalToConstant: 14),
-            collapsedPlayIconView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -7),
+            collapsedPlayIconView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -12),
             collapsedPlayIconView.centerYAnchor.constraint(equalTo: shellView.centerYAnchor),
             collapsedAgentDotsView.widthAnchor.constraint(equalToConstant: 20),
             collapsedAgentDotsView.heightAnchor.constraint(equalToConstant: 8),
-            collapsedAgentDotsView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -7),
+            collapsedAgentDotsView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -12),
             collapsedAgentDotsView.centerYAnchor.constraint(equalTo: shellView.centerYAnchor),
             collapsedStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 7),
             collapsedStack.trailingAnchor.constraint(lessThanOrEqualTo: collapsedPlayIconView.leadingAnchor, constant: -4),
             collapsedStack.trailingAnchor.constraint(lessThanOrEqualTo: collapsedAgentDotsView.leadingAnchor, constant: -4),
             collapsedStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor),
-            collapsedAppNameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 42)
+            // Keep common app names like "Google Chrome" readable while still
+            // letting unusually long names tail-truncate inside the compact
+            // notch bar instead of forcing the whole surface wide again.
+            collapsedAppNameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.collapsedLabelMaxWidth)
         ])
     }
 
@@ -1442,8 +1753,8 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         textField.delegate = self
         row.addArrangedSubview(textField)
 
-        row.addArrangedSubview(makeGlyphButton(systemName: "arrow.up.circle.fill", action: { [weak self] in self?.submit(.ask) }))
-        row.addArrangedSubview(makeGlyphButton(systemName: "xmark.circle.fill", action: { [weak self] in self?.dismiss?() }))
+        row.addArrangedSubview(makeGlyphButton(systemName: "arrow.up.circle.fill", tooltip: "Send OpenClicky prompt", action: { [weak self] in self?.submit(.ask) }))
+        row.addArrangedSubview(makeGlyphButton(systemName: "xmark.circle.fill", tooltip: "Close OpenClicky capture", action: { [weak self] in self?.dismiss?() }))
 
         NSLayoutConstraint.activate([
             inputShell.heightAnchor.constraint(equalToConstant: 42),
@@ -1458,7 +1769,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private func configureVoiceStack() {
         voiceStack.orientation = .horizontal
         voiceStack.alignment = .centerY
-        voiceStack.spacing = 4
+        voiceStack.spacing = 5
         voiceStack.translatesAutoresizingMaskIntoConstraints = false
         shellView.addSubview(voiceStack)
 
@@ -1468,10 +1779,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         copyStack.spacing = 0
         copyStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         copyStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        voiceTitleLabel.font = .systemFont(ofSize: 13, weight: .heavy)
+        voiceTitleLabel.font = .systemFont(ofSize: 14, weight: .heavy)
         voiceTitleLabel.textColor = NSColor.white.withAlphaComponent(0.96)
         voiceTitleLabel.lineBreakMode = .byTruncatingTail
-        voiceSubtitleLabel.font = .systemFont(ofSize: 7.5, weight: .semibold)
+        voiceSubtitleLabel.font = .systemFont(ofSize: 9.5, weight: .semibold)
         voiceSubtitleLabel.textColor = NSColor.white.withAlphaComponent(0.62)
         voiceSubtitleLabel.lineBreakMode = .byTruncatingTail
         voiceSubtitleLabel.isHidden = false
@@ -1486,16 +1797,21 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         voiceStack.addArrangedSubview(copyStack)
         voiceStack.addArrangedSubview(voiceNotchSpacer)
         voiceStack.addArrangedSubview(waveformView)
-        voiceAppIconView.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        voiceAppIconView.heightAnchor.constraint(equalToConstant: 16).isActive = true
-        copyStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 58).isActive = true
+        voiceAppIconView.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        voiceAppIconView.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        copyStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+        // Let the middle space flex so the state/app cluster hugs the leading
+        // edge and the live indicator hugs the trailing edge instead of both
+        // components clustering in the center of the notch.
         voiceNotchSpacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 4).isActive = true
         waveformView.widthAnchor.constraint(equalToConstant: 14).isActive = true
         waveformView.heightAnchor.constraint(equalToConstant: 8).isActive = true
 
+        // Pin the two voice groups to opposite sides of the pill: icon/status
+        // on the left, live waveform/indicator on the right.
         NSLayoutConstraint.activate([
-            voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 7),
-            voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -7),
+            voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 12),
+            voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: -18),
             voiceStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
         ])
         voiceStack.isHidden = true
@@ -1540,10 +1856,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         return container
     }
 
-    private func makeGlyphButton(systemName: String, action: @escaping () -> Void) -> NSButton {
+    private func makeGlyphButton(systemName: String, tooltip: String, action: @escaping () -> Void) -> NSButton {
         let button = OpenClickyClosureButton(systemName: systemName, title: nil, action: action)
         button.symbolPointSize = 16
         button.contentTintColor = NSColor.white.withAlphaComponent(0.66)
+        button.toolTip = tooltip
         NSLayoutConstraint.activate([
             button.widthAnchor.constraint(equalToConstant: 22),
             button.heightAnchor.constraint(equalToConstant: 22)
@@ -1559,6 +1876,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             action: { [weak self] in self?.submit(action) }
         )
         button.accentColor = accentColor
+        button.toolTip = action.title
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
     }
@@ -1573,6 +1891,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         button.cornerRadius = 8
         button.fillColor = NSColor.white.withAlphaComponent(0.105)
         button.borderColor = NSColor.white.withAlphaComponent(0.10)
+        button.toolTip = suggestion.title
         return button
     }
 
@@ -1700,12 +2019,111 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseDown(with event: NSEvent) {
+    // Without this override, the rightEdgeGradientView (a subview of shellView
+    // pinned to the trailing 30pt) hit-tests positive first and eats clicks
+    // on the right resize zone. Claim edge clicks for the root view so
+    // mouseDown reliably fires our drag-detection path.
+    override func hitTest(_ point: NSPoint) -> NSView? {
         if mode == .collapsed {
-            expand?()
+            let localPoint = convert(point, from: superview)
+            if localPoint.x >= 0, localPoint.x <= bounds.width,
+               localPoint.y >= 0, localPoint.y <= bounds.height,
+               localPoint.x < pillEdgeHitWidth || localPoint.x > bounds.width - pillEdgeHitWidth {
+                return self
+            }
+        }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if mode == .collapsed, let window {
+            let localPoint = convert(event.locationInWindow, from: nil)
+            let zoneMode: PillDragState.Mode
+            if localPoint.x < pillEdgeHitWidth {
+                zoneMode = .resizeLeft
+            } else if localPoint.x > bounds.width - pillEdgeHitWidth {
+                zoneMode = .resizeRight
+            } else {
+                zoneMode = .move
+            }
+            pillDragState = PillDragState(
+                mode: zoneMode,
+                startMouse: NSEvent.mouseLocation,
+                startFrame: window.frame,
+                hasDragged: false
+            )
             return
         }
         super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard var state = pillDragState, let window else {
+            super.mouseDragged(with: event)
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        let dx = mouseLocation.x - state.startMouse.x
+
+        // Resize modes track the cursor 1:1 from the first pixel of motion --
+        // a dead zone here makes the pill feel like it jumps. Move mode keeps
+        // the small threshold so a sub-3pt click doesn't shift the panel and
+        // still gets interpreted as a click-to-expand in mouseUp.
+        switch state.mode {
+        case .resizeLeft, .resizeRight:
+            state.hasDragged = state.hasDragged || dx != 0
+        case .move:
+            if !state.hasDragged && abs(dx) > pillDragThreshold {
+                state.hasDragged = true
+            }
+        }
+
+        if state.hasDragged {
+            var newFrame = state.startFrame
+            switch state.mode {
+            case .move:
+                newFrame.origin.x = state.startFrame.origin.x + dx
+            case .resizeLeft:
+                let newWidth = min(max(state.startFrame.width - dx, pillMinWidth), pillMaxWidth)
+                newFrame.origin.x = state.startFrame.maxX - newWidth
+                newFrame.size.width = newWidth
+            case .resizeRight:
+                let newWidth = min(max(state.startFrame.width + dx, pillMinWidth), pillMaxWidth)
+                newFrame.size.width = newWidth
+            }
+            // Defensive: keep the window's minSize floored at our pill
+            // minimum on every tick. Otherwise AppKit can silently clamp the
+            // setFrame call up to whatever minSize was last set (the original
+            // 520pt content rect on first create, or a stale value from a
+            // previous render pass).
+            let floor = NSSize(width: pillMinWidth, height: max(window.minSize.height, 24))
+            if window.minSize != floor { window.minSize = floor }
+            if window.contentMinSize != floor { window.contentMinSize = floor }
+            window.setFrame(newFrame, display: true, animate: false)
+            window.invalidateCursorRects(for: self)
+            onPillFrameChanged?(newFrame)
+        }
+        pillDragState = state
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let didDrag = pillDragState?.hasDragged ?? false
+        pillDragState = nil
+        if mode == .collapsed, !didDrag {
+            expand?()
+            return
+        }
+        if didDrag, let window {
+            onPillFrameCommitted?(window.frame)
+        }
+        super.mouseUp(with: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard mode == .collapsed else { return }
+        addCursorRect(NSRect(x: 0, y: 0, width: pillEdgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: bounds.maxX - pillEdgeHitWidth, y: 0, width: pillEdgeHitWidth, height: bounds.height), cursor: .resizeLeftRight)
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2175,12 +2593,21 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
     }
 
     var isResizeEnabled: (() -> Bool)?
+    var onResizeFrameChanged: ((NSSize) -> Void)?
+    var onResizeEnded: ((NSSize) -> Void)?
+    private(set) var isUserResizing = false
 
     private let edgeHitWidth: CGFloat = 16
     private let cornerHitLength: CGFloat = 28
     private var activeEdges: ResizeEdges = []
     private var dragStartMouseLocation: NSPoint = .zero
     private var dragStartFrame: NSRect = .zero
+    private var windowWasMovableByBackground = false
+
+    override func layout() {
+        super.layout()
+        subviews.forEach { $0.frame = bounds }
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard isResizeEnabled?() == true, !resizeEdges(at: point).isEmpty else {
@@ -2207,6 +2634,9 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
             super.mouseDown(with: event)
             return
         }
+        isUserResizing = true
+        windowWasMovableByBackground = window.isMovableByWindowBackground
+        window.isMovableByWindowBackground = false
         dragStartMouseLocation = NSEvent.mouseLocation
         dragStartFrame = window.frame
     }
@@ -2243,11 +2673,38 @@ private final class OpenClickyMainPanelResizeContainerView: NSView {
             frame.size.height = height
         }
 
-        window.setFrame(frame, display: true, animate: false)
+        applyResizeFrame(frame, to: window)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if let window {
+            window.isMovableByWindowBackground = windowWasMovableByBackground
+            onResizeEnded?(window.frame.size)
+        }
+        isUserResizing = false
         activeEdges = []
+        window?.contentView?.needsLayout = true
+    }
+
+    private func applyResizeFrame(_ frame: NSRect, to window: NSWindow) {
+        let scale = window.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let alignedFrame = NSRect(
+            x: (frame.origin.x * scale).rounded() / scale,
+            y: (frame.origin.y * scale).rounded() / scale,
+            width: (frame.size.width * scale).rounded() / scale,
+            height: (frame.size.height * scale).rounded() / scale
+        )
+        guard alignedFrame != window.frame else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        window.setFrame(alignedFrame, display: true, animate: false)
+        CATransaction.commit()
+        onResizeFrameChanged?(alignedFrame.size)
+
+        if let contentView = window.contentView {
+            window.invalidateCursorRects(for: contentView)
+        }
     }
 
     private func resizeEdges(at point: NSPoint) -> ResizeEdges {

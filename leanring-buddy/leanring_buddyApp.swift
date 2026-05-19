@@ -48,16 +48,6 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
         companionManager.publishWidgetSnapshot()
-        // Auto-open the panel if the user still needs to do something:
-        // either they haven't onboarded yet, or permissions were revoked.
-        // OpenClicky development builds should also open visibly on launch even
-        // if older UserDefaults say onboarding was already completed; otherwise
-        // the LSUIElement app can appear to do nothing except add a menu bar icon.
-        if OpenClickyRuntimeMode.isDevelopmentBuild
-            || !companionManager.hasCompletedOnboarding
-            || !companionManager.allPermissionsGranted {
-            menuBarPanelManager?.showPanelOnLaunch()
-        }
         registerAsLoginItemIfNeeded()
         startSparkleUpdater()
     }

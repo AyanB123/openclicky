@@ -16,16 +16,28 @@ struct ChatWorkspaceView: View {
   var dismiss: () -> Void
 
   @AppStorage("openClickyAgentHUDSidebarVisible") private var sidebarVisible: Bool = false
+  @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+  @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+  @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
   @State private var memoryDrawerOpen: Bool = false
   @State private var draft: String = ""
 
-  // ChatGPT chat-pane palette
-  private static let paneBg = Color(red: 0.117, green: 0.117, blue: 0.117)        // #1e1e1e
-  private static let composerBg = Color(red: 0.133, green: 0.133, blue: 0.133)    // #222222
-  private static let composerStroke = Color.white.opacity(0.10)
-  private static let textPrimary = Color(red: 0.92, green: 0.92, blue: 0.93)
-  private static let textSecondary = Color(red: 0.62, green: 0.62, blue: 0.64)
-  private static let accent = Color(red: 0.30, green: 0.55, blue: 0.95)
+  // OpenClicky panel palette.
+  private static let paneBg = DS.Colors.background
+  private static let textPrimary = DS.Colors.textPrimary
+  private static let textSecondary = DS.Colors.textSecondary
+  private static let accent = DS.Colors.accentText
+
+  private var appFont: OpenClickyResponseCaptionFont {
+    OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+  }
+
+  private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+  private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+  private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+    appFont.swiftUIFont(size: size, weight: weight)
+  }
 
   var body: some View {
     HStack(spacing: 0) {
@@ -77,7 +89,7 @@ struct ChatWorkspaceView: View {
     HStack(spacing: 10) {
       Button(action: {}) {
         Image(systemName: "plus")
-          .font(.system(size: 13, weight: .semibold))
+          .font(appUIFont(size: max(13, subtextFontSize + 1), weight: .semibold))
           .foregroundColor(Self.textSecondary)
           .frame(width: 28, height: 28)
           .background(
@@ -89,14 +101,16 @@ struct ChatWorkspaceView: View {
 
       TextField("Ask anything", text: $draft, axis: .vertical)
         .textFieldStyle(.plain)
-        .font(.system(size: 13))
+        .font(appUIFont(size: max(13, bodyFontSize), weight: .medium))
         .foregroundColor(Self.textPrimary)
         .lineLimit(1...6)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onSubmit(send)
 
       Button(action: prepareVoiceFollowUp) {
         Image(systemName: "waveform")
-          .font(.system(size: 14, weight: .medium))
+          .font(appUIFont(size: max(14, subtextFontSize + 2), weight: .medium))
           .foregroundColor(Self.textSecondary)
           .frame(width: 28, height: 28)
       }
@@ -108,7 +122,7 @@ struct ChatWorkspaceView: View {
 
       Button(action: send) {
         Image(systemName: "arrow.up.circle.fill")
-          .font(.system(size: 22))
+          .font(appUIFont(size: max(22, bodyFontSize + 9), weight: .medium))
           .foregroundColor(canSend ? Self.accent : Self.textSecondary.opacity(0.5))
       }
       .buttonStyle(.plain)
@@ -116,14 +130,6 @@ struct ChatWorkspaceView: View {
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 10)
-    .background(
-      RoundedRectangle(cornerRadius: 22, style: .continuous)
-        .fill(Self.composerBg)
-    )
-    .overlay(
-      RoundedRectangle(cornerRadius: 22, style: .continuous)
-        .stroke(Self.composerStroke, lineWidth: 1)
-    )
     .padding(.horizontal, 14)
     .padding(.bottom, 12)
     .padding(.top, 4)
@@ -132,10 +138,10 @@ struct ChatWorkspaceView: View {
   private var modelPill: some View {
     let label = currentModelLabel
     return Text(label)
-      .font(.system(size: 11, weight: .medium))
+      .font(appUIFont(size: max(11, subtextFontSize), weight: .medium))
       .foregroundColor(Self.textSecondary)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 4)
+      .padding(.horizontal, max(8, subtextFontSize * 0.72))
+      .padding(.vertical, max(4, subtextFontSize * 0.40))
       .background(
         Capsule().fill(Color.white.opacity(0.05))
       )

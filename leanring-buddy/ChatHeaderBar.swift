@@ -15,19 +15,35 @@ struct ChatHeaderBar: View {
   @Binding var sidebarVisible: Bool
   @Binding var memoryDrawerOpen: Bool
   var openMemory: () -> Void
+  @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+  @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
+  @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+  @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
 
-  // ChatGPT header palette
-  static let bg = Color(red: 0.137, green: 0.137, blue: 0.137)        // #232323
-  static let textPrimary = Color(red: 0.92, green: 0.92, blue: 0.93)
-  static let textSecondary = Color(red: 0.62, green: 0.62, blue: 0.64)
+  // OpenClicky panel palette.
+  static let bg = DS.Colors.surface1
+  static let textPrimary = DS.Colors.textPrimary
+  static let textSecondary = DS.Colors.textSecondary
+
+  private var appFont: OpenClickyResponseCaptionFont {
+    OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+  }
+
+  private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
+  private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+  private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+  private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+    appFont.swiftUIFont(size: size, weight: weight)
+  }
 
   var body: some View {
     HStack(spacing: 6) {
       Button(action: { sidebarVisible.toggle() }) {
         Image(systemName: "sidebar.left")
-          .font(.system(size: 13, weight: .medium))
+          .font(appUIFont(size: max(13, subtextFontSize + 1), weight: .medium))
           .foregroundColor(Self.textSecondary)
-          .frame(width: 28, height: 28)
+          .frame(width: max(28, subtextFontSize + 17), height: max(28, subtextFontSize + 17))
       }
       .buttonStyle(.plain)
       .help(sidebarVisible ? "Hide sidebar" : "Show sidebar")
@@ -54,9 +70,9 @@ struct ChatHeaderBar: View {
         }
       } label: {
         Image(systemName: "ellipsis")
-          .font(.system(size: 13, weight: .medium))
+          .font(appUIFont(size: max(13, subtextFontSize + 1), weight: .medium))
           .foregroundColor(Self.textSecondary)
-          .frame(width: 28, height: 28)
+          .frame(width: max(28, subtextFontSize + 17), height: max(28, subtextFontSize + 17))
       }
       .menuStyle(.borderlessButton)
       .menuIndicator(.hidden)
@@ -92,10 +108,10 @@ struct ChatHeaderBar: View {
     } label: {
       HStack(spacing: 4) {
         Text(headerTitle)
-          .font(.system(size: 14, weight: .semibold))
+          .font(appUIFont(size: max(14, titleFontSize * 0.54), weight: .semibold))
           .foregroundColor(Self.textPrimary)
         Image(systemName: "chevron.down")
-          .font(.system(size: 10, weight: .semibold))
+          .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .semibold))
           .foregroundColor(Self.textSecondary)
       }
       .padding(.horizontal, 8)
@@ -147,9 +163,9 @@ struct ChatHeaderBar: View {
   private func iconButton(systemName: String, help: String, action: @escaping () -> Void) -> some View {
     Button(action: action) {
       Image(systemName: systemName)
-        .font(.system(size: 13, weight: .medium))
+        .font(appUIFont(size: max(13, subtextFontSize + 1), weight: .medium))
         .foregroundColor(Self.textSecondary)
-        .frame(width: 28, height: 28)
+        .frame(width: max(28, subtextFontSize + 17), height: max(28, subtextFontSize + 17))
     }
     .buttonStyle(.plain)
     .help(help)

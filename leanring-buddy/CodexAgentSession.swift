@@ -203,6 +203,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
     @Published private(set) var progressStage: CodexAgentProgressStage = .idle
     @Published private(set) var activityStatusLines: [String] = []
     @Published private(set) var queuedFollowUpPrompts: [String] = []
+    @Published private(set) var wasRestoredAfterRelaunch = false
     @Published var model: String = OpenClickyModelCatalog.codexActionsModel(
         withID: UserDefaults.standard.string(forKey: "clickyCodexModel") ?? OpenClickyModelCatalog.defaultCodexActionsModelID
     ).id
@@ -279,6 +280,23 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         !entries.isEmpty || activeThreadID != nil || status != .stopped
     }
 
+    var canResumeAfterRelaunch: Bool {
+        wasRestoredAfterRelaunch && lastSubmittedPrompt != nil && !isTurnActiveForChatQueue
+    }
+
+    var isRelaunchResumeCandidate: Bool {
+        switch status {
+        case .starting, .running:
+            return true
+        case .failed:
+            return lastSubmittedPrompt != nil
+        case .ready:
+            return progressStage != .completed && lastSubmittedPrompt != nil
+        case .stopped:
+            return false
+        }
+    }
+
     private let homeManager: CodexHomeManager
     private let processManager: CodexProcessManager
     private var currentAssistantEntryID: String?
@@ -342,6 +360,43 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         lastErrorMessage = nil
         stopReason = nil
         status = archivedEntries.isEmpty ? .stopped : .ready
+    }
+
+    func restoreInterruptedRelaunchState(entries restoredEntries: [CodexTranscriptEntry], activeThreadID restoredThreadID: String?, lastSubmittedPrompt restoredPrompt: String?) {
+        stop(reason: "restored_after_relaunch")
+        entries = restoredEntries
+        activeThreadID = restoredThreadID
+        lastSubmittedPrompt = restoredPrompt
+        latestResponseCard = nil
+        queuedFollowUpPrompts.removeAll()
+        activityStatusLines = ["Restored after relaunch"]
+        progressStage = .idle
+        lastErrorMessage = nil
+        stopReason = "restored_after_relaunch"
+        wasRestoredAfterRelaunch = true
+        status = restoredEntries.isEmpty ? .stopped : .ready
+    }
+
+    func resumeInterruptedTaskAfterRelaunch() {
+        guard let originalPrompt = lastSubmittedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !originalPrompt.isEmpty else { return }
+
+        let recentContext = entries.suffix(8).map { entry in
+            "\(entry.role.rawValue): \(Self.spokenSnippet(from: entry.text, maxLength: 900))"
+        }.joined(separator: "\n\n")
+        wasRestoredAfterRelaunch = false
+        activeThreadID = nil
+        submitPromptFromUI("""
+        Resume this OpenClicky Agent Mode task after an app relaunch.
+
+        Original user request:
+        \(originalPrompt)
+
+        Recent visible transcript before relaunch:
+        \(recentContext.isEmpty ? "No transcript was captured before relaunch." : recentContext)
+
+        Continue from the last unfinished step. Re-check files and current state before editing, preserve unrelated work, and finish the task if it is still needed.
+        """)
     }
 
     func submitPromptFromUI(_ prompt: String, screenContext: CodexAgentScreenContext? = nil) {

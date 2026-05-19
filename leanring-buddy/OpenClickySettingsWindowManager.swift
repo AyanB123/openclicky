@@ -156,6 +156,10 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userDeepgramVoiceAgentThinkModelDefaultsKey) private var userDeepgramVoiceAgentThinkModel = "gpt-4o-mini"
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionsEnabledDefaultsKey) private var voiceResponseCaptionsEnabled = false
     @AppStorage(AppBundleConfiguration.userVoiceResponseCaptionFontDefaultsKey) private var voiceResponseCaptionFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
+    @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+    @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
     @AppStorage(AppBundleConfiguration.openClickyVoicePlaybackVolumeDefaultsKey) private var openClickyVoicePlaybackVolume = AppBundleConfiguration.voicePlaybackVolume()
     @AppStorage(AppBundleConfiguration.userCodexAgentAPIKeyDefaultsKey) private var userCodexAgentAPIKey = ""
     @AppStorage(AppBundleConfiguration.userAssemblyAIAPIKeyDefaultsKey) private var userAssemblyAIAPIKey = ""
@@ -179,6 +183,18 @@ struct OpenClickySettingsView: View {
         self.backgroundComputerUseController = companionManager.backgroundComputerUseController
     }
 
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
+    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -198,6 +214,7 @@ struct OpenClickySettingsView: View {
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(minWidth: 1040, minHeight: 660)
+        .font(appUIFont(size: bodyFontSize, weight: .regular))
         .onChange(of: selectedSection) { _, newSection in
             if newSection == .googleWorkspace, !gogCLIStatus.isInstalled, !isRefreshingGogCLIStatus {
                 refreshGogCLIStatus()
@@ -208,7 +225,7 @@ struct OpenClickySettingsView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("OpenClicky")
-                .font(.system(size: 18, weight: .semibold))
+                .font(appUIFont(size: bodyFontSize + 5, weight: .semibold))
                 .padding(.horizontal, 14)
                 .padding(.top, 18)
                 .padding(.bottom, 12)
@@ -219,10 +236,10 @@ struct OpenClickySettingsView: View {
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: section.systemImageName)
-                            .font(.system(size: 14, weight: .medium))
+                            .font(appUIFont(size: bodyFontSize + 1, weight: .medium))
                             .frame(width: 20)
                         Text(section.title)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(appUIFont(size: bodyFontSize, weight: .medium))
                         Spacer()
                     }
                     .foregroundColor(selectedSection == section ? .primary : .secondary)
@@ -246,9 +263,9 @@ struct OpenClickySettingsView: View {
     private var sectionHeader: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(selectedSection.title)
-                .font(.system(size: 26, weight: .semibold))
+                .font(appUIFont(size: titleFontSize, weight: .semibold))
             Text(sectionSubtitle)
-                .font(.system(size: 13))
+                .font(appUIFont(size: bodyFontSize, weight: .regular))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -324,10 +341,52 @@ struct OpenClickySettingsView: View {
 
             }
 
+            settingsGroup("Typography") {
+                Picker("App font", selection: $appFontRawValue) {
+                    ForEach(OpenClickyResponseCaptionFont.allCases) { appFont in
+                        Text(appFont.label).tag(appFont.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+
+                fontSizeSliderRow(
+                    title: "Headings",
+                    subtitle: "Controls large section titles in Settings.",
+                    systemImageName: "textformat.size.larger",
+                    value: $appTitleFontSize,
+                    range: 20...34
+                )
+
+                fontSizeSliderRow(
+                    title: "Main labels",
+                    subtitle: "Controls normal setting labels and sidebar text.",
+                    systemImageName: "textformat",
+                    value: $appBodyFontSize,
+                    range: 11...18
+                )
+
+                fontSizeSliderRow(
+                    title: "Subtext",
+                    subtitle: "Controls helper text under settings.",
+                    systemImageName: "text.alignleft",
+                    value: $appSubtextFontSize,
+                    range: 9...15
+                )
+
+                actionRow(title: "Reset font settings", systemImageName: "arrow.counterclockwise") {
+                    appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+                    appTitleFontSize = 26.0
+                    appBodyFontSize = 13.0
+                    appSubtextFontSize = 11.0
+                }
+            }
+
             settingsGroup("Cursor appearance") {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Pick OpenClicky’s cursor buddy and accent color. Pets ignore the color tint, but the accent still drives glows, buttons, and task badges.")
-                        .font(.system(size: 11))
+                        .font(appUIFont(size: subtextFontSize, weight: .regular))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -372,7 +431,7 @@ struct OpenClickySettingsView: View {
             settingsGroup("Tutor skills") {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "wand.and.stars")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(appUIFont(size: bodyFontSize + 5, weight: .semibold))
                         .foregroundColor(.secondary)
                         .frame(width: 24)
 
@@ -399,7 +458,7 @@ struct OpenClickySettingsView: View {
 
             settingsGroup("Response voice model") {
                 Text("Pick Realtime when one model should listen and speak live, or use a normal model when OpenClicky should think first and hand the reply to a playback engine.")
-                    .font(.system(size: 11))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -434,7 +493,7 @@ struct OpenClickySettingsView: View {
 
                 if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .deepgram {
                     Text("Deepgram Voice Agent uses one WebSocket for listening, thinking, and speaking; it reuses the Deepgram key under API Keys.")
-                        .font(.system(size: 11))
+                        .font(appUIFont(size: subtextFontSize, weight: .regular))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     textFieldRow(
@@ -548,7 +607,7 @@ struct OpenClickySettingsView: View {
                 Text(OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
                     ? "GPT Realtime is selected as the response voice model, so it owns playback for voice replies."
                     : "Choose the separate TTS provider used when a normal text model generates OpenClicky's reply.")
-                    .font(.system(size: 11))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -1307,7 +1366,7 @@ struct OpenClickySettingsView: View {
     private func settingsGroup<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(appUIFont(size: bodyFontSize, weight: .semibold))
                 .foregroundColor(.secondary)
             VStack(spacing: 0) {
                 content()
@@ -1323,6 +1382,24 @@ struct OpenClickySettingsView: View {
         }
     }
 
+    private func fontSizeSliderRow(
+        title: String,
+        subtitle: String,
+        systemImageName: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        editableFieldRow(title: title, subtitle: subtitle, systemImageName: systemImageName) {
+            HStack(spacing: 10) {
+                Slider(value: value, in: range, step: 1)
+                Text("\(Int(value.wrappedValue.rounded())) pt")
+                    .font(appUIFont(size: subtextFontSize, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+    }
+
     private func settingsOptionColumns(_ count: Int) -> [GridItem] {
         Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
     }
@@ -1331,7 +1408,7 @@ struct OpenClickySettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
                 Image(systemName: systemImageName)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .semibold))
                     .foregroundColor(.accentColor)
                     .frame(width: 16)
                 Text(title.uppercased())
@@ -1362,8 +1439,8 @@ struct OpenClickySettingsView: View {
         HStack(spacing: 12) {
             rowIcon(systemImageName)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .medium))
-                Text(subtitle).font(.system(size: 11)).foregroundColor(.secondary)
+                Text(title).font(appUIFont(size: bodyFontSize, weight: .medium))
+                Text(subtitle).font(appUIFont(size: subtextFontSize, weight: .regular)).foregroundColor(.secondary)
             }
             Spacer()
             Toggle("", isOn: isOn)
@@ -1378,9 +1455,9 @@ struct OpenClickySettingsView: View {
         HStack(spacing: 12) {
             rowIcon(systemImageName)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .medium))
+                Text(title).font(appUIFont(size: bodyFontSize, weight: .medium))
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
@@ -1400,9 +1477,9 @@ struct OpenClickySettingsView: View {
                 .foregroundColor(.orange)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(appUIFont(size: bodyFontSize, weight: .medium))
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1424,7 +1501,7 @@ struct OpenClickySettingsView: View {
             HStack(spacing: 8) {
                 TextField(placeholder, text: text)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
+                    .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .regular))
                 if let openPath {
                     settingsPathOpenButton(openPath())
                 }
@@ -1436,7 +1513,7 @@ struct OpenClickySettingsView: View {
         editableFieldRow(title: title, subtitle: subtitle, systemImageName: systemImageName) {
             SecureField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12))
+                .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .regular))
         }
     }
 
@@ -1449,8 +1526,8 @@ struct OpenClickySettingsView: View {
         HStack(alignment: .top, spacing: 12) {
             rowIcon(systemImageName)
             VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.system(size: 13, weight: .medium))
-                Text(subtitle).font(.system(size: 11)).foregroundColor(.secondary)
+                Text(title).font(appUIFont(size: bodyFontSize, weight: .medium))
+                Text(subtitle).font(appUIFont(size: subtextFontSize, weight: .regular)).foregroundColor(.secondary)
                 field()
             }
         }
@@ -1463,7 +1540,7 @@ struct OpenClickySettingsView: View {
             HStack(spacing: 12) {
                 rowIcon(systemImageName)
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(appUIFont(size: bodyFontSize, weight: .medium))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
@@ -1481,7 +1558,7 @@ struct OpenClickySettingsView: View {
             openSettingsPath(rawPath)
         } label: {
             Image(systemName: settingsPathOpenIconName(for: rawPath))
-                .font(.system(size: 12, weight: .semibold))
+                .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .semibold))
                 .frame(width: 24, height: 24)
         }
         .buttonStyle(.borderless)
@@ -1512,9 +1589,9 @@ struct OpenClickySettingsView: View {
             rowIcon(isGranted ? "checkmark.circle" : "exclamationmark.triangle")
                 .foregroundColor(isGranted ? .green : .orange)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .medium))
+                Text(title).font(appUIFont(size: bodyFontSize, weight: .medium))
                 Text(isGranted ? "Granted" : "Needs permission")
-                    .font(.system(size: 11))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
                     .foregroundColor(.secondary)
             }
             Spacer()
@@ -1551,11 +1628,11 @@ struct OpenClickySettingsView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(appUIFont(size: max(9, subtextFontSize - 1), weight: .regular))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                 }
@@ -1601,7 +1678,7 @@ struct OpenClickySettingsView: View {
                 .frame(width: 46, height: 46)
 
                 Text(accentTheme.title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(appUIFont(size: max(10, subtextFontSize), weight: .medium))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
@@ -1649,7 +1726,7 @@ struct OpenClickySettingsView: View {
                 }
 
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(appUIFont(size: max(10, subtextFontSize), weight: .medium))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
@@ -1684,7 +1761,7 @@ struct OpenClickySettingsView: View {
                 }
 
                 Text(pet.displayName)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(appUIFont(size: max(10, subtextFontSize), weight: .medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
@@ -1709,7 +1786,7 @@ struct OpenClickySettingsView: View {
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(.secondary)
             Text("No pets")
-                .font(.system(size: 11, weight: .medium))
+                .font(appUIFont(size: max(10, subtextFontSize), weight: .medium))
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -1726,7 +1803,7 @@ struct OpenClickySettingsView: View {
 
     private func rowIcon(_ systemImageName: String) -> some View {
         Image(systemName: systemImageName)
-            .font(.system(size: 14, weight: .medium))
+            .font(appUIFont(size: bodyFontSize + 1, weight: .medium))
     }
 
     private func openFeedbackInbox() {

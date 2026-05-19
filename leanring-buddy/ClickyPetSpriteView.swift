@@ -51,7 +51,7 @@ struct ClickyPetSpriteView: View {
     var haloColor: Color? = nil
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
+        TimelineView(.periodic(from: .now, by: renderInterval)) { context in
             let frame = currentFrame(for: context.date)
             ZStack {
                 if let haloColor = haloColor {
@@ -76,6 +76,14 @@ struct ClickyPetSpriteView: View {
     }
 
     // MARK: - Frame timing
+
+    /// Sprite atlases have baked frame holds around 110–320ms. Driving them
+    /// through a 60Hz animation timeline wastes compositor work and steals
+    /// budget from cursor/panel motion, so tick just fast enough to hit frame
+    /// boundaries cleanly.
+    private var renderInterval: TimeInterval {
+        max(1.0 / 24.0, (animationState.row.frameDurations.min() ?? 0.12) * 0.5)
+    }
 
     private func currentFrame(for date: Date) -> CGImage? {
         let row = animationState.row

@@ -23,6 +23,13 @@ struct OpenClickyNotchPanelView: View {
             url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
         }
 
+        var chipTitle: String {
+            switch kind {
+            case .image: return "Image attached"
+            case .document: return "File attached"
+            }
+        }
+
         var systemImage: String {
             switch kind {
             case .image: return "photo"
@@ -41,10 +48,14 @@ struct OpenClickyNotchPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject private var agentStore = OpenClickyAgentStore.shared
     @ObservedObject private var automationStore = OpenClickyAutomationStore.shared
+    @ObservedObject private var skillDiscoveryStore = OpenClickySkillDiscoveryStore.shared
     @ObservedObject private var petLibrary = ClickyBuddyPetLibrary.shared
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentThemeID = ClickyAccentTheme.blue.rawValue
     @AppStorage(ClickyCursorAvatarStyle.userDefaultsKey) private var avatarStyleRawValue = ClickyCursorAvatarStyle.default.storageValue
     @AppStorage(ClickyCursorAvatarSizePreference.userDefaultsKey) private var cursorAvatarSizeScale = ClickyCursorAvatarSizePreference.defaultScale
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+    @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
     @State private var isShowingHatchSheet = false
     @State private var hatchPetName = ""
     @State private var hatchPetDescription = ""
@@ -58,6 +69,17 @@ struct OpenClickyNotchPanelView: View {
     @State private var quickPrompt: String = ""
     @State private var quickPromptAttachments: [PanelDraftAttachment] = []
     @State private var isQuickPromptDropTargeted = false
+
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
     @State private var isCompactChatExpanded = false
     @State private var expandedAgentSessionID: UUID?
     @State private var expandedAgentPrompt: String = ""
@@ -66,6 +88,7 @@ struct OpenClickyNotchPanelView: View {
     @State private var agentSessionFilter: OpenClickyAgentSessionFilter = .active
     @State private var expandedAgentAttachments: [PanelDraftAttachment] = []
     @State private var isExpandedAgentDropTargeted = false
+    @State private var pendingStopAgentSessionID: UUID?
     @State private var gogStatus: OpenClickyGogCLIStatus = .unknown
     @State private var hasLoadedGogStatus = false
     @FocusState private var isQuickPromptFocused: Bool
@@ -138,6 +161,12 @@ struct OpenClickyNotchPanelView: View {
         }
     }
 
+    private var completedUnarchivedAgentSessions: [CodexAgentSession] {
+        companionManager.codexAgentSessions.filter { session in
+            session.progressStage == .completed && !companionManager.archivedSessionIDs.contains(session.id)
+        }
+    }
+
     private var compactChatEntries: [CodexTranscriptEntry] {
         let visibleEntries = companionManager.codexAgentSession.entries.compactMap { entry -> CodexTranscriptEntry? in
             guard entry.role != .command else { return nil }
@@ -203,6 +232,12 @@ struct OpenClickyNotchPanelView: View {
                 detail: "\(enabledAutomationCount) enabled · \(automationStore.automations.count) total local schedules",
                 state: enabledAutomationCount > 0 ? .ready : .available,
                 systemImageName: "clock.arrow.circlepath"
+            ),
+            OpenClickyNotchConnectionRow(
+                title: "Skill Discovery",
+                detail: "\(skillDiscoveryStore.suggestions.count) suggestions · scans local skills and targeted online sources",
+                state: automationStore.skillDiscoveryAutomation?.enabled == true ? .ready : .available,
+                systemImageName: "wand.and.stars.inverse"
             )
         ]
     }
@@ -216,6 +251,27 @@ struct OpenClickyNotchPanelView: View {
         .background(Color.clear)
         .sheet(isPresented: $isShowingHatchSheet) {
             hatchPetSheet
+        }
+        .confirmationDialog(
+            "Stop this running OpenClicky task?",
+            isPresented: Binding(
+                get: { pendingStopAgentSessionID != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingStopAgentSessionID = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Stop task", role: .destructive) {
+                confirmStopPendingAgentSession()
+            }
+            Button("Keep running", role: .cancel) {
+                pendingStopAgentSessionID = nil
+            }
+        } message: {
+            Text("Running tasks cannot be archived. Stop it first if you want to move it out of the active list.")
         }
         .onAppear {
             focusQuickPromptIfHome()
@@ -286,7 +342,6 @@ struct OpenClickyNotchPanelView: View {
         .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .animation(.spring(response: 0.24, dampingFraction: 0.88), value: quickPromptMode)
         .animation(.spring(response: 0.24, dampingFraction: 0.88), value: isCompactChatExpanded)
-        .animation(.spring(response: 0.24, dampingFraction: 0.88), value: companionManager.codexAgentSession.entries.count)
     }
 
     @ViewBuilder
@@ -321,8 +376,9 @@ struct OpenClickyNotchPanelView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Show OpenClicky agents")
+            .help("Show OpenClicky agents")
             statusPill(
-                title: companionManager.allPermissionsGranted ? "Perms OK" : "Needs perms",
+                title: companionManager.allPermissionsGranted ? "Permission" : "Needs perms",
                 systemImageName: companionManager.allPermissionsGranted ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
                 color: companionManager.allPermissionsGranted ? .green : .orange
             )
@@ -337,15 +393,15 @@ struct OpenClickyNotchPanelView: View {
                 Button {
                     selectPrimaryTab(tab)
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 7) {
                         Image(systemName: tab.systemImageName)
-                            .font(.system(size: 10, weight: .heavy))
+                            .font(.system(size: 15, weight: .heavy))
                         Text(tab.title)
                             .font(.system(size: 10, weight: .heavy))
                     }
                     .foregroundColor(selectedTab == tab ? DS.Colors.textPrimary : DS.Colors.textSecondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 9)
                     .background(
                         Capsule(style: .continuous)
                             .fill(selectedTab == tab ? Color.white.opacity(0.12) : Color.white.opacity(0.045))
@@ -362,6 +418,8 @@ struct OpenClickyNotchPanelView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Show \(tab.title)")
+                .help("Show \(tab.title)")
             }
 
             panelChromeButton(
@@ -386,7 +444,7 @@ struct OpenClickyNotchPanelView: View {
                 action: closePanel
             )
         }
-        .frame(height: 28)
+        .frame(height: 32)
         .transaction { transaction in
             transaction.animation = nil
         }
@@ -408,9 +466,9 @@ struct OpenClickyNotchPanelView: View {
     private func panelChromeButton(systemImageName: String, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImageName)
-                .font(.system(size: 10, weight: .heavy))
+                .font(.system(size: 13, weight: .heavy))
                 .foregroundColor(DS.Colors.textSecondary)
-                .frame(width: 28, height: 28)
+                .frame(width: 30, height: 30)
                 .background(
                     Circle()
                         .fill(Color.white.opacity(0.055))
@@ -422,6 +480,7 @@ struct OpenClickyNotchPanelView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)
+        .help(accessibilityLabel)
     }
 
     private var homeTab: some View {
@@ -563,7 +622,7 @@ struct OpenClickyNotchPanelView: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 7) {
                 Image(systemName: "square.grid.2x2.fill")
-                    .font(.system(size: 10, weight: .black))
+                    .font(.system(size: 12, weight: .black))
                     .foregroundColor(.purple.opacity(0.9))
                 Text("Specialist agents")
                     .font(.system(size: 10, weight: .heavy))
@@ -618,10 +677,10 @@ struct OpenClickyNotchPanelView: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(accent.opacity(0.16))
                     Image(systemName: agent.isUserDefined ? "person.crop.circle.fill.badge.checkmark" : "person.crop.circle.badge.gearshape")
-                        .font(.system(size: 12, weight: .black))
+                        .font(.system(size: 15, weight: .black))
                         .foregroundColor(accent)
                 }
-                .frame(width: 30, height: 30)
+                .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agent.metadata.displayName)
@@ -672,6 +731,12 @@ struct OpenClickyNotchPanelView: View {
                     selectedTab = .home
                 }
 
+                if !completedUnarchivedAgentSessions.isEmpty {
+                    secondaryActionButton(title: "Archive done", systemImageName: "archivebox.fill") {
+                        archiveCompletedAgentSessions()
+                    }
+                }
+
                 agentUtilityIconButton(
                     systemImageName: "books.vertical",
                     accessibilityLabel: "Open OpenClicky memory browser"
@@ -707,9 +772,9 @@ struct OpenClickyNotchPanelView: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: filter.systemImageName)
-                    .font(.system(size: 10, weight: .black))
+                    .font(.system(size: 13, weight: .black))
                 Text("\(count)")
-                    .font(.system(size: 9, weight: .heavy))
+                    .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .heavy))
                     .monospacedDigit()
             }
             .foregroundColor(isSelected ? DS.Colors.textOnAccent : DS.Colors.textSecondary)
@@ -729,10 +794,42 @@ struct OpenClickyNotchPanelView: View {
         .help(filter.title)
     }
 
+    private func archiveCompletedAgentSessions() {
+        let sessionIDs = completedUnarchivedAgentSessions.map(\.id)
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+            if let expandedAgentSessionID,
+               sessionIDs.contains(expandedAgentSessionID) {
+                self.expandedAgentSessionID = nil
+            }
+            sessionIDs.forEach { companionManager.archiveSession($0) }
+            if agentSessionFilter == .completed {
+                agentSessionFilter = .active
+            }
+        }
+    }
+
+    private func isAgentSessionRunning(_ session: CodexAgentSession) -> Bool {
+        switch session.status {
+        case .starting, .running:
+            return true
+        case .stopped, .ready, .failed:
+            return session.isTurnActiveForChatQueue
+        }
+    }
+
+    private func confirmStopPendingAgentSession() {
+        guard let sessionID = pendingStopAgentSessionID else { return }
+        pendingStopAgentSessionID = nil
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+            companionManager.selectCodexAgentSession(sessionID)
+            companionManager.stopCodexAgentSession(sessionID, reason: "agent_panel_stop")
+        }
+    }
+
     private func agentUtilityIconButton(systemImageName: String, accessibilityLabel: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImageName)
-                .font(.system(size: 11, weight: .black))
+                .font(.system(size: 14, weight: .black))
                 .foregroundColor(DS.Colors.textPrimary)
                 .frame(width: 34, height: 34)
                 .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.white.opacity(0.07)))
@@ -744,16 +841,155 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var connectionsTab: some View {
-        VStack(spacing: 10) {
-            OpenClickyNotchEmptyState(
-                systemImageName: "point.3.connected.trianglepath.dotted",
-                title: "Connections stay local",
-                subtitle: "Use Agent Mode skills for Notion, GitHub, mail, browser, files, and app workflows. No hosted sync required."
-            )
-            primaryActionButton(title: "Open settings", systemImageName: "gearshape.fill") {
-                companionManager.showSettingsWindow()
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(spacing: 10) {
+                OpenClickyNotchEmptyState(
+                    systemImageName: "point.3.connected.trianglepath.dotted",
+                    title: "Connections",
+                    subtitle: "Use Agent Mode skills for Notion, GitHub, mail, browser, files, and app workflows. No hosted sync required."
+                )
+                skillDiscoveryPanel
+                VStack(spacing: 7) {
+                    ForEach(connectionRows) { row in
+                        connectionRow(row)
+                    }
+                }
+                primaryActionButton(title: "Open settings", systemImageName: "gearshape.fill") {
+                    companionManager.showSettingsWindow()
+                }
+            }
+            .padding(.bottom, 2)
+        }
+        .frame(maxHeight: 590, alignment: .top)
+        .onAppear {
+            automationStore.ensureSkillDiscoveryAutomationInstalled()
+            skillDiscoveryStore.reload()
+        }
+    }
+
+    private var skillDiscoveryPanel: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles.rectangle.stack.fill")
+                    .font(.system(size: 15, weight: .black))
+                    .foregroundColor(DS.Colors.accentText)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("App skill discovery")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(DS.Colors.textPrimary)
+                    Text(skillDiscoveryStatusText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                secondaryActionButton(title: "Run now", systemImageName: "play.fill") {
+                    runSkillDiscoveryNow()
+                }
+                secondaryActionButton(title: "Open skills", systemImageName: "folder.fill") {
+                    NSWorkspace.shared.open(companionManager.codexHomeManager.learnedSkillsDirectory)
+                }
+            }
+
+            if skillDiscoveryStore.suggestions.isEmpty {
+                Text("OpenClicky will populate this with local and online skill matches after the scheduled pass runs.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(9)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.045)))
+            } else {
+                VStack(spacing: 7) {
+                    ForEach(skillDiscoveryStore.suggestions) { suggestion in
+                        skillDiscoverySuggestionRow(suggestion)
+                    }
+                }
             }
         }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.055)))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(DS.Colors.accentText.opacity(0.14), lineWidth: 1))
+    }
+
+    private var skillDiscoveryStatusText: String {
+        guard let automation = automationStore.skillDiscoveryAutomation else {
+            return "Preconfigured schedule will be added automatically."
+        }
+        let enabled = automation.enabled ? "enabled" : "paused"
+        if let next = automation.nextRun, automation.enabled {
+            return "\(enabled) · next \(next.formatted(.dateTime.weekday().hour().minute()))"
+        }
+        return "\(enabled) · \(automation.schedule.displayString)"
+    }
+
+    private func skillDiscoverySuggestionRow(_ suggestion: OpenClickySkillDiscoverySuggestion) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: suggestion.source.lowercased() == "online" ? "globe" : "wand.and.stars")
+                .font(.system(size: 13, weight: .black))
+                .foregroundColor(DS.Colors.accentText)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(DS.Colors.accentText.opacity(0.12)))
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(suggestion.title)
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .lineLimit(1)
+                    Text(suggestion.sourceLabel)
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundColor(DS.Colors.accentText)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule(style: .continuous).fill(DS.Colors.accentText.opacity(0.12)))
+                }
+                Text(suggestion.detail)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                installSkillSuggestion(suggestion)
+            } label: {
+                Text(suggestion.source.lowercased() == "installed" ? "Connect" : "Install")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundColor(DS.Colors.textOnAccent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Capsule(style: .continuous).fill(DS.Colors.accent))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(suggestion.source.lowercased() == "installed" ? "Connect" : "Install") \(suggestion.title)")
+            .help("Start an OpenClicky agent to \(suggestion.source.lowercased() == "installed" ? "connect" : "install") \(suggestion.title)")
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.white.opacity(0.052)))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.065), lineWidth: 1))
+    }
+
+    private func runSkillDiscoveryNow() {
+        automationStore.ensureSkillDiscoveryAutomationInstalled()
+        if let agent = agentStore.agent(slug: OpenClickyAgentStore.skillDiscoveryAgentSlug) {
+            let session = companionManager.createAndSelectNewCodexAgentSession(asAgent: agent)
+            session.submitPromptFromUI(OpenClickyAutomationStore.skillDiscoveryAutomationPrompt, screenContext: nil)
+        } else {
+            companionManager.submitAgentPromptFromUI(OpenClickyAutomationStore.skillDiscoveryAutomationPrompt)
+        }
+    }
+
+    private func installSkillSuggestion(_ suggestion: OpenClickySkillDiscoverySuggestion) {
+        let prompt = suggestion.installPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        companionManager.submitNewAgentTaskFromUI(
+            prompt.isEmpty ? "Install or connect the \(suggestion.title) skill for OpenClicky Agent Mode, preserving local skill and memory rules." : prompt,
+            source: "open_clicky_connect_tab"
+        )
+        notifyPanelSizeChanged()
     }
 
     private var settingsTab: some View {
@@ -775,23 +1011,29 @@ struct OpenClickyNotchPanelView: View {
 
             HStack(spacing: 8) {
                 Image(systemName: quickPromptMode.fieldSystemImageName)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(DS.Colors.accentText)
-                TextField(quickPromptAttachments.isEmpty ? quickPromptMode.placeholder : "Ask about the attachment…", text: $quickPrompt)
+                TextField(quickPromptAttachments.isEmpty ? quickPromptMode.placeholder : "Ask about the attachment…", text: $quickPrompt, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(DS.Colors.textPrimary)
+                    .lineLimit(1...5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .focused($isQuickPromptFocused)
                     .submitLabel(.send)
                     .onSubmit { submitQuickPromptFromKeyboard() }
-                    .onKeyPress(.return) {
+                    .onKeyPress(.return, phases: .down) { keyPress in
+                        if keyPress.modifiers.contains(.shift) {
+                            return .ignored
+                        }
                         submitQuickPromptFromKeyboard()
                         return .handled
                     }
                 Button(action: submitQuickPrompt) {
                     HStack(spacing: 5) {
                         Image(systemName: "paperplane.fill")
-                            .font(.system(size: 10, weight: .black))
+                            .font(.system(size: 12, weight: .black))
                         Text("Send")
                             .font(.system(size: 11, weight: .heavy))
                     }
@@ -806,6 +1048,7 @@ struct OpenClickyNotchPanelView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: [])
                 .accessibilityLabel("Send OpenClicky prompt")
+                .help("Send OpenClicky prompt")
             }
         }
         .padding(.horizontal, 12)
@@ -861,11 +1104,11 @@ struct OpenClickyNotchPanelView: View {
                                 .controlSize(.small)
                                 .scaleEffect(0.72)
                             Text(companionManager.codexAgentSession.progressStage.label)
-                                .font(.system(size: 10, weight: .heavy))
+                                .font(appUIFont(size: max(10, subtextFontSize), weight: .heavy))
                                 .foregroundColor(DS.Colors.textSecondary)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
+                        .padding(.horizontal, max(9, bodyFontSize * 0.75))
+                        .padding(.vertical, max(7, bodyFontSize * 0.52))
                         .background(Capsule(style: .continuous).fill(Color.white.opacity(0.055)))
                         .id("compact-chat-status")
                     }
@@ -881,7 +1124,9 @@ struct OpenClickyNotchPanelView: View {
             .onChange(of: companionManager.codexAgentSession.entries.count) {
                 let targetID = compactChatEntries.last?.id ?? (companionManager.codexAgentSession.isTurnActiveForChatQueue ? "compact-chat-status" : nil)
                 guard let targetID else { return }
-                withAnimation(.easeOut(duration: 0.18)) {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
                     proxy.scrollTo(targetID, anchor: .bottom)
                 }
             }
@@ -894,17 +1139,18 @@ struct OpenClickyNotchPanelView: View {
             if isUser { Spacer(minLength: 36) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
                 Text(compactChatRoleLabel(for: entry.role))
-                    .font(.system(size: 8, weight: .black))
+                    .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .black))
                     .foregroundColor(compactChatRoleColor(for: entry.role))
                 Text(entry.text)
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .medium))
                     .foregroundColor(DS.Colors.textPrimary)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(compactChatBubbleColor(for: entry.role)))
-            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 0.5))
+            .padding(.horizontal, max(9, bodyFontSize * 0.82))
+            .padding(.vertical, max(8, bodyFontSize * 0.66))
+            .background(RoundedRectangle(cornerRadius: max(13, bodyFontSize + 2), style: .continuous).fill(compactChatBubbleColor(for: entry.role)))
+            .overlay(RoundedRectangle(cornerRadius: max(13, bodyFontSize + 2), style: .continuous).stroke(Color.white.opacity(0.07), lineWidth: 0.5))
             if !isUser { Spacer(minLength: 36) }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
@@ -988,7 +1234,7 @@ struct OpenClickyNotchPanelView: View {
                 Button(action: { presentHatchSheet() }) {
                     HStack(spacing: 5) {
                         Image(systemName: "sparkles")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                         Text("Hatch new")
                             .font(.system(size: 10, weight: .heavy))
                     }
@@ -999,6 +1245,8 @@ struct OpenClickyNotchPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(DS.Colors.textSecondary)
+                .accessibilityLabel("Hatch a new cursor buddy")
+                .help("Hatch a new cursor buddy")
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -1053,7 +1301,7 @@ struct OpenClickyNotchPanelView: View {
         Button(action: { presentHatchSheet() }) {
             VStack(spacing: 2) {
                 Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
                 Text("Hatch")
                     .font(.system(size: 9, weight: .medium))
@@ -1063,6 +1311,8 @@ struct OpenClickyNotchPanelView: View {
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(DS.Colors.borderSubtle, style: StrokeStyle(lineWidth: 0.8, dash: [3, 3])))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Hatch a new cursor buddy")
+        .help("Hatch a new cursor buddy")
     }
 
     private func avatarTile(_ style: ClickyCursorAvatarStyle, label: String) -> some View {
@@ -1166,6 +1416,7 @@ struct OpenClickyNotchPanelView: View {
             HStack {
                 Spacer()
                 Button("Cancel") { isShowingHatchSheet = false }
+                    .help("Cancel buddy hatch")
                 Button("Hatch") {
                     let theme = ClickyAccentTheme(rawValue: selectedAccentThemeID) ?? .blue
                     _ = ClickyPetHatchCoordinator.shared.beginHatch(
@@ -1177,6 +1428,7 @@ struct OpenClickyNotchPanelView: View {
                     isShowingHatchSheet = false
                 }
                 .disabled(hatchPetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Start hatching this buddy")
             }
         }
         .padding(16)
@@ -1213,49 +1465,97 @@ struct OpenClickyNotchPanelView: View {
 
     private func agentRow(_ session: CodexAgentSession) -> some View {
         let isExpanded = expandedAgentSessionID == session.id
+        let isArchived = companionManager.archivedSessionIDs.contains(session.id)
+        let isRunning = isAgentSessionRunning(session)
+        let canStop = !isArchived && isRunning
+        let canArchive = !isArchived && !isRunning && session.progressStage == .completed
+        let showsTerminalControl = canStop || canArchive || isArchived
         return VStack(spacing: 0) {
-            Button {
-                companionManager.selectCodexAgentSession(session.id)
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                    expandedAgentSessionID = isExpanded ? nil : session.id
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(agentStatusColor(session.status))
-                        .frame(width: 8, height: 8)
-                        .shadow(color: agentStatusColor(session.status).opacity(0.7), radius: 5, x: 0, y: 0)
+            HStack(spacing: 6) {
+                Button {
+                    companionManager.selectCodexAgentSession(session.id)
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                        expandedAgentSessionID = isExpanded ? nil : session.id
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        if isRunning {
+                            OpenClickyRunningAgentIndicator(color: agentStatusColor(session.status))
+                        } else {
+                            Circle()
+                                .fill(agentStatusColor(session.status))
+                                .frame(width: 8, height: 8)
+                                .shadow(color: agentStatusColor(session.status).opacity(0.7), radius: 5, x: 0, y: 0)
+                        }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(session.title)
                                 .font(.system(size: 12, weight: .heavy))
                                 .foregroundColor(DS.Colors.textPrimary)
                                 .lineLimit(1)
-                            Text(session.status.label)
-                                .font(.system(size: 8, weight: .black))
-                                .foregroundColor(agentStatusColor(session.status))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule(style: .continuous).fill(agentStatusColor(session.status).opacity(0.14)))
+
+                            Text(session.latestActivityDisplaySummary ?? session.statusSummaryLine)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(DS.Colors.textSecondary)
+                                .lineLimit(1)
                         }
 
-                        Text(session.latestActivityDisplaySummary ?? session.statusSummaryLine)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(DS.Colors.textSecondary)
+                        Spacer(minLength: 8)
+                        Text(session.status.label)
+                            .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .black))
+                            .foregroundColor(agentStatusColor(session.status))
                             .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, max(6, subtextFontSize * 0.58))
+                            .padding(.vertical, max(3, subtextFontSize * 0.28))
+                            .background(Capsule(style: .continuous).fill(agentStatusColor(session.status).opacity(0.14)))
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 13, weight: .black))
+                            .foregroundColor(isExpanded ? DS.Colors.accentText : DS.Colors.textTertiary)
                     }
-
-                    Spacer(minLength: 8)
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 10, weight: .black))
-                        .foregroundColor(isExpanded ? DS.Colors.accentText : DS.Colors.textTertiary)
+                    .padding(.vertical, 10)
+                    .padding(.leading, 10)
+                    .padding(.trailing, showsTerminalControl ? 4 : 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "Collapse \(session.title)" : "Expand \(session.title)")
+                .help(isExpanded ? "Collapse \(session.title)" : "Expand \(session.title)")
+
+                if canStop {
+                    agentArchiveButton(
+                        systemImageName: "stop.circle.fill",
+                        accessibilityLabel: "Stop running task \(session.title)",
+                        helpText: "Stop this running OpenClicky task",
+                        foregroundColor: DS.Colors.destructiveText
+                    ) {
+                        pendingStopAgentSessionID = session.id
+                    }
+                } else if isArchived {
+                    agentArchiveButton(
+                        systemImageName: "tray.and.arrow.up.fill",
+                        accessibilityLabel: "Unarchive \(session.title)",
+                        helpText: "Unarchive this OpenClicky task"
+                    ) {
+                        companionManager.unarchiveSession(session.id)
+                    }
+                } else if canArchive {
+                    agentArchiveButton(
+                        systemImageName: "archivebox.fill",
+                        accessibilityLabel: "Archive completed task \(session.title)",
+                        helpText: "Archive this completed OpenClicky task"
+                    ) {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            if expandedAgentSessionID == session.id {
+                                expandedAgentSessionID = nil
+                            }
+                            companionManager.archiveSession(session.id)
+                        }
+                    }
+                }
             }
-            .buttonStyle(.plain)
+            .padding(.trailing, showsTerminalControl ? 8 : 0)
 
             if isExpanded {
                 expandedAgentConversation(for: session)
@@ -1270,6 +1570,32 @@ struct OpenClickyNotchPanelView: View {
                 .stroke(session.id == companionManager.activeCodexAgentSessionID ? DS.Colors.accentText.opacity(0.35) : Color.white.opacity(0.06), lineWidth: 1)
         )
         .animation(.spring(response: 0.24, dampingFraction: 0.86), value: isExpanded)
+    }
+
+    private func agentArchiveButton(
+        systemImageName: String,
+        accessibilityLabel: String,
+        helpText: String,
+        foregroundColor: Color = DS.Colors.textSecondary,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImageName)
+                .font(.system(size: 13, weight: .black))
+                .foregroundColor(foregroundColor)
+                .frame(width: 30, height: 30)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(0.075))
+                )
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .help(helpText)
     }
 
     private func expandedAgentConversation(for session: CodexAgentSession) -> some View {
@@ -1299,13 +1625,32 @@ struct OpenClickyNotchPanelView: View {
                                     .controlSize(.small)
                                     .scaleEffect(0.72)
                                 Text(session.progressStage.label)
-                                    .font(.system(size: 10, weight: .heavy))
+                                    .font(appUIFont(size: max(10, subtextFontSize), weight: .heavy))
                                     .foregroundColor(DS.Colors.textSecondary)
                             }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 7)
+                            .padding(.horizontal, max(9, bodyFontSize * 0.75))
+                            .padding(.vertical, max(7, bodyFontSize * 0.52))
                             .background(Capsule(style: .continuous).fill(Color.white.opacity(0.055)))
                             .id("\(session.id.uuidString)-agent-status")
+                        }
+
+                        if session.canResumeAfterRelaunch {
+                            Button {
+                                companionManager.selectCodexAgentSession(session.id)
+                                session.resumeInterruptedTaskAfterRelaunch()
+                                notifyPanelSizeChanged()
+                            } label: {
+                                Label("Resume task", systemImage: "arrow.clockwise.circle.fill")
+                                    .font(.system(size: 11, weight: .heavy))
+                                    .foregroundColor(DS.Colors.textOnAccent)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(Capsule(style: .continuous).fill(DS.Colors.accent))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Resume OpenClicky task after relaunch")
+                            .help("Resume this unfinished OpenClicky task after relaunch")
+                            .id("\(session.id.uuidString)-resume-task")
                         }
                     }
                     .padding(9)
@@ -1341,16 +1686,22 @@ struct OpenClickyNotchPanelView: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "arrowshape.turn.up.left.fill")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(DS.Colors.accentText)
-                TextField(expandedAgentAttachments.isEmpty ? "Talk to this task…" : "Talk to this task about the attachment…", text: $expandedAgentPrompt)
+                TextField(expandedAgentAttachments.isEmpty ? "Talk to this task…" : "Talk to this task about the attachment…", text: $expandedAgentPrompt, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(DS.Colors.textPrimary)
+                    .lineLimit(1...5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .focused($isExpandedAgentPromptFocused)
                     .submitLabel(.send)
                     .onSubmit { submitExpandedAgentPromptFromKeyboard(to: session) }
-                    .onKeyPress(.return) {
+                    .onKeyPress(.return, phases: .down) { keyPress in
+                        if keyPress.modifiers.contains(.shift) {
+                            return .ignored
+                        }
                         submitExpandedAgentPromptFromKeyboard(to: session)
                         return .handled
                     }
@@ -1359,7 +1710,7 @@ struct OpenClickyNotchPanelView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "paperplane.fill")
-                            .font(.system(size: 10, weight: .black))
+                            .font(.system(size: 12, weight: .black))
                         Text("Send")
                             .font(.system(size: 11, weight: .heavy))
                     }
@@ -1374,6 +1725,7 @@ struct OpenClickyNotchPanelView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: [])
                 .accessibilityLabel("Send message to OpenClicky task")
+                .help("Send message to OpenClicky task")
             }
         }
         .padding(.horizontal, 12)
@@ -1436,9 +1788,9 @@ struct OpenClickyNotchPanelView: View {
     private func connectionRow(_ row: OpenClickyNotchConnectionRow) -> some View {
         HStack(spacing: 10) {
             Image(systemName: row.systemImageName)
-                .font(.system(size: 13, weight: .heavy))
+                .font(.system(size: 15, weight: .heavy))
                 .foregroundColor(row.state.color)
-                .frame(width: 28, height: 28)
+                .frame(width: 32, height: 32)
                 .background(Circle().fill(row.state.color.opacity(0.14)))
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1447,10 +1799,10 @@ struct OpenClickyNotchPanelView: View {
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(DS.Colors.textPrimary)
                     Text(row.state.title)
-                        .font(.system(size: 8, weight: .black))
+                        .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .black))
                         .foregroundColor(row.state.color)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, max(6, subtextFontSize * 0.58))
+                        .padding(.vertical, max(3, subtextFontSize * 0.28))
                         .background(Capsule(style: .continuous).fill(row.state.color.opacity(0.14)))
                 }
                 Text(row.detail)
@@ -1472,9 +1824,9 @@ struct OpenClickyNotchPanelView: View {
     private func settingSummaryRow(title: String, detail: String, systemImageName: String) -> some View {
         HStack(spacing: 9) {
             Image(systemName: systemImageName)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundColor(DS.Colors.accentText)
-                .frame(width: 24, height: 24)
+                .frame(width: 28, height: 28)
                 .background(Circle().fill(DS.Colors.accentText.opacity(0.12)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -1492,26 +1844,27 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private func statusPill(title: String, systemImageName: String, color: Color) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 8) {
             Image(systemName: systemImageName)
-                .font(.system(size: 9, weight: .heavy))
+                .font(appUIFont(size: max(15, subtextFontSize + 4), weight: .heavy))
             Text(title)
-                .font(.system(size: 9, weight: .heavy))
+                .font(appUIFont(size: max(13, subtextFontSize + 2), weight: .heavy))
         }
         .foregroundColor(color)
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, max(11, subtextFontSize * 0.95))
+        .padding(.vertical, max(8, subtextFontSize * 0.66))
         .background(Capsule(style: .continuous).fill(color.opacity(0.105)))
         .overlay(Capsule(style: .continuous).stroke(color.opacity(0.18), lineWidth: 1))
+        .help(title)
     }
 
     private func primaryActionButton(title: String, systemImageName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: systemImageName)
-                    .font(.system(size: 10, weight: .black))
+                    .font(.system(size: 13, weight: .black))
                 Text(title)
                     .font(.system(size: 11, weight: .heavy))
             }
@@ -1524,13 +1877,15 @@ struct OpenClickyNotchPanelView: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .help(title)
     }
 
     private func secondaryActionButton(title: String, systemImageName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: systemImageName)
-                    .font(.system(size: 10, weight: .black))
+                    .font(.system(size: 13, weight: .black))
                 Text(title)
                     .font(.system(size: 11, weight: .heavy))
             }
@@ -1541,15 +1896,17 @@ struct OpenClickyNotchPanelView: View {
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .help(title)
     }
 
     private func submitQuickAskPrompt() {
         let trimmedPrompt = quickPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = quickPromptAttachments
-        guard !trimmedPrompt.isEmpty || !attachments.isEmpty else {
-            companionManager.showQuickTextInputFromMenuBar()
-            return
-        }
+        // Empty submit does nothing -- previously this fell back to the legacy
+        // expandTextInput dialog ("Ask OpenClicky / Voice / Text / Agent"),
+        // which is being retired in favor of this in-panel prompt surface.
+        guard !trimmedPrompt.isEmpty || !attachments.isEmpty else { return }
 
         quickPrompt = ""
         quickPromptAttachments.removeAll()
@@ -1647,15 +2004,15 @@ struct OpenClickyNotchPanelView: View {
                 ForEach(attachments) { attachment in
                     HStack(spacing: 7) {
                         Image(systemName: attachment.systemImage)
-                            .font(.system(size: 10, weight: .heavy))
+                            .font(appUIFont(size: max(10, subtextFontSize), weight: .heavy))
                             .foregroundColor(attachment.kind == .image ? DS.Colors.accentText : DS.Colors.textSecondary)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(attachment.displayName)
-                                .font(.system(size: 10, weight: .heavy))
+                            Text(attachment.chipTitle)
+                                .font(appUIFont(size: max(10, subtextFontSize), weight: .heavy))
                                 .foregroundColor(DS.Colors.textPrimary)
                                 .lineLimit(1)
-                            Text(attachment.kindLabel)
-                                .font(.system(size: 8, weight: .semibold))
+                            Text(attachment.displayName)
+                                .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                                 .foregroundColor(DS.Colors.textTertiary)
                                 .lineLimit(1)
                         }
@@ -1666,10 +2023,11 @@ struct OpenClickyNotchPanelView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Remove attachment")
+                        .help("Remove attachment")
                     }
-                    .padding(.leading, 8)
-                    .padding(.trailing, 7)
-                    .padding(.vertical, 6)
+                    .padding(.leading, max(8, subtextFontSize * 0.72))
+                    .padding(.trailing, max(7, subtextFontSize * 0.64))
+                    .padding(.vertical, max(6, subtextFontSize * 0.50))
                     .background(Capsule(style: .continuous).fill(Color.white.opacity(0.085)))
                     .overlay(Capsule(style: .continuous).stroke(Color.white.opacity(0.13), lineWidth: 0.6))
                 }
@@ -2058,10 +2416,10 @@ private struct OpenClickyNotchHeroCard<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Image(systemName: systemImageName)
-                    .font(.system(size: 15, weight: .black))
-                    .foregroundColor(accent)
-                    .frame(width: 34, height: 34)
+                    Image(systemName: systemImageName)
+                        .font(.system(size: 18, weight: .black))
+                        .foregroundColor(accent)
+                        .frame(width: 38, height: 38)
                     .background(Circle().fill(accent.opacity(0.15)))
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -2108,9 +2466,9 @@ private struct OpenClickyNotchMetricCard: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: systemImageName)
-                    .font(.system(size: 11, weight: .black))
+                    .font(.system(size: 13, weight: .black))
                     .foregroundColor(isSelected ? .white : color)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 28, height: 28)
                     .background(Circle().fill(color.opacity(isSelected ? 0.92 : 0.13)))
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -2147,6 +2505,33 @@ private struct OpenClickyNotchMetricCard: View {
     }
 }
 
+private struct OpenClickyRunningAgentIndicator: View {
+    let color: Color
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 2.5) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(color)
+                    .frame(width: 4.5, height: 4.5)
+                    .scaleEffect(isAnimating ? 1.0 : 0.55)
+                    .opacity(isAnimating ? 1.0 : 0.45)
+                    .animation(
+                        .easeInOut(duration: 0.54)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(index) * 0.13),
+                        value: isAnimating
+                    )
+            }
+        }
+        .frame(width: 18, height: 10)
+        .onAppear { isAnimating = true }
+        .onDisappear { isAnimating = false }
+        .accessibilityLabel("Running")
+    }
+}
+
 private struct OpenClickyNotchEmptyState: View {
     let systemImageName: String
     let title: String
@@ -2155,7 +2540,7 @@ private struct OpenClickyNotchEmptyState: View {
     var body: some View {
         VStack(spacing: 7) {
             Image(systemName: systemImageName)
-                .font(.system(size: 18, weight: .heavy))
+                .font(.system(size: 22, weight: .heavy))
                 .foregroundColor(DS.Colors.textSecondary)
             Text(title)
                 .font(.system(size: 12, weight: .heavy))

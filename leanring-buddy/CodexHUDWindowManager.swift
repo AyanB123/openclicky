@@ -13,6 +13,11 @@ enum OpenClickyHUDLayout {
     static let fallbackMinimumDimension: CGFloat = 240
 }
 
+private final class OpenClickyHUDPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @MainActor
 final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
@@ -72,20 +77,21 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
                 dismiss: { [weak self] in self?.hide() }
             )
         )
-        // Standard macOS window chrome: title bar + traffic lights (close /
-        // minimize / zoom). We keep NSPanel for the menu-bar app context but
-        // drop every borderless / floating attribute so the OS draws normal
-        // chrome. No transparency, no hidden title, no floating level.
-        let panel = NSPanel(
+        // Keep the HUD as an OpenClicky surface, not a standard app window:
+        // the SwiftUI header owns close/actions, while the panel stays keyable
+        // for typing without showing a titlebar or traffic lights.
+        let panel = OpenClickyHUDPanel(
             contentRect: NSRect(x: 0, y: 0, width: OpenClickyHUDLayout.width, height: OpenClickyHUDLayout.height),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
         panel.title = "OpenClicky"
-        panel.titleVisibility = .visible
-        panel.titlebarAppearsTransparent = false
-        panel.isMovableByWindowBackground = false
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.fullScreenPrimary]
         panel.hasShadow = true
         panel.minSize = NSSize(width: OpenClickyHUDLayout.minimumWidth, height: OpenClickyHUDLayout.minimumHeight)
@@ -93,6 +99,9 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
         panel.contentView = hostingView
         panel.delegate = self
         panel.isReleasedWhenClosed = false
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
+        }
         return panel
     }
 
@@ -178,6 +187,13 @@ struct CodexHUDView: View {
             url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
         }
 
+        var chipTitle: String {
+            switch kind {
+            case .image: return "Image attached"
+            case .document: return "File attached"
+            }
+        }
+
         var subtitle: String {
             url.deletingLastPathComponent().path
         }
@@ -203,6 +219,10 @@ struct CodexHUDView: View {
     enum ChromeMode { case standalone, embedded }
     @ObservedObject var companionManager: CompanionManager
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentThemeID = ClickyAccentTheme.blue.rawValue
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppTitleFontSizeDefaultsKey) private var appTitleFontSize = 26.0
+    @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+    @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
     var openMemory: () -> Void
     var prepareVoiceFollowUp: () -> Void
     var close: () -> Void
@@ -212,13 +232,32 @@ struct CodexHUDView: View {
     @State private var droppedAttachments: [HUDDraftAttachment] = []
     @State private var isDropTargeted = false
     @State private var timestampNow = Date()
+    @State private var pendingStopAgentSessionID: UUID?
 
     private var session: CodexAgentSession {
         companionManager.codexAgentSession
     }
 
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
+    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
+
     private var activeDockItem: ClickyAgentDockItem? {
         companionManager.agentDockItems.last { $0.sessionID == session.id }
+    }
+
+    private var activeAgentSessions: [CodexAgentSession] {
+        companionManager.codexAgentSessions.filter { agentSession in
+            !companionManager.archivedSessionIDs.contains(agentSession.id)
+        }
     }
 
     var body: some View {
@@ -237,8 +276,8 @@ struct CodexHUDView: View {
                     .padding(.top, 10)
             }
             transcript
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
+                .padding(.horizontal, chromeMode == .standalone ? 14 : 0)
+                .padding(.top, chromeMode == .standalone ? 10 : 6)
                 .padding(.bottom, chromeMode == .standalone ? 10 : 14)
             if chromeMode == .standalone {
                 composer
@@ -283,6 +322,27 @@ struct CodexHUDView: View {
             isTargeted: $isDropTargeted,
             perform: handleDrop
         )
+        .confirmationDialog(
+            "Stop this running OpenClicky task?",
+            isPresented: Binding(
+                get: { pendingStopAgentSessionID != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingStopAgentSessionID = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Stop task", role: .destructive) {
+                confirmStopPendingAgentSession()
+            }
+            Button("Keep running", role: .cancel) {
+                pendingStopAgentSessionID = nil
+            }
+        } message: {
+            Text("Running tasks stay active until you stop them, so OpenClicky will not archive or close this task while it is still working.")
+        }
         .animation(.none, value: selectedAccentThemeID)
         .animation(.easeOut(duration: DS.Animation.fast), value: isDropTargeted)
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
@@ -290,11 +350,27 @@ struct CodexHUDView: View {
         }
     }
 
+    private func isAgentSessionRunning(_ agentSession: CodexAgentSession) -> Bool {
+        switch agentSession.status {
+        case .starting, .running:
+            return true
+        case .stopped, .ready, .failed:
+            return agentSession.isTurnActiveForChatQueue
+        }
+    }
+
+    private func confirmStopPendingAgentSession() {
+        guard let sessionID = pendingStopAgentSessionID else { return }
+        pendingStopAgentSessionID = nil
+        companionManager.selectCodexAgentSession(sessionID)
+        companionManager.stopCodexAgentSession(sessionID, reason: "agent_hud_stop")
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
                 Text("OpenClicky")
-                    .font(.system(size: 14, weight: .bold))
+                    .font(appUIFont(size: max(14, titleFontSize * 0.54), weight: .bold))
                     .foregroundColor(DS.Colors.textPrimary)
 
                 Circle()
@@ -306,7 +382,7 @@ struct CodexHUDView: View {
             Spacer()
 
             Text(headerSubtitle)
-                .font(.system(size: 11, weight: .semibold))
+                .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
                 .foregroundColor(DS.Colors.textTertiary)
                 .lineLimit(1)
 
@@ -316,16 +392,33 @@ struct CodexHUDView: View {
                 color: session.isTurnActiveForChatQueue ? DS.Colors.accentText : sessionStatusColor
             )
             HUDHeaderPill(
-                title: "\(companionManager.codexAgentSessions.count) sessions",
+                title: "\(activeAgentSessions.count) active",
                 systemImageName: "rectangle.stack.fill",
                 color: DS.Colors.textSecondary
             )
             iconButton(systemName: "books.vertical", helpText: "Memory", action: openMemory)
             iconButton(systemName: "bolt.fill", helpText: "Warm up", action: { session.warmUp() })
-            iconButton(systemName: "xmark", helpText: "Close", action: close)
+            closeDialogButton
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+
+    private var closeDialogButton: some View {
+        Button(action: close) {
+            Image(systemName: "xmark")
+                .font(appUIFont(size: max(13, subtextFontSize + 2), weight: .bold))
+                .foregroundColor(DS.Colors.textSecondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .background(Circle().fill(DS.Colors.surface2.opacity(0.92)))
+        .overlay(Circle().stroke(DS.Colors.borderSubtle, lineWidth: 1))
+        .fixedSize()
+        .layoutPriority(3)
+        .help("Close OpenClicky HUD")
+        .accessibilityLabel("Close OpenClicky HUD")
     }
 
     private var headerSubtitle: String {
@@ -345,41 +438,64 @@ struct CodexHUDView: View {
     }
 
     private var agentTeamStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(companionManager.codexAgentSessions) { agentSession in
-                    HUDFloatingAgentButton(
-                        session: agentSession,
-                        isSelected: agentSession.id == companionManager.activeCodexAgentSessionID,
-                        select: {
-                            companionManager.selectCodexAgentSession(agentSession.id)
-                        },
-                        close: {
-                            companionManager.closeCodexAgentSession(agentSession.id)
-                        }
-                    )
-                }
+        HStack(spacing: 9) {
+            Label("Active", systemImage: "rectangle.stack.fill")
+                .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .bold))
+                .foregroundColor(DS.Colors.textTertiary)
+                .labelStyle(.titleAndIcon)
 
-                Button(action: {
-                    companionManager.createAndSelectNewCodexAgentSession()
-                }) {
-                    Label("New", systemImage: "plus.message.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
-                        .background(Capsule(style: .continuous).fill(DS.Colors.surface2))
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .stroke(DS.Colors.borderSubtle, lineWidth: 1)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(activeAgentSessions) { agentSession in
+                        HUDFloatingAgentButton(
+                            session: agentSession,
+                            isSelected: agentSession.id == companionManager.activeCodexAgentSessionID,
+                            select: {
+                                companionManager.selectCodexAgentSession(agentSession.id)
+                            },
+                            close: {
+                                if isAgentSessionRunning(agentSession) {
+                                    pendingStopAgentSessionID = agentSession.id
+                                } else {
+                                    companionManager.closeCodexAgentSession(agentSession.id)
+                                }
+                            }
                         )
+                    }
+
+                    Button(action: {
+                        companionManager.createAndSelectNewCodexAgentSession()
+                    }) {
+                        Label("New", systemImage: "plus.message.fill")
+                            .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .semibold))
+                            .foregroundColor(DS.Colors.textSecondary)
+                            .padding(.horizontal, max(11, subtextFontSize))
+                            .padding(.vertical, max(8, subtextFontSize * 0.64))
+                            .background(Capsule(style: .continuous).fill(DS.Colors.surface2))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(DS.Colors.borderSubtle, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .accessibilityLabel("Add agent")
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
-                .accessibilityLabel("Add agent")
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal, 14)
         }
+        .padding(.leading, 11)
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(DS.Colors.surface1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.8)
+        )
+        .padding(.horizontal, 14)
     }
 
     private var transcript: some View {
@@ -400,19 +516,31 @@ struct CodexHUDView: View {
                         }
                     }
                 }
-                .padding(10)
+                .padding(chromeMode == .standalone
+                    ? EdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+                    : EdgeInsets(top: 10, leading: 18, bottom: 10, trailing: 18))
             }
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(DS.Colors.surface1)
+                Group {
+                    if chromeMode == .standalone {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(DS.Colors.surface1)
+                    }
+                }
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 1)
+                Group {
+                    if chromeMode == .standalone {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 1)
+                    }
+                }
             )
             .onChange(of: session.entries.count) {
                 if let id = session.entries.last?.id {
-                    withAnimation(.easeOut(duration: 0.18)) {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
                         proxy.scrollTo(id, anchor: .bottom)
                     }
                 }
@@ -423,16 +551,16 @@ struct CodexHUDView: View {
     private var emptyState: some View {
         HStack(spacing: 10) {
             Image(systemName: "sparkles")
-                .font(.system(size: 14, weight: .bold))
+                .font(appUIFont(size: max(14, subtextFontSize + 2), weight: .bold))
                 .foregroundColor(DS.Colors.accentText)
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(DS.Colors.accentSubtle))
             VStack(alignment: .leading, spacing: 3) {
                 Text("Ask OpenClicky to inspect, edit, explain, or automate something.")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(appUIFont(size: max(13, bodyFontSize), weight: .bold))
                     .foregroundColor(DS.Colors.textPrimary)
                 Text("Agent tasks use the bundled Codex runtime and the coding/actions model selected in settings.")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(appUIFont(size: max(11, subtextFontSize), weight: .medium))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -490,19 +618,18 @@ struct CodexHUDView: View {
     private func transcriptBubble(_ entry: CodexTranscriptEntry, isUser: Bool) -> some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
             HStack(spacing: 6) {
-                if isUser { Spacer(minLength: 0) }
                 Text(label(for: entry.role))
-                    .font(.system(size: 10, weight: .bold))
+                    .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .bold))
                     .foregroundColor(color(for: entry.role))
                 Text(Self.relativeTimeString(from: entry.createdAt, now: timestampNow))
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
-                if !isUser { Spacer(minLength: 0) }
             }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
 
             Text(entry.text)
-                .font(.system(size: entry.role == .command ? 10 : 12, weight: .medium, design: entry.role == .command ? .monospaced : .default))
+                .font(entry.role == .command
+                    ? .system(size: max(10, bodyFontSize - 2), weight: .medium, design: .monospaced)
+                    : appUIFont(size: max(12, bodyFontSize), weight: .medium))
                 .foregroundColor(DS.Colors.textPrimary)
                 .multilineTextAlignment(.leading)
                 .textSelection(.enabled)
@@ -516,49 +643,45 @@ struct CodexHUDView: View {
                             NSWorkspace.shared.open(link.url)
                         } label: {
                             Label(link.buttonTitle, systemImage: link.systemImageName)
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(appUIFont(size: max(10, subtextFontSize), weight: .semibold))
                         }
                         .buttonStyle(.plain)
                         .foregroundColor(DS.Colors.textPrimary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, max(8, subtextFontSize * 0.72))
+                        .padding(.vertical, max(5, subtextFontSize * 0.44))
                         .background(Capsule().fill(DS.Colors.surface3))
                         .overlay(Capsule().stroke(DS.Colors.borderSubtle, lineWidth: 0.5))
                         .pointerCursor()
                     }
-                    if isUser { Spacer(minLength: 0) }
                 }
-                .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             }
 
             HStack(spacing: 6) {
-                if isUser { Spacer(minLength: 0) }
                 Button {
                     prompt = Self.replyDraft(for: entry)
                 } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(appUIFont(size: max(9, subtextFontSize - 1), weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(DS.Colors.textSecondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
+                .padding(.horizontal, max(7, subtextFontSize * 0.64))
+                .padding(.vertical, max(4, subtextFontSize * 0.38))
                 .background(Capsule(style: .continuous).fill(DS.Colors.surface3))
                 .overlay(Capsule(style: .continuous).stroke(DS.Colors.borderSubtle, lineWidth: 0.5))
                 .pointerCursor()
                 .accessibilityLabel("Reply to \(label(for: entry.role).lowercased()) message")
-                if !isUser { Spacer(minLength: 0) }
             }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .padding(.horizontal, max(10, bodyFontSize * 0.86))
+        .padding(.vertical, max(10, bodyFontSize * 0.72))
+        .frame(maxWidth: 430, alignment: isUser ? .trailing : .leading)
         .background(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: max(13, bodyFontSize + 2), style: .continuous)
                 .fill(background(for: entry.role))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: max(13, bodyFontSize + 2), style: .continuous)
                 .stroke(isUser ? DS.Colors.accentText.opacity(0.24) : DS.Colors.borderSubtle, lineWidth: 0.8)
         )
     }
@@ -571,22 +694,22 @@ struct CodexHUDView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(reasoningStatusTitle)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(appUIFont(size: max(11, subtextFontSize), weight: .bold))
                         .foregroundColor(DS.Colors.textPrimary)
                     Text(Self.relativeTimeString(from: session.entries.last?.createdAt ?? Date(), now: timestampNow))
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .semibold))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
 
                 if let latest = session.latestActivityDisplaySummary ?? session.latestActivitySummary {
                     Text(latest)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(appUIFont(size: max(11, subtextFontSize), weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: 320, alignment: .leading)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -598,7 +721,6 @@ struct CodexHUDView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(DS.Colors.borderSubtle, lineWidth: 0.7)
         )
-        .frame(maxWidth: 430, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -643,7 +765,7 @@ struct CodexHUDView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(entries) { entry in
                         Text(entry.text)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(size: max(10, bodyFontSize - 3), weight: .medium, design: .monospaced))
                             .foregroundColor(DS.Colors.textSecondary)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -682,12 +804,12 @@ struct CodexHUDView: View {
                     HStack(spacing: 5) {
                         Text("\(chip.count)x \(chip.label)")
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, max(8, subtextFontSize * 0.72))
+                    .padding(.vertical, max(4, subtextFontSize * 0.40))
                     .background(
                         Capsule(style: .continuous)
                             .fill(isExpanded ? DS.Colors.surface3 : DS.Colors.surface2)
@@ -709,17 +831,17 @@ struct CodexHUDView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.down.fill")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .bold))
                     .foregroundColor(DS.Colors.accentText)
                 Text("Queued follow-ups")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
                     .foregroundColor(DS.Colors.textSecondary)
                 Spacer()
                 Text("\(session.queuedFollowUpPrompts.count)")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .bold))
                     .foregroundColor(DS.Colors.textTertiary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .padding(.horizontal, max(6, subtextFontSize * 0.58))
+                    .padding(.vertical, max(3, subtextFontSize * 0.28))
                     .background(Capsule().fill(DS.Colors.surface2))
             }
 
@@ -728,20 +850,20 @@ struct CodexHUDView: View {
                     ForEach(Array(session.queuedFollowUpPrompts.enumerated()), id: \.offset) { _, queuedPrompt in
                         HStack(spacing: 6) {
                             Text(queuedPrompt)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(appUIFont(size: max(11, bodyFontSize - 2), weight: .medium))
                                 .foregroundColor(DS.Colors.textPrimary)
                                 .lineLimit(1)
                             Button(action: { session.removeQueuedFollowUp(queuedPrompt) }) {
                                 Image(systemName: "xmark")
-                                    .font(.system(size: 8, weight: .semibold))
+                                    .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                                     .foregroundColor(DS.Colors.textTertiary)
                             }
                             .buttonStyle(.plain)
                             .pointerCursor()
                             .accessibilityLabel("Remove queued follow-up")
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, max(8, subtextFontSize * 0.72))
+                        .padding(.vertical, max(5, subtextFontSize * 0.44))
                         .background(Capsule(style: .continuous).fill(DS.Colors.surface2))
                         .overlay(Capsule(style: .continuous).stroke(DS.Colors.borderSubtle, lineWidth: 0.5))
                     }
@@ -770,8 +892,10 @@ struct CodexHUDView: View {
                 TextField(droppedAttachments.isEmpty ? "Ask Chat..." : "Ask Chat about the attachment...", text: $prompt, axis: .vertical)
                     .lineLimit(1...4)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .medium))
                     .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(DS.Colors.surface2))
@@ -790,14 +914,6 @@ struct CodexHUDView: View {
             }
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(DS.Colors.surface1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(DS.Colors.borderSubtle, lineWidth: 1)
-        )
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
     }
@@ -808,30 +924,30 @@ struct CodexHUDView: View {
                 ForEach(droppedAttachments) { attachment in
                     HStack(spacing: 7) {
                         Image(systemName: attachment.systemImage)
-                            .font(.system(size: 10, weight: .bold))
+                            .font(appUIFont(size: max(10, subtextFontSize), weight: .bold))
                             .foregroundColor(attachment.kind == .image ? DS.Colors.accentText : DS.Colors.textSecondary)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(attachment.displayName)
-                                .font(.system(size: 10, weight: .bold))
+                            Text(attachment.chipTitle)
+                                .font(appUIFont(size: max(10, subtextFontSize), weight: .bold))
                                 .foregroundColor(DS.Colors.textPrimary)
                                 .lineLimit(1)
-                            Text(attachment.kind == .image ? "Image" : "Document")
-                                .font(.system(size: 8, weight: .semibold))
+                            Text(attachment.displayName)
+                                .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                                 .foregroundColor(DS.Colors.textTertiary)
                                 .lineLimit(1)
                         }
                         Button(action: { removeAttachment(attachment) }) {
                             Image(systemName: "xmark")
-                                .font(.system(size: 8, weight: .semibold))
+                                .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                                 .foregroundColor(DS.Colors.textTertiary)
                         }
                         .buttonStyle(.plain)
                         .pointerCursor()
                         .accessibilityLabel("Remove attachment")
                     }
-                    .padding(.leading, 8)
-                    .padding(.trailing, 7)
-                    .padding(.vertical, 6)
+                    .padding(.leading, max(8, subtextFontSize * 0.72))
+                    .padding(.trailing, max(7, subtextFontSize * 0.64))
+                    .padding(.vertical, max(6, subtextFontSize * 0.50))
                     .background(Capsule(style: .continuous).fill(DS.Colors.surface2))
                     .overlay(Capsule(style: .continuous).stroke(DS.Colors.borderSubtle, lineWidth: 0.6))
                 }
@@ -849,13 +965,13 @@ struct CodexHUDView: View {
             .overlay(
                 VStack(spacing: 7) {
                     Image(systemName: "plus.rectangle.on.folder")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(appUIFont(size: max(22, bodyFontSize + 9), weight: .bold))
                         .foregroundColor(DS.Colors.accentText)
                     Text("Drop images or docs into OpenClicky")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .bold))
                         .foregroundColor(DS.Colors.textPrimary)
                     Text("They’ll attach as chips before sending")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .semibold))
                         .foregroundColor(DS.Colors.textSecondary)
                 }
             )
@@ -1148,18 +1264,30 @@ private struct HUDHeaderPill: View {
     let title: String
     let systemImageName: String
     let color: Color
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
+
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: systemImageName)
-                .font(.system(size: 9, weight: .bold))
+                .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .bold))
             Text(title)
-                .font(.system(size: 10, weight: .semibold))
+                .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .semibold))
                 .lineLimit(1)
         }
         .foregroundColor(DS.Colors.textPrimary)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, max(9, subtextFontSize * 0.82))
+        .padding(.vertical, max(6, subtextFontSize * 0.54))
         .background(Capsule(style: .continuous).fill(DS.Colors.surface2))
         .overlay(Capsule(style: .continuous).stroke(color.opacity(0.32), lineWidth: 0.8))
     }
@@ -1171,6 +1299,29 @@ private struct HUDFloatingAgentButton: View {
     var select: () -> Void
     var close: () -> Void
     @State private var isHovered = false
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+    @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
+
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
+
+    private var isRunning: Bool {
+        switch session.status {
+        case .starting, .running:
+            return true
+        case .stopped, .ready, .failed:
+            return session.isTurnActiveForChatQueue
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1179,10 +1330,10 @@ private struct HUDFloatingAgentButton: View {
                     ZStack(alignment: .bottomTrailing) {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(isSelected ? session.accentTheme.accentSubtle : DS.Colors.surface3)
-                            .frame(width: 28, height: 28)
+                            .frame(width: max(28, bodyFontSize + 15), height: max(28, bodyFontSize + 15))
 
                         Image(systemName: "cursorarrow")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(appUIFont(size: max(12, subtextFontSize + 1), weight: .bold))
                             .foregroundColor(session.accentTheme.cursorColor)
                             .rotationEffect(.degrees(-18))
                             .offset(x: -1, y: 1)
@@ -1196,19 +1347,29 @@ private struct HUDFloatingAgentButton: View {
 
                     VStack(alignment: .leading, spacing: 1) {
                         Text(session.title)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(appUIFont(size: max(11, bodyFontSize - 2), weight: .semibold))
                             .foregroundColor(DS.Colors.textPrimary)
                             .lineLimit(1)
-                        Text(session.status.label)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(DS.Colors.textTertiary)
-                            .textCase(.uppercase)
-                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            if isRunning {
+                                HUDRunningAgentIndicator(color: statusColor)
+                            } else {
+                                Circle()
+                                    .fill(statusColor)
+                                    .frame(width: 4.5, height: 4.5)
+                            }
+                            Text(session.status.label)
+                                .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .semibold))
+                                .foregroundColor(DS.Colors.textTertiary)
+                                .textCase(.uppercase)
+                                .lineLimit(1)
+                        }
                     }
                 }
-                .padding(.leading, 7)
-                .padding(.trailing, 10)
-                .padding(.vertical, 6)
+                .padding(.leading, max(7, subtextFontSize * 0.64))
+                .padding(.trailing, max(10, subtextFontSize * 0.90))
+                .padding(.vertical, max(6, subtextFontSize * 0.54))
+                .frame(maxWidth: 220, alignment: .leading)
                 .background(
                     Capsule(style: .continuous)
                         .fill(backgroundColor)
@@ -1217,6 +1378,7 @@ private struct HUDFloatingAgentButton: View {
                     Capsule(style: .continuous)
                         .stroke(borderColor, lineWidth: isSelected ? 1.2 : 0.8)
                 )
+                .shadow(color: isSelected ? session.accentTheme.cursorColor.opacity(0.22) : Color.clear, radius: 9, y: 3)
                 .scaleEffect(isHovered ? 1.015 : 1)
                 .animation(.easeOut(duration: DS.Animation.fast), value: isHovered)
             }
@@ -1233,7 +1395,7 @@ private struct HUDFloatingAgentButton: View {
             if isHovered {
                 Button(action: close) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(appUIFont(size: max(8, subtextFontSize - 3), weight: .semibold))
                         .foregroundColor(DS.Colors.textPrimary)
                         .frame(width: 15, height: 15)
                         .background(DS.Colors.surface3, in: Circle())
@@ -1285,6 +1447,32 @@ private struct HUDFloatingAgentButton: View {
     }
 }
 
+private struct HUDRunningAgentIndicator: View {
+    let color: Color
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(color)
+                    .frame(width: 3.8, height: 3.8)
+                    .scaleEffect(isAnimating ? 1.0 : 0.55)
+                    .opacity(isAnimating ? 1.0 : 0.45)
+                    .animation(
+                        .easeInOut(duration: 0.54)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(index) * 0.13),
+                        value: isAnimating
+                    )
+            }
+        }
+        .frame(width: 15, height: 6)
+        .onAppear { isAnimating = true }
+        .onDisappear { isAnimating = false }
+        .accessibilityLabel("Running")
+    }
+}
 
 private struct HUDRunButton: View {
     var canSend: Bool
@@ -1292,6 +1480,18 @@ private struct HUDRunButton: View {
     var send: () -> Void
     var stop: () -> Void
     @State private var isHovered = false
+    @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
+    @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
+
+    private var appFont: OpenClickyResponseCaptionFont {
+        OpenClickyResponseCaptionFont.resolved(appFontRawValue)
+    }
+
+    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+
+    private func appUIFont(size: CGFloat, weight: Font.Weight = .medium) -> Font {
+        appFont.swiftUIFont(size: size, weight: weight)
+    }
 
     private var showsStop: Bool {
         isRunning && !canSend
@@ -1304,7 +1504,7 @@ private struct HUDRunButton: View {
     var body: some View {
         Button(action: showsStop ? stop : send) {
             Image(systemName: showsStop ? "stop.fill" : "paperplane.fill")
-                .font(.system(size: 12, weight: .bold))
+                .font(appUIFont(size: max(12, bodyFontSize - 1), weight: .bold))
                 .foregroundColor(isEnabled ? DS.Colors.textPrimary : DS.Colors.disabledText)
                 .frame(width: 36, height: 32)
                 .background(

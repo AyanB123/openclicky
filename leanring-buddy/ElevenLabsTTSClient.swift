@@ -2057,7 +2057,8 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         onUserTranscript: @escaping @MainActor @Sendable (String) -> Void,
         onAssistantTextChunk: @escaping @MainActor @Sendable (String) -> Void,
-        onPlaybackStarted: @escaping @MainActor @Sendable () -> Void
+        onPlaybackStarted: @escaping @MainActor @Sendable () -> Void,
+        onInputPowerLevel: @escaping @MainActor @Sendable (Double) -> Void = { _ in }
     ) async throws {
         stopPlaybackInternal()
         activeBidirectionalVoiceTurn?.cancel()
@@ -2085,61 +2086,74 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         request.timeoutInterval = 60
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
+        let inputCapture = RealtimeInputCapture(
+            targetSampleRate: Self.streamSampleRate,
+            onInputPowerLevel: onInputPowerLevel
+        )
+        try inputCapture.start()
+
         let webSocket = session.webSocketTask(with: request)
         webSocket.resume()
-        try await waitForRealtimeConnection(on: webSocket)
+        do {
+            try await waitForRealtimeConnection(on: webSocket)
 
-        let historyText = conversationHistory.suffix(8).map { entry in
-            "User: \(entry.userPlaceholder)\nOpenClicky: \(entry.assistantResponse)"
-        }.joined(separator: "\n\n")
-        let instructions = [
-            systemPrompt,
-            historyText.isEmpty ? nil : "Recent conversation:\n\(historyText)",
-            "You are in OpenClicky's bidirectional Realtime voice mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not claim you will start background work, take care of a task, or start an agent unless the app already routed the turn before you receive it. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
-        ].compactMap { $0 }.joined(separator: "\n\n")
+            let historyText = conversationHistory.suffix(8).map { entry in
+                "User: \(entry.userPlaceholder)\nOpenClicky: \(entry.assistantResponse)"
+            }.joined(separator: "\n\n")
+            let instructions = [
+                systemPrompt,
+                historyText.isEmpty ? nil : "Recent conversation:\n\(historyText)",
+                "You are in OpenClicky's bidirectional Realtime voice mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not claim you will start background work, take care of a task, or start an agent unless the app already routed the turn before you receive it. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
+            ].compactMap { $0 }.joined(separator: "\n\n")
 
-        try await sendJSON([
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": model,
-                "instructions": instructions,
-                "output_modalities": ["audio"],
-                "audio": [
-                    "input": [
-                        "format": [
-                            "type": "audio/pcm",
-                            "rate": Int(Self.streamSampleRate)
+            try await sendJSON([
+                "type": "session.update",
+                "session": [
+                    "type": "realtime",
+                    "model": model,
+                    "instructions": instructions,
+                    "output_modalities": ["audio"],
+                    "audio": [
+                        "input": [
+                            "format": [
+                                "type": "audio/pcm",
+                                "rate": Int(Self.streamSampleRate)
+                            ],
+                            "transcription": [
+                                "model": "gpt-4o-mini-transcribe"
+                            ],
+                            "turn_detection": NSNull()
                         ],
-                        "transcription": [
-                            "model": "gpt-4o-mini-transcribe"
-                        ],
-                        "turn_detection": NSNull()
-                    ],
-                    "output": [
-                        "voice": voiceID,
-                        "format": [
-                            "type": "audio/pcm",
-                            "rate": Int(Self.streamSampleRate)
+                        "output": [
+                            "voice": voiceID,
+                            "format": [
+                                "type": "audio/pcm",
+                                "rate": Int(Self.streamSampleRate)
+                            ]
                         ]
                     ]
                 ]
-            ]
-        ], to: webSocket)
+            ], to: webSocket)
 
-        let turn = try BidirectionalVoiceTurn(
-            client: self,
-            webSocket: webSocket,
-            streamFormat: streamFormat,
-            onUserTranscript: onUserTranscript,
-            onAssistantTextChunk: onAssistantTextChunk,
-            onPlaybackStarted: onPlaybackStarted
-        )
-        activeBidirectionalVoiceTurn = turn
-        audioEngine = turn.outputEngine
-        playerNode = turn.playerNode
-        try turn.startInputCapture()
-        turn.startReceiving()
+            let turn = try BidirectionalVoiceTurn(
+                client: self,
+                webSocket: webSocket,
+                inputCapture: inputCapture,
+                streamFormat: streamFormat,
+                onUserTranscript: onUserTranscript,
+                onAssistantTextChunk: onAssistantTextChunk,
+                onPlaybackStarted: onPlaybackStarted
+            )
+            activeBidirectionalVoiceTurn = turn
+            audioEngine = turn.outputEngine
+            playerNode = turn.playerNode
+            turn.startInputCapture()
+            turn.startReceiving()
+        } catch {
+            inputCapture.stop()
+            webSocket.cancel(with: .goingAway, reason: nil)
+            throw error
+        }
     }
 
     func finishBidirectionalVoiceTurn(
@@ -2380,20 +2394,122 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         return Self.int16Samples(fromLittleEndianPCM: bytes)
     }
 
+    private final class RealtimeInputCapture {
+        private let inputEngine = AVAudioEngine()
+        private let inputConverter: BuddyPCM16AudioConverter
+        private let lock = NSLock()
+        private let maxBufferedBytes: Int
+        private let onInputPowerLevel: @MainActor @Sendable (Double) -> Void
+        private var bufferedChunks: [Data] = []
+        private var bufferedByteCount = 0
+        private var sender: ((Data) -> Void)?
+        private var hasInstalledInputTap = false
+
+        init(
+            targetSampleRate: Double,
+            onInputPowerLevel: @escaping @MainActor @Sendable (Double) -> Void
+        ) {
+            self.inputConverter = BuddyPCM16AudioConverter(targetSampleRate: targetSampleRate)
+            self.maxBufferedBytes = Int(targetSampleRate * 2 * 3)
+            self.onInputPowerLevel = onInputPowerLevel
+        }
+
+        func start() throws {
+            let inputNode = inputEngine.inputNode
+            let inputFormat = inputNode.outputFormat(forBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
+                guard let self,
+                      let pcmData = self.inputConverter.convertToPCM16Data(from: buffer),
+                      !pcmData.isEmpty else { return }
+                let powerLevel = Self.audioPowerLevel(from: buffer)
+                Task { @MainActor [onInputPowerLevel] in
+                    onInputPowerLevel(powerLevel)
+                }
+                self.handle(pcmData)
+            }
+            hasInstalledInputTap = true
+            inputEngine.prepare()
+            try inputEngine.start()
+        }
+
+        func setSender(_ sender: @escaping (Data) -> Void) {
+            let chunksToFlush: [Data]
+            lock.lock()
+            self.sender = sender
+            chunksToFlush = bufferedChunks
+            bufferedChunks.removeAll(keepingCapacity: false)
+            bufferedByteCount = 0
+            lock.unlock()
+
+            for chunk in chunksToFlush {
+                sender(chunk)
+            }
+        }
+
+        func stop() {
+            lock.lock()
+            sender = nil
+            bufferedChunks.removeAll(keepingCapacity: false)
+            bufferedByteCount = 0
+            lock.unlock()
+
+            if hasInstalledInputTap {
+                inputEngine.inputNode.removeTap(onBus: 0)
+                hasInstalledInputTap = false
+            }
+            if inputEngine.isRunning {
+                inputEngine.stop()
+            }
+        }
+
+        private static func audioPowerLevel(from audioBuffer: AVAudioPCMBuffer) -> Double {
+            guard let channelData = audioBuffer.floatChannelData else { return 0 }
+            let channelCount = Int(audioBuffer.format.channelCount)
+            let frameLength = Int(audioBuffer.frameLength)
+            guard channelCount > 0, frameLength > 0 else { return 0 }
+
+            var sum: Float = 0
+            for channel in 0..<channelCount {
+                let samples = channelData[channel]
+                for frame in 0..<frameLength {
+                    let sample = samples[frame]
+                    sum += sample * sample
+                }
+            }
+
+            let meanSquare = sum / Float(channelCount * frameLength)
+            let rootMeanSquare = sqrt(meanSquare)
+            return min(1, max(0, Double(rootMeanSquare) * 12))
+        }
+
+        private func handle(_ pcmData: Data) {
+            let activeSender: ((Data) -> Void)?
+            lock.lock()
+            activeSender = sender
+            if activeSender == nil {
+                bufferedChunks.append(pcmData)
+                bufferedByteCount += pcmData.count
+                while bufferedByteCount > maxBufferedBytes, !bufferedChunks.isEmpty {
+                    bufferedByteCount -= bufferedChunks.removeFirst().count
+                }
+            }
+            lock.unlock()
+            activeSender?(pcmData)
+        }
+    }
+
     private final class BidirectionalVoiceTurn {
         private weak var client: OpenAIRealtimeSpeechClient?
         private let webSocket: URLSessionWebSocketTask
         let outputEngine: AVAudioEngine
         let playerNode: AVAudioPlayerNode
-        private let inputEngine = AVAudioEngine()
-        private let inputConverter = BuddyPCM16AudioConverter(targetSampleRate: OpenAIRealtimeSpeechClient.streamSampleRate)
+        private let inputCapture: RealtimeInputCapture
         private let streamFormat: AVAudioFormat
         private let onUserTranscript: @MainActor @Sendable (String) -> Void
         private let onAssistantTextChunk: @MainActor @Sendable (String) -> Void
         private let onPlaybackStarted: @MainActor @Sendable () -> Void
         private var receiveTask: Task<BidirectionalVoiceTurnResult, Error>?
         private var routeUserTranscriptBeforeAssistantResponse: (@MainActor @Sendable (String) -> Bool)?
-        private var hasInstalledInputTap = false
         private var didStartPlayback = false
         private var didCommitInput = false
         private var didRequestAssistantResponse = false
@@ -2402,6 +2518,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         init(
             client: OpenAIRealtimeSpeechClient,
             webSocket: URLSessionWebSocketTask,
+            inputCapture: RealtimeInputCapture,
             streamFormat: AVAudioFormat,
             onUserTranscript: @escaping @MainActor @Sendable (String) -> Void,
             onAssistantTextChunk: @escaping @MainActor @Sendable (String) -> Void,
@@ -2409,6 +2526,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         ) throws {
             self.client = client
             self.webSocket = webSocket
+            self.inputCapture = inputCapture
             self.streamFormat = streamFormat
             self.onUserTranscript = onUserTranscript
             self.onAssistantTextChunk = onAssistantTextChunk
@@ -2423,13 +2541,8 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             self.playerNode = playerNode
         }
 
-        func startInputCapture() throws {
-            let inputNode = inputEngine.inputNode
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
-                guard let self,
-                      let pcmData = self.inputConverter.convertToPCM16Data(from: buffer),
-                      !pcmData.isEmpty else { return }
+        func startInputCapture() {
+            inputCapture.setSender { [weak self] pcmData in
                 let base64Audio = pcmData.base64EncodedString()
                 Task { [weak self] in
                     guard let self else { return }
@@ -2439,9 +2552,6 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                     ])
                 }
             }
-            hasInstalledInputTap = true
-            inputEngine.prepare()
-            try inputEngine.start()
         }
 
         func startReceiving() {
@@ -2505,13 +2615,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         }
 
         private func stopInputCapture() {
-            if hasInstalledInputTap {
-                inputEngine.inputNode.removeTap(onBus: 0)
-                hasInstalledInputTap = false
-            }
-            if inputEngine.isRunning {
-                inputEngine.stop()
-            }
+            inputCapture.stop()
         }
 
         private func receiveUntilDone() async throws -> BidirectionalVoiceTurnResult {

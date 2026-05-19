@@ -25,6 +25,7 @@ enum ChatWorkspaceArchiveStore {
 
   private static let key = "openClickyArchivedSessions"
   private static let snapshotsKey = "openClickyArchivedSessionSnapshots"
+  private static let relaunchableSnapshotsKey = "openClickyRelaunchableAgentSessionSnapshots"
 
   static func load() -> Set<UUID> {
     guard let raw = UserDefaults.standard.array(forKey: key) as? [String] else { return [] }
@@ -57,6 +58,37 @@ enum ChatWorkspaceArchiveStore {
 
   static func removeSnapshot(for sessionID: UUID) {
     saveSnapshots(loadSnapshots().filter { $0.id != sessionID })
+  }
+
+  static func loadRelaunchableSnapshots() -> [Snapshot] {
+    guard let data = UserDefaults.standard.data(forKey: relaunchableSnapshotsKey) else { return [] }
+    return (try? JSONDecoder().decode([Snapshot].self, from: data)) ?? []
+  }
+
+  static func saveRelaunchableSnapshots(for sessions: [CodexAgentSession], archivedSessionIDs: Set<UUID>) {
+    let snapshots = sessions.compactMap { session -> Snapshot? in
+      guard !archivedSessionIDs.contains(session.id),
+            session.hasVisibleActivity,
+            session.isRelaunchResumeCandidate else {
+        return nil
+      }
+      return Snapshot(
+        id: session.id,
+        title: session.title,
+        accentThemeRawValue: session.accentTheme.rawValue,
+        entries: session.entries,
+        activeThreadID: session.activeThreadID,
+        lastSubmittedPrompt: session.lastSubmittedPromptText
+      )
+    }
+    guard let data = try? JSONEncoder().encode(snapshots) else { return }
+    UserDefaults.standard.set(data, forKey: relaunchableSnapshotsKey)
+  }
+
+  static func removeRelaunchableSnapshot(for sessionID: UUID) {
+    let snapshots = loadRelaunchableSnapshots().filter { $0.id != sessionID }
+    guard let data = try? JSONEncoder().encode(snapshots) else { return }
+    UserDefaults.standard.set(data, forKey: relaunchableSnapshotsKey)
   }
 
   private static func saveSnapshots(_ snapshots: [Snapshot]) {
@@ -194,6 +226,8 @@ private struct MiniChatPanelView: View {
         .font(.system(size: 12))
         .foregroundColor(DS.Colors.textPrimary)
         .lineLimit(1...4)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(

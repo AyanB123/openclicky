@@ -70,7 +70,8 @@ struct OpenClickyAutomationsSettingsSection: View {
   }
 
   private func row(_ a: OpenClickyAutomation) -> some View {
-    HStack(spacing: 10) {
+    let isProtected = store.isProtectedSystemAutomation(a)
+      return HStack(spacing: 10) {
       Toggle("", isOn: Binding(
         get: { a.enabled },
         set: { store.setEnabled(id: a.id, enabled: $0) }
@@ -85,6 +86,9 @@ struct OpenClickyAutomationsSettingsSection: View {
           if let slug = a.agentSlug {
             Text("· agent: \(slug)")
           }
+          if isProtected {
+            Text("· locked")
+          }
           if let next = a.nextRun, a.enabled {
             Text("· next: \(next.formatted(.dateTime.weekday().hour().minute()))")
           }
@@ -97,10 +101,16 @@ struct OpenClickyAutomationsSettingsSection: View {
           .lineLimit(2)
       }
       Spacer()
-      Button("Edit") { editing = a }
-        .buttonStyle(.borderless)
-      Button(role: .destructive) { store.remove(id: a.id) } label: { Image(systemName: "trash") }
-        .buttonStyle(.borderless)
+      if isProtected {
+        Label("System", systemImage: "lock.fill")
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundColor(.secondary)
+      } else {
+        Button("Edit") { editing = a }
+          .buttonStyle(.borderless)
+        Button(role: .destructive) { store.remove(id: a.id) } label: { Image(systemName: "trash") }
+          .buttonStyle(.borderless)
+      }
     }
     .padding(10)
     .background(

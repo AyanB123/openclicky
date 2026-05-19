@@ -26,6 +26,7 @@ final class CompanionResponseOverlayManager {
     private let overlayViewModel = CompanionResponseOverlayViewModel()
     private var overlayPanel: NSPanel?
     private var cursorTrackingTimer: Timer?
+    private var lastCursorTrackingOrigin: NSPoint?
     private var autoHideWorkItem: DispatchWorkItem?
 
     /// The horizontal offset from the cursor to the left edge of the overlay panel.
@@ -104,17 +105,23 @@ final class CompanionResponseOverlayManager {
     }
 
     private func startCursorTracking() {
-        // 60fps cursor tracking so the panel stays glued to the mouse
-        cursorTrackingTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.repositionPanelNearCursor()
-            }
+        guard cursorTrackingTimer == nil else { return }
+        lastCursorTrackingOrigin = nil
+
+        // Keep the response bubble glued to the cursor during drags/menus, but
+        // avoid queueing extra MainActor tasks every frame. The timer already
+        // fires on the main run loop; `.common` prevents event-tracking hitches.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.repositionPanelNearCursor()
         }
+        cursorTrackingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func stopCursorTracking() {
         cursorTrackingTimer?.invalidate()
         cursorTrackingTimer = nil
+        lastCursorTrackingOrigin = nil
     }
 
     private func repositionPanelNearCursor() {
@@ -149,7 +156,14 @@ final class CompanionResponseOverlayManager {
             panelOriginY = max(visibleFrame.minY, min(panelOriginY, visibleFrame.maxY - panelSize.height))
         }
 
-        overlayPanel.setFrameOrigin(CGPoint(x: panelOriginX, y: panelOriginY))
+        let nextOrigin = CGPoint(x: panelOriginX.rounded(.toNearestOrAwayFromZero), y: panelOriginY.rounded(.toNearestOrAwayFromZero))
+        if let lastCursorTrackingOrigin,
+           abs(lastCursorTrackingOrigin.x - nextOrigin.x) < 0.5,
+           abs(lastCursorTrackingOrigin.y - nextOrigin.y) < 0.5 {
+            return
+        }
+        lastCursorTrackingOrigin = nextOrigin
+        overlayPanel.setFrameOrigin(nextOrigin)
     }
 
     private func resizePanelToFitContent() {

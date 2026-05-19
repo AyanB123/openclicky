@@ -61,6 +61,7 @@ struct OpenClickyAgentDefinition: Identifiable, Equatable {
   let builtinDirectory: URL?
 
   var id: String { slug }
+  var isProtectedSystemAgent: Bool { slug == OpenClickyAgentStore.skillDiscoveryAgentSlug }
 
   /// String OpenClicky prepends to the Codex Agent Mode system prompt
   /// when a session launches under this agent. Includes the on-disk paths
