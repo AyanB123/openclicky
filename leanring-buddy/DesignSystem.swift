@@ -193,6 +193,27 @@ enum ClickyAccentTheme: String, CaseIterable, Identifiable {
     }
 }
 
+enum ClickyTheme: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    static var current: ClickyTheme {
+        let rawValue = UserDefaults.standard.string(forKey: AppBundleConfiguration.userThemeDefaultsKey) ?? ClickyTheme.system.rawValue
+        return ClickyTheme(rawValue: rawValue) ?? .system
+    }
+}
+
 // MARK: - Design System Namespace
 
 /// The top-level namespace for all design system tokens.
@@ -202,44 +223,76 @@ enum DS {
     // MARK: - Color Tokens
 
     enum Colors {
+        static var isDarkMode: Bool {
+            let theme = ClickyTheme.current
+            switch theme {
+            case .dark: return true
+            case .light: return false
+            case .system:
+                if #available(macOS 10.14, *) {
+                    return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                }
+                return true
+            }
+        }
 
         // ── Backgrounds ──────────────────────────────────────────────
         // Layered surfaces from deepest to most elevated.
         // Higher surfaces are lighter, creating a sense of depth.
 
         /// The deepest background — used for the main app window fill.
-        static let background = Color(hex: "#101211")
+        static var background: Color {
+            isDarkMode ? Color(hex: "#101211") : Color(hex: "#F8FAFC")
+        }
 
         /// First elevation layer — used for cards, sidebar, top bar backgrounds.
-        static let surface1 = Color(hex: "#171918")
+        static var surface1: Color {
+            isDarkMode ? Color(hex: "#171918") : Color(hex: "#F1F5F9")
+        }
 
         /// Second elevation layer — used for input fields, elevated cards, chat bubbles.
-        static let surface2 = Color(hex: "#202221")
+        static var surface2: Color {
+            isDarkMode ? Color(hex: "#202221") : Color(hex: "#E2E8F0")
+        }
 
         /// Third elevation layer — used for hover backgrounds on interactive elements.
-        static let surface3 = Color(hex: "#272A29")
+        static var surface3: Color {
+            isDarkMode ? Color(hex: "#272A29") : Color(hex: "#CBD5E1")
+        }
 
         /// Fourth elevation layer — used for active/pressed states on interactive elements.
-        static let surface4 = Color(hex: "#2E3130")
+        static var surface4: Color {
+            isDarkMode ? Color(hex: "#2E3130") : Color(hex: "#94A3B8")
+        }
 
         // ── Borders ──────────────────────────────────────────────────
 
         /// Subtle border — used for card outlines, dividers, input field borders.
-        static let borderSubtle = Color(hex: "#373B39")
+        static var borderSubtle: Color {
+            isDarkMode ? Color(hex: "#373B39") : Color(hex: "#E2E8F0")
+        }
 
         /// Strong border — used for focused inputs, hovered card outlines.
-        static let borderStrong = Color(hex: "#444947")
+        static var borderStrong: Color {
+            isDarkMode ? Color(hex: "#444947") : Color(hex: "#CBD5E1")
+        }
 
         // ── Text ─────────────────────────────────────────────────────
 
         /// Primary text — main body text, titles, headings.
-        static let textPrimary = Color(hex: "#ECEEED")
+        static var textPrimary: Color {
+            isDarkMode ? Color(hex: "#ECEEED") : Color(hex: "#0F172A")
+        }
 
         /// Secondary text — descriptions, hints, muted labels.
-        static let textSecondary = Color(hex: "#ADB5B2")
+        static var textSecondary: Color {
+            isDarkMode ? Color(hex: "#ADB5B2") : Color(hex: "#475569")
+        }
 
         /// Tertiary text — very muted, used for section labels, timestamps, disabled text.
-        static let textTertiary = Color(hex: "#6B736F")
+        static var textTertiary: Color {
+            isDarkMode ? Color(hex: "#6B736F") : Color(hex: "#94A3B8")
+        }
 
         /// Text used on top of the accent fill (#2563eb blue), like the primary button label.
         /// White on #2563eb achieves ~5.1:1 contrast — WCAG AA compliant.
