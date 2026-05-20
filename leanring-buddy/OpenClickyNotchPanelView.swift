@@ -59,6 +59,7 @@ struct OpenClickyNotchPanelView: View {
     @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
     @AppStorage(AppBundleConfiguration.userAppSubtextFontSizeDefaultsKey) private var appSubtextFontSize = 11.0
     @AppStorage(AppBundleConfiguration.userAppLineSpacingDefaultsKey) private var appLineSpacing = 2.0
+    @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var clickyTheme = ClickyTheme.system.rawValue
     @State private var isShowingHatchSheet = false
     @State private var hatchPetName = ""
     @State private var hatchPetDescription = ""
@@ -308,6 +309,7 @@ struct OpenClickyNotchPanelView: View {
 
     var body: some View {
         resizeAwarePanel(panelLifecycle(panelDialogs(panelRoot)))
+            .preferredColorScheme(clickyTheme == ClickyTheme.light.rawValue ? .light : (clickyTheme == ClickyTheme.dark.rawValue ? .dark : nil))
     }
 
     private var panelRoot: some View {
@@ -438,7 +440,7 @@ struct OpenClickyNotchPanelView: View {
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [DS.Colors.surface1.opacity(0.98), Color.black.opacity(0.96)],
+                        colors: [DS.Colors.surface1.opacity(0.98), (DS.Colors.isDarkMode ? Color.black : Color.white).opacity(0.96)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
