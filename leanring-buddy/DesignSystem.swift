@@ -483,14 +483,6 @@ struct DSPrimaryButtonStyle: ButtonStyle {
 
     @State private var isHovered = false
 
-    // Separate state for the scale expansion so it animates on a slower,
-    // more gradual timeline (0.6s) than the background color snap (0.15s).
-    @State private var isHoverScaleExpanded = false
-
-    // Whether the hover glow shadow is active. Builds up gradually (0.6s)
-    // on hover entry, fades out faster (0.3s) on exit.
-    @State private var isHoverGlowActive = false
-
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 16, weight: .medium))
@@ -502,31 +494,19 @@ struct DSPrimaryButtonStyle: ButtonStyle {
                 Capsule()
                     .fill(buttonBackgroundColor(isPressed: configuration.isPressed))
             )
+            .animation(.easeOut(duration: 0.15), value: isHovered)
             // Hover glow. Keep it finite and state-driven so idle buttons do
             // not leave repeatForever animations running across the UI.
             .shadow(
-                color: DS.Colors.accent.opacity(isHoverGlowActive ? 0.24 : 0),
-                radius: isHoverGlowActive ? 12 : 0
+                color: DS.Colors.accent.opacity(isHovered ? 0.24 : 0),
+                radius: isHovered ? 12 : 0
             )
             // Hover: gradually expand to 1.03. Press: snap down to 0.97.
-            .scaleEffect(configuration.isPressed ? 0.97 : (isHoverScaleExpanded ? 1.03 : 1.0))
+            .scaleEffect(configuration.isPressed ? 0.97 : (isHovered ? 1.03 : 1.0))
+            .animation(.easeInOut(duration: isHovered ? 0.6 : 0.3), value: isHovered)
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
             .onHover { hovering in
-                // Background color — fast snap so the button feels responsive
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isHovered = hovering
-                }
-
-                // Scale — slow, gradual expansion (like the button is swelling)
-                withAnimation(.easeInOut(duration: hovering ? 0.6 : 0.3)) {
-                    isHoverScaleExpanded = hovering
-                }
-
-                // Glow — builds up gradually on entry, fades faster on exit
-                withAnimation(.easeInOut(duration: hovering ? 0.6 : 0.3)) {
-                    isHoverGlowActive = hovering
-                }
-
+                isHovered = hovering
                 if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
     }

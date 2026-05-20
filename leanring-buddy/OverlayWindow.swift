@@ -1450,7 +1450,6 @@ private struct BlueCursorWaveformView: View {
             }
         }
         .shadow(color: cursorColor.opacity(0.6), radius: 6, x: 0, y: 0)
-        .animation(.linear(duration: 0.06), value: audioPowerLevel)
     }
 
     private func barHeight(for barIndex: Int, timelineDate: Date) -> CGFloat {

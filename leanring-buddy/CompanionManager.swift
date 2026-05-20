@@ -196,7 +196,7 @@ final class CompanionManager: ObservableObject {
         }
     }
     @Published private(set) var lastTranscript: String?
-    @Published private(set) var currentAudioPowerLevel: CGFloat = 0 {
+    private(set) var currentAudioPowerLevel: CGFloat = 0 {
         didSet {
             cursorOverlayState.currentAudioPowerLevel = currentAudioPowerLevel
             notchCaptureWindowManager.updateAudioPowerLevel(currentAudioPowerLevel)
@@ -220,42 +220,30 @@ final class CompanionManager: ObservableObject {
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from Claude's response;
     /// observed by BlueCursorView to trigger the flight animation.
-    @Published var detectedElementScreenLocation: CGPoint? {
+    var detectedElementScreenLocation: CGPoint? {
         didSet {
-            let location = detectedElementScreenLocation
-            DispatchQueue.main.async { [cursorOverlayState] in
-                cursorOverlayState.detectedElementScreenLocation = location
-            }
+            cursorOverlayState.detectedElementScreenLocation = detectedElementScreenLocation
         }
     }
     /// The display frame (global AppKit coords) of the screen the detected
     /// element is on, so BlueCursorView knows which screen overlay should animate.
-    @Published var detectedElementDisplayFrame: CGRect? {
+    var detectedElementDisplayFrame: CGRect? {
         didSet {
-            let frame = detectedElementDisplayFrame
-            DispatchQueue.main.async { [cursorOverlayState] in
-                cursorOverlayState.detectedElementDisplayFrame = frame
-            }
+            cursorOverlayState.detectedElementDisplayFrame = detectedElementDisplayFrame
         }
     }
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
-    @Published var detectedElementBubbleText: String? {
+    var detectedElementBubbleText: String? {
         didSet {
-            let text = detectedElementBubbleText
-            DispatchQueue.main.async { [cursorOverlayState] in
-                cursorOverlayState.detectedElementBubbleText = text
-            }
+            cursorOverlayState.detectedElementBubbleText = detectedElementBubbleText
         }
     }
     /// True for task-start handoff flights that should tag the corner briefly
     /// and come straight back instead of holding a pointing caption.
-    @Published var detectedElementReturnsImmediately: Bool = false {
+    var detectedElementReturnsImmediately: Bool = false {
         didSet {
-            let returnsImmediately = detectedElementReturnsImmediately
-            DispatchQueue.main.async { [cursorOverlayState] in
-                cursorOverlayState.detectedElementReturnsImmediately = returnsImmediately
-            }
+            cursorOverlayState.detectedElementReturnsImmediately = detectedElementReturnsImmediately
         }
     }
     private var lastPointedElementScreenLocation: CGPoint?
@@ -2202,14 +2190,14 @@ final class CompanionManager: ObservableObject {
         let learnedSkillsDirectory = codexHomeManager.learnedSkillsDirectory
 
         Task.detached(priority: .utility) {
-            let bundledIndex = WikiManager.Index.loadForAppBundle()
+            let bundledIndex = await WikiManager.Index.loadForAppBundle()
             let resolvedIndex: WikiManager.Index
 
             do {
                 try FileManager.default.createDirectory(at: memoriesDirectory, withIntermediateDirectories: true)
                 try FileManager.default.createDirectory(at: learnedSkillsDirectory, withIntermediateDirectories: true)
-                let memoryIndex = try WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [learnedSkillsDirectory])
-                resolvedIndex = bundledIndex.combined(with: memoryIndex)
+                let memoryIndex await = try await WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [learnedSkillsDirectory])
+                resoawait lvedIndex = await bundledIndex.combined(with: memoryIndex)
             } catch {
                 print("⚠️ OpenClicky memory index load failed: \(error)")
                 resolvedIndex = bundledIndex
