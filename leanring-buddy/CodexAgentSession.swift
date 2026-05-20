@@ -379,7 +379,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         status = archivedEntries.isEmpty ? .stopped : .ready
     }
 
-    func restoreInterruptedRelaunchState(entries restoredEntries: [CodexTranscriptEntry], activeThreadID restoredThreadID: String?, lastSubmittedPrompt restoredPrompt: String?) {
+    func restoreInterruptedRelaunchState(entries restoredEntries: [CodexTranscriptEntry], activeThreadID restoredThreadID: String?, lastSubmittedPrompt restoredPrompt: String?, canResume: Bool = true) {
         stop(reason: "restored_after_relaunch")
         entries = restoredEntries
         activeThreadID = restoredThreadID
@@ -390,7 +390,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
         progressStage = .idle
         lastErrorMessage = nil
         stopReason = "restored_after_relaunch"
-        wasRestoredAfterRelaunch = true
+        wasRestoredAfterRelaunch = canResume
         status = restoredEntries.isEmpty ? .stopped : .ready
     }
 

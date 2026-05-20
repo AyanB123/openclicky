@@ -1,0 +1,2448 @@
+//
+//  OpenClickyBrowserWorkspaceWindowManager.swift
+//  leanring-buddy
+//
+//  Prototype browser workspace: a WebKit page canvas with an OpenClicky chat
+//  side panel docked on the right. This intentionally starts as a narrow shell
+//  so the UX can be tested before wiring it into the full chat pipeline.
+//
+
+import AppKit
+import Combine
+import CommonCrypto
+import Security
+import SQLite3
+import SwiftUI
+import UniformTypeIdentifiers
+import WebKit
+
+@MainActor
+final class OpenClickyBrowserWorkspaceWindowManager {
+    static let shared = OpenClickyBrowserWorkspaceWindowManager()
+
+    private var window: NSWindow?
+
+    func show(initialURL: URL? = nil, companionManager: CompanionManager) {
+        if window == nil {
+            window = makeWindow(initialURL: initialURL, companionManager: companionManager)
+        }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func close() {
+        window?.close()
+    }
+
+    private func makeWindow(initialURL: URL?, companionManager: CompanionManager) -> NSWindow {
+        let content = OpenClickyBrowserWorkspaceView(initialURL: initialURL, companionManager: companionManager)
+        let hostingView = NSHostingView(rootView: content)
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 1320, height: 840))
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor.clear.cgColor
+
+        let glassBackdrop = OpenClickyLiquidGlassBackdropView(cornerRadius: 28)
+        glassBackdrop.frame = containerView.bounds
+        glassBackdrop.autoresizingMask = [.width, .height]
+        glassBackdrop.configure(
+            cornerRadius: 28,
+            roundsTopCorners: true,
+            accentColor: OpenClickyNotchCaptureWindowManager.nsAccentColor(for: ClickyAccentTheme.current),
+            strength: .expanded
+        )
+        containerView.addSubview(glassBackdrop)
+
+        hostingView.frame = containerView.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        containerView.addSubview(hostingView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1320, height: 840),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "OpenClicky Browser Workspace"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.collectionBehavior.insert(.fullScreenAuxiliary)
+        window.minSize = NSSize(width: 980, height: 620)
+        window.appearance = Self.windowAppearanceForCurrentTheme()
+        window.contentView = containerView
+        window.center()
+        window.setFrameAutosaveName("OpenClicky.BrowserWorkspace")
+        return window
+    }
+
+    private static func windowAppearanceForCurrentTheme() -> NSAppearance? {
+        switch ClickyTheme.current {
+        case .dark:
+            return NSAppearance(named: .darkAqua)
+        case .light:
+            return NSAppearance(named: .aqua)
+        case .system:
+            return nil
+        }
+    }
+}
+
+private struct OpenClickyBrowserWorkspaceView: View {
+    @StateObject private var model: OpenClickyBrowserWorkspaceModel
+    @State private var selectedSpecialist: OpenClickyBrowserSpecialist = .researcher
+    @State private var composerText = ""
+    @State private var chatPanelWidth: CGFloat = 430
+    @State private var chatPanelWidthAtDragStart: CGFloat?
+    @State private var isChatCollapsed = false
+    @State private var isSplitDropTargeted = false
+    @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var selectedThemeRawValue = ClickyTheme.system.rawValue
+    @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentRawValue = ClickyAccentTheme.blue.rawValue
+    @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
+    @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
+
+    init(initialURL: URL?, companionManager: CompanionManager) {
+        _model = StateObject(wrappedValue: OpenClickyBrowserWorkspaceModel(initialURL: initialURL, companionManager: companionManager))
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                toolbar
+                Divider().overlay(Color.white.opacity(0.08))
+                workspaceCanvas
+            }
+            .frame(minWidth: 520)
+
+            if !isChatCollapsed {
+                Divider().overlay(Color.white.opacity(0.08))
+                chatResizeHandle
+                chatPanel
+                    .frame(width: chatPanelWidth)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if isChatCollapsed {
+                collapsedChatExpandButton
+            }
+        }
+        .background(
+            LinearGradient(
+                colors: [
+                    DS.Colors.background.opacity(backgroundOpacity),
+                    DS.Colors.surface1.opacity(0.68 + glassFrosting * 0.10),
+                    DS.Colors.accent.opacity(0.10 + glassOpacity * 0.03)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .background(.ultraThinMaterial)
+        .id("\(selectedThemeRawValue)-\(selectedAccentRawValue)-\(glassOpacity)-\(glassFrosting)")
+    }
+
+    private var backgroundOpacity: Double {
+        DS.Colors.isDarkMode ? 0.60 + glassOpacity * 0.10 : 0.42 + glassOpacity * 0.12
+    }
+
+    private var glassSurfaceFill: Color {
+        (DS.Colors.isDarkMode ? DS.Colors.surface1 : Color.white)
+            .opacity(0.42 + glassOpacity * 0.18 + glassFrosting * 0.06)
+    }
+
+    private var glassInsetFill: Color {
+        (DS.Colors.isDarkMode ? DS.Colors.surface2 : DS.Colors.surface1)
+            .opacity(0.34 + glassOpacity * 0.16)
+    }
+
+    private var glassBorder: Color {
+        DS.Colors.borderSubtle.opacity(0.36 + glassFrosting * 0.24)
+    }
+
+    private var accentBorder: Color {
+        DS.Colors.accent.opacity(0.34 + glassFrosting * 0.20)
+    }
+
+    private var workspaceCanvas: some View {
+        Group {
+            if let splitTabID = model.splitTabID, model.hasTab(splitTabID), splitTabID != model.activeTabID {
+                HStack(spacing: 0) {
+                    browserPane(tabID: model.activeTabID, placement: .primary)
+                    Divider().overlay(glassBorder)
+                    browserPane(tabID: splitTabID, placement: .secondary)
+                }
+            } else {
+                browserPane(tabID: model.activeTabID, placement: .single)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            splitDropHint
+        }
+        .onDrop(of: [UTType.text.identifier], isTargeted: $isSplitDropTargeted) { providers in
+            handleTabDrop(providers)
+        }
+    }
+
+    private func browserPane(tabID: UUID, placement: OpenClickyBrowserPanePlacement) -> some View {
+        VStack(spacing: 0) {
+            paneHeader(tabID: tabID, placement: placement)
+            OpenClickyWorkspaceWebView(
+                loadRequest: model.loadRequest(for: tabID),
+                onWebViewReady: { webView in model.attach(webView: webView, for: tabID) },
+                onMetadataChange: { metadata in model.apply(metadata: metadata, for: tabID) }
+            )
+            .overlay(alignment: .topLeading) {
+                if let errorText = model.errorText(for: tabID) {
+                    Text(errorText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color.red.opacity(0.82)))
+                        .padding(14)
+                }
+            }
+        }
+        .frame(minWidth: 280)
+        .background(glassInsetFill.opacity(0.55))
+    }
+
+    private func paneHeader(tabID: UUID, placement: OpenClickyBrowserPanePlacement) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: placement.systemImage)
+                .foregroundStyle(.secondary)
+            Text(model.title(for: tabID))
+                .font(.caption.weight(.bold))
+                .lineLimit(1)
+            Spacer()
+            if placement != .single {
+                Button("Focus") { model.activateTab(tabID) }
+                    .font(.caption2.weight(.bold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+            if placement == .secondary {
+                Button(action: model.closeSplit) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close split view")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(glassSurfaceFill)
+    }
+
+    private var splitDropHint: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "rectangle.split.2x1")
+            Text(isSplitDropTargeted ? "Drop to split" : "Drag a tab here to split")
+        }
+        .font(.caption.weight(.bold))
+        .foregroundStyle(isSplitDropTargeted ? Color.white : Color.white.opacity(0.58))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(isSplitDropTargeted ? DS.Colors.accent.opacity(0.46) : glassSurfaceFill))
+        .overlay(Capsule().stroke(isSplitDropTargeted ? DS.Colors.accent.opacity(0.82) : glassBorder))
+        .padding(12)
+    }
+
+    private var titleBarControls: some View {
+        HStack(spacing: 7) {
+            titleBarControlButton("house", help: "Home") { model.loadWelcomePage() }
+            titleBarControlButton("safari", help: "Web page") { model.loadAddress() }
+            titleBarControlButton("doc.text", help: "Local page") { model.prefillLocalExample() }
+            titleBarControlButton("text.bubble", help: isChatCollapsed ? "Expand chat" : "Collapse chat") { isChatCollapsed.toggle() }
+            titleBarControlButton("rectangle.split.2x1", help: "Split active tab") { model.splitActiveTab() }
+
+            Circle()
+                .fill(Color.green)
+                .frame(width: 8, height: 8)
+                .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
+                .padding(.leading, 3)
+                .help("Browser session ready")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(glassInsetFill.opacity(0.82)))
+        .overlay(Capsule().stroke(glassBorder))
+    }
+
+    private func titleBarControlButton(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(DS.Colors.textPrimary.opacity(0.88))
+                .frame(width: 25, height: 25)
+                .background(Circle().fill(glassSurfaceFill.opacity(0.72)))
+                .overlay(Circle().stroke(glassBorder))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var toolbar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(model.tabs) { tab in
+                            tabButton(tab)
+                        }
+                        Button(action: model.addTab) {
+                            Image(systemName: "plus")
+                                .frame(width: 26, height: 26)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("New tab")
+                    }
+                }
+
+                Spacer(minLength: 8)
+                titleBarControls
+            }
+            .padding(.leading, 72)
+            .padding(.trailing, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
+            HStack(spacing: 10) {
+                Button(action: model.goBack) { Image(systemName: "chevron.left") }
+                    .disabled(!model.canGoBack)
+                Button(action: model.goForward) { Image(systemName: "chevron.right") }
+                    .disabled(!model.canGoForward)
+                Button(action: model.reload) { Image(systemName: "arrow.clockwise") }
+
+                HStack(spacing: 8) {
+                    Image(systemName: model.activeTab.currentURL?.isFileURL == true ? "doc.badge.gearshape" : "lock")
+                        .foregroundStyle(.secondary)
+                    TextField("Enter a URL, local file path, or localhost route", text: $model.addressText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13, weight: .medium))
+                        .onSubmit(model.loadAddress)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(RoundedRectangle(cornerRadius: 12).fill(glassInsetFill))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(glassBorder))
+
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DS.Colors.textPrimary.opacity(0.86))
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
+        }
+        .background(glassSurfaceFill)
+        .glassEffect(.regular.tint(DS.Colors.accent.opacity(0.03 + glassFrosting * 0.07)), in: Rectangle())
+    }
+
+    private func tabButton(_ tab: OpenClickyBrowserTab) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: tab.currentURL?.isFileURL == true ? "doc" : "globe").font(.caption)
+            Text(tab.title).lineLimit(1)
+            if model.splitTabID == tab.id {
+                Image(systemName: "rectangle.split.2x1").font(.caption2.weight(.bold)).foregroundStyle(DS.Colors.accentText)
+            }
+            Button(action: { model.closeTab(tab.id) }) {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).opacity(0.55)
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(model.activeTabID == tab.id ? Color.white : Color.white.opacity(0.70))
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .frame(maxWidth: 210)
+        .background(RoundedRectangle(cornerRadius: 10).fill(model.activeTabID == tab.id ? DS.Colors.accent.opacity(0.18 + glassFrosting * 0.08) : glassInsetFill.opacity(0.75)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.activeTabID == tab.id ? accentBorder : glassBorder))
+        .onTapGesture { model.activateTab(tab.id) }
+        .onDrag { NSItemProvider(object: tab.id.uuidString as NSString) }
+        .help("Click to activate. Drag into the page to split this tab.")
+    }
+
+    private var chatResizeHandle: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.001))
+            .frame(width: 8)
+            .overlay(
+                Capsule()
+                    .fill(Color.white.opacity(0.16))
+                    .frame(width: 3, height: 42)
+            )
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let startingWidth = chatPanelWidthAtDragStart ?? chatPanelWidth
+                        chatPanelWidthAtDragStart = startingWidth
+                        chatPanelWidth = min(540, max(340, startingWidth - value.translation.width))
+                    }
+                    .onEnded { _ in
+                        chatPanelWidthAtDragStart = nil
+                    }
+            )
+            .help("Drag to resize OpenClicky chat")
+    }
+
+    private var collapsedChatExpandButton: some View {
+        Button(action: { isChatCollapsed = false }) {
+            Image(systemName: "sidebar.right")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(DS.Colors.accent.opacity(0.82)))
+                .overlay(Circle().stroke(accentBorder))
+                .shadow(color: DS.Colors.accent.opacity(0.22), radius: 12, x: 0, y: 5)
+        }
+        .buttonStyle(.plain)
+        .help("Expand OpenClicky chat")
+        .padding(.top, 14)
+        .padding(.trailing, 14)
+    }
+
+    private var chatPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            chatHeader
+            contextStrip
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if model.messages.isEmpty {
+                        emptyChatState
+                    } else {
+                        ForEach(model.messages) { message in
+                            chatBubble(role: message.role, text: message.text, isUser: message.isUser)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 18).fill(glassInsetFill.opacity(0.82)))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(glassBorder))
+
+            suggestionChips
+            composer
+        }
+        .padding(14)
+        .background(glassSurfaceFill)
+        .glassEffect(.regular.tint(DS.Colors.accent.opacity(0.04 + glassFrosting * 0.08)), in: Rectangle())
+        .overlay(Rectangle().stroke(glassBorder))
+    }
+
+    private var chatHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(DS.Colors.accentText)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(DS.Colors.accent.opacity(0.16)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("OpenClicky")
+                    .font(.system(size: 16, weight: .bold))
+                Text(model.activeTab.currentURL?.host ?? model.contextSummary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Clear") { model.clearChat() }
+                .font(.caption.weight(.bold))
+                .buttonStyle(.plain)
+                .foregroundStyle(model.messages.isEmpty ? Color.secondary.opacity(0.6) : DS.Colors.accentText)
+                .disabled(model.messages.isEmpty)
+                .help("Clear Browser Workspace chat")
+            Button(action: { isChatCollapsed = true }) { Image(systemName: "sidebar.right") }
+                .help("Collapse chat")
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var contextStrip: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(model.activeTab.contextStatus == "Active" ? Color.green : Color.yellow)
+                    .frame(width: 7, height: 7)
+                Text(model.activeTab.contextStatus)
+                    .font(.caption.weight(.bold))
+                Text(model.contextMetricSummary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Button("Refresh") { model.refreshPageContext(for: model.activeTabID, trigger: "Manual refresh") }
+                    .font(.caption2.weight(.bold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(DS.Colors.accentText)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: model.activeTab.currentURL?.isFileURL == true ? "doc.text" : "globe")
+                    .foregroundStyle(.secondary)
+                Text(model.activeTab.currentURL?.absoluteString ?? "open-clicky://welcome")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 15).fill(glassInsetFill))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(glassBorder))
+    }
+
+    private var emptyChatState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Blank chat")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text("OpenClicky can read the current tab and act in this browser instance. Nothing is sent to a background agent unless the request clearly needs longer-running work.")
+                .font(.system(size: 13))
+                .foregroundStyle(DS.Colors.textPrimary.opacity(0.72))
+                .lineSpacing(2)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var suggestionChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                suggestionChip("Summarize", icon: "text.alignleft")
+                suggestionChip("Key points", icon: "checklist")
+                suggestionChip("Search", icon: "magnifyingglass")
+                suggestionChip("Click", icon: "cursorarrow.click")
+                suggestionChip("Fill", icon: "square.and.pencil")
+            }
+        }
+    }
+
+    private func suggestionChip(_ title: String, icon: String) -> some View {
+        Button(action: { performSuggestion(title) }) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10).fill(glassInsetFill))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(glassBorder))
+    }
+
+    private func specialistChip(_ specialist: OpenClickyBrowserSpecialist) -> some View {
+        Button(action: { selectedSpecialist = specialist }) {
+            HStack(spacing: 6) {
+                Image(systemName: specialist.systemImage).font(.caption2.weight(.bold))
+                Text(specialist.title).font(.caption.weight(.bold))
+            }
+            .foregroundStyle(selectedSpecialist == specialist ? Color.white : Color.white.opacity(0.76))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .background(
+                Capsule()
+                    .fill(selectedSpecialist == specialist ? DS.Colors.accent.opacity(0.28 + glassFrosting * 0.08) : glassInsetFill)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(selectedSpecialist == specialist ? accentBorder : glassBorder)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(specialist.help)
+    }
+
+    private func chatBubble(role: String, text: String, isUser: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            if isUser {
+                Spacer(minLength: 42)
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text(role)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(isUser ? DS.Colors.accentText : DS.Colors.accentText.opacity(0.9))
+                    Spacer()
+                    Text(isUser ? "Prompt" : "Workspace")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(DS.Colors.textPrimary.opacity(0.88))
+                    .lineSpacing(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .frame(maxWidth: 360, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14).fill(isUser ? DS.Colors.accent.opacity(0.16 + glassFrosting * 0.04) : glassInsetFill))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(isUser ? accentBorder : glassBorder))
+
+            if !isUser {
+                Spacer(minLength: 42)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+    }
+
+    private var browserSessionDisclosure: some View {
+        DisclosureGroup {
+            chromeCookieCard
+                .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "key.horizontal")
+                    .foregroundStyle(.orange)
+                Text("Browser session")
+                    .font(.caption.weight(.bold))
+                Spacer()
+                Text(model.chromeProfiles.isEmpty ? "Cookies optional" : "\(model.chromeProfiles.count) profiles")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 14).fill(glassInsetFill))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(glassBorder))
+        .task {
+            if model.chromeProfiles.isEmpty {
+                model.discoverChromeProfiles()
+            }
+        }
+    }
+
+    private var chromeCookieCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "circle.grid.cross")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Chrome cookies")
+                        .font(.caption.weight(.bold))
+                    Text(model.chromeCookieStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button(action: model.discoverChromeProfiles) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Find Chrome profiles")
+            }
+
+            if model.chromeProfiles.isEmpty {
+                Button("Find Chrome profiles") { model.discoverChromeProfiles() }
+                    .font(.caption.weight(.bold))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            } else {
+                Picker("Profile", selection: $model.selectedChromeProfileID) {
+                    ForEach(model.chromeProfiles) { profile in
+                        Text(profile.displayName).tag(Optional(profile.id))
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+
+                HStack(spacing: 8) {
+                    Button("Import site") {
+                        Task { await model.importChromeCookies(scope: .activeSite) }
+                    }
+                    .disabled(model.isImportingChromeCookies)
+
+                    Button("Import all") {
+                        Task { await model.importChromeCookies(scope: .all) }
+                    }
+                    .disabled(model.isImportingChromeCookies)
+                }
+                .font(.caption.weight(.bold))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14).fill(glassInsetFill.opacity(0.82)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(glassBorder))
+    }
+
+    private var linkedAgentStatus: some View {
+        HStack(spacing: 9) {
+            Image(systemName: model.linkedAgentSessionID == nil ? "bubble.left.and.text.bubble.right" : "bolt.horizontal.circle.fill")
+                .foregroundStyle(model.linkedAgentSessionID == nil ? Color.secondary : Color.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.linkedAgentSessionID == nil ? "Page chat ready" : "Linked to Agent Mode")
+                    .font(.caption.weight(.bold))
+                Text(model.linkedAgentSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 13).fill(glassInsetFill))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(glassBorder))
+    }
+
+    private var pageActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Page actions")
+                .font(.caption2.weight(.heavy))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    actionPill("Summarize", icon: "text.alignleft")
+                    actionPill("Key takeaways", icon: "checklist")
+                    actionPill("Explain terms", icon: "questionmark.circle")
+                    actionPill("Translate", icon: "globe")
+                    actionPill("Refresh context", icon: "arrow.triangle.2.circlepath")
+                }
+            }
+        }
+    }
+
+    private func actionPill(_ title: String, icon: String) -> some View {
+        Button(action: { performPageAction(title) }) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10).fill(glassInsetFill))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(glassBorder))
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
+                TextEditor(text: $composerText)
+                    .font(.system(size: 13))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 34, maxHeight: 82)
+                    .overlay(alignment: .topLeading) {
+                        if composerText.isEmpty {
+                            Text("Ask OpenClicky anything about this page...")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 8)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                HStack(spacing: 10) {
+                    Image(systemName: "paperclip")
+                    Image(systemName: "at")
+                    Image(systemName: "curlybraces")
+                    Image(systemName: "camera.viewfinder")
+                    Image(systemName: "sparkles")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Button(action: sendPrototypeMessage) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(DS.Colors.accent))
+            }
+            .buttonStyle(.plain)
+            .disabled(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 15).fill(glassInsetFill.opacity(0.92)))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(accentBorder))
+    }
+
+    private func handleTabDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let rawValue = object as? String, let tabID = UUID(uuidString: rawValue) else { return }
+            Task { @MainActor in
+                model.splitTab(tabID)
+            }
+        }
+        return true
+    }
+
+    private func performPageAction(_ title: String) {
+        if title == "Refresh context" {
+            model.refreshPageContext(for: model.activeTabID, trigger: "Manual refresh")
+            return
+        }
+        composerText = title + " this page"
+        sendPrototypeMessage()
+    }
+
+    private func performSuggestion(_ title: String) {
+        switch title {
+        case "Summarize":
+            composerText = "Summarize this page"
+        case "Key points":
+            composerText = "Pull out the key points from this page"
+        case "Search":
+            composerText = "Search for "
+        case "Click":
+            composerText = "Click "
+        case "Fill":
+            composerText = "Fill "
+        default:
+            composerText = title
+        }
+        if title == "Summarize" || title == "Key points" {
+            sendPrototypeMessage()
+        }
+    }
+
+    private func sendPrototypeMessage() {
+        let prompt = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        model.sendBrowserMessage(prompt, specialist: selectedSpecialist)
+        composerText = ""
+    }
+}
+
+@MainActor
+protocol OpenClickyBrowserWorkspaceModelProtocol: AnyObject {
+    func getActiveWebView() -> WKWebView?
+    func captureActiveTabScreenshot() async -> Data?
+    func appendAgentMessage(text: String)
+    func updateLastAgentMessage(text: String)
+    func loadAddress(_ rawValue: String) -> Bool
+    func hasAgentSDK() -> Bool
+    func analyzeImageWithAgentSDK(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String
+}
+
+@MainActor
+private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClickyBrowserWorkspaceModelProtocol {
+    private weak var companionManager: CompanionManager?
+    @Published private(set) var tabs: [OpenClickyBrowserTab]
+    @Published var activeTabID: UUID
+    @Published var splitTabID: UUID?
+    @Published var addressText = ""
+    @Published var messages: [OpenClickyBrowserChatMessage] = []
+    @Published private(set) var chromeProfiles: [OpenClickyChromeProfile] = []
+    @Published var selectedChromeProfileID: UUID?
+    @Published var chromeCookieStatus = "Pick a Chrome profile, then import cookies into OpenClicky's browser session."
+    @Published var isImportingChromeCookies = false
+    @Published private(set) var isRunningBrowserPlan = false
+    @Published private(set) var linkedAgentSessionID: UUID?
+    @Published private(set) var linkedAgentSummary = "OpenClicky handles Browser Workspace chat inline and only starts Agent Mode when the prompt clearly needs longer-running work."
+
+    private var webViews: [UUID: WKWebView] = [:]
+
+    init(initialURL: URL?, companionManager: CompanionManager) {
+        self.companionManager = companionManager
+        let firstTab = OpenClickyBrowserTab(initialURL: initialURL)
+        self.tabs = [firstTab]
+        self.activeTabID = firstTab.id
+        self.addressText = firstTab.addressText
+    }
+
+    var activeTab: OpenClickyBrowserTab {
+        tab(for: activeTabID) ?? tabs[0]
+    }
+
+    var canGoBack: Bool { activeTab.canGoBack }
+    var canGoForward: Bool { activeTab.canGoForward }
+
+    var contextSummary: String {
+        if let currentURL = activeTab.currentURL {
+            return currentURL.isFileURL ? "Local page context" : "Web page context"
+        }
+        return "Local preview context"
+    }
+
+    var contextDetail: String {
+        let activeTab = activeTab
+        if !activeTab.selectedText.isEmpty {
+            return "Selection ready • \(activeTab.selectedText.count) selected chars • \(activeTab.readableTextCharacterCount) page chars"
+        }
+        if activeTab.readableTextCharacterCount > 0 {
+            return "Ready for page-aware chat • \(activeTab.readableTextCharacterCount) page chars"
+        }
+        return activeTab.title.isEmpty ? "Ready for page-aware chat" : activeTab.title
+    }
+
+    var contextMetricSummary: String {
+        let activeTab = activeTab
+        let selection = activeTab.selectedText.isEmpty ? "no selection" : "\(activeTab.selectedText.count) selected"
+        let split = splitTabID == nil ? "single pane" : "split view"
+        return "\(activeTab.readableTextCharacterCount) chars • \(selection) • \(split)"
+    }
+
+    func clearChat() {
+        messages.removeAll()
+        linkedAgentSessionID = nil
+        linkedAgentSummary = "OpenClicky is handling Browser Workspace chat inline. A background agent is only used for clearly longer-running work."
+    }
+
+    func hasTab(_ tabID: UUID) -> Bool {
+        tabs.contains { $0.id == tabID }
+    }
+
+    func title(for tabID: UUID) -> String {
+        tab(for: tabID)?.title ?? "Closed tab"
+    }
+
+    func loadRequest(for tabID: UUID) -> OpenClickyBrowserLoadRequest {
+        tab(for: tabID)?.loadRequest ?? OpenClickyBrowserLoadRequest(html: Self.welcomeHTML)
+    }
+
+    func errorText(for tabID: UUID) -> String? {
+        tab(for: tabID)?.errorText
+    }
+
+    func activateTab(_ tabID: UUID) {
+        guard let tab = tab(for: tabID) else { return }
+        activeTabID = tabID
+        addressText = tab.addressText
+    }
+
+    func addTab() {
+        let tab = OpenClickyBrowserTab(initialURL: nil)
+        tabs.append(tab)
+        activateTab(tab.id)
+    }
+
+    func closeTab(_ tabID: UUID) {
+        guard tabs.count > 1 else {
+            loadWelcomePage()
+            return
+        }
+        let closingActiveTab = activeTabID == tabID
+        tabs.removeAll { $0.id == tabID }
+        webViews[tabID] = nil
+        if splitTabID == tabID {
+            splitTabID = nil
+        }
+        if closingActiveTab {
+            activateTab(tabs[0].id)
+        }
+    }
+
+    func splitActiveTab() {
+        splitTab(activeTabID)
+    }
+
+    func splitTab(_ tabID: UUID) {
+        guard hasTab(tabID) else { return }
+        if tabID == activeTabID {
+            if tabs.count > 1, let otherTab = tabs.first(where: { $0.id != activeTabID }) {
+                splitTabID = otherTab.id
+            } else {
+                let duplicate = activeTab.duplicateForSplit()
+                tabs.append(duplicate)
+                splitTabID = duplicate.id
+            }
+        } else {
+            splitTabID = tabID
+        }
+    }
+
+    func closeSplit() {
+        splitTabID = nil
+    }
+
+    func attach(webView: WKWebView, for tabID: UUID) {
+        webViews[tabID] = webView
+        updateTab(tabID) { tab in
+            tab.canGoBack = webView.canGoBack
+            tab.canGoForward = webView.canGoForward
+        }
+        refreshPageContext(for: tabID, trigger: "WebView attached")
+    }
+
+    func apply(metadata: OpenClickyBrowserPageMetadata, for tabID: UUID) {
+        updateTab(tabID) { tab in
+            tab.title = metadata.title
+            tab.canGoBack = metadata.canGoBack
+            tab.canGoForward = metadata.canGoForward
+            if let url = metadata.url {
+                tab.currentURL = url
+                tab.addressText = url.absoluteString
+                if tab.id == activeTabID {
+                    addressText = url.absoluteString
+                }
+            }
+            tab.errorText = nil
+        }
+        refreshPageContext(for: tabID, trigger: "Navigation finished")
+    }
+
+    func loadAddress() {
+        loadAddress(addressText)
+    }
+
+    @discardableResult
+    func loadAddress(_ rawValue: String) -> Bool {
+        let rawValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawValue.isEmpty else { return false }
+
+        if rawValue == "open-clicky://welcome" {
+            loadWelcomePage()
+            return true
+        }
+
+        guard let url = Self.url(from: rawValue) else {
+            updateActiveTab { $0.errorText = "OpenClicky could not understand that URL or local path." }
+            return false
+        }
+        if url.isFileURL && !FileManager.default.fileExists(atPath: url.path) {
+            updateActiveTab { $0.errorText = "OpenClicky could not find that local file." }
+            return false
+        }
+        updateActiveTab { tab in
+            tab.currentURL = url
+            tab.title = url.host ?? url.lastPathComponent
+            tab.addressText = url.absoluteString
+            tab.errorText = nil
+            tab.loadRequest = OpenClickyBrowserLoadRequest(url: url)
+        }
+        addressText = url.absoluteString
+        return true
+    }
+
+    func reload() {
+        if let webView = webViews[activeTabID] {
+            webView.reload()
+        } else if activeTab.currentURL == nil {
+            loadWelcomePage()
+        } else if let currentURL = activeTab.currentURL {
+            updateActiveTab { $0.loadRequest = OpenClickyBrowserLoadRequest(url: currentURL) }
+        }
+    }
+
+    func loadWelcomePage() {
+        updateActiveTab { tab in
+            tab.currentURL = nil
+            tab.title = "OpenClicky Browser Workspace"
+            tab.addressText = "open-clicky://welcome"
+            tab.errorText = nil
+            tab.selectedText = ""
+            tab.readableText = Self.welcomeHTML
+            tab.readableTextCharacterCount = Self.welcomeHTML.count
+            tab.contextStatus = "Local"
+            tab.loadRequest = OpenClickyBrowserLoadRequest(html: Self.welcomeHTML)
+        }
+        addressText = "open-clicky://welcome"
+    }
+
+    func prefillLocalExample() {
+        addressText = "~/Desktop/example.html"
+        updateActiveTab { $0.errorText = "Type or paste a local HTML path, then press Open." }
+    }
+
+    func goBack() {
+        webViews[activeTabID]?.goBack()
+    }
+
+    func goForward() {
+        webViews[activeTabID]?.goForward()
+    }
+
+    func refreshPageContext(for tabID: UUID, trigger: String) {
+        guard let webView = webViews[tabID] else {
+            updateTab(tabID) { tab in
+                tab.contextStatus = tab.currentURL == nil ? "Local" : "Pending"
+            }
+            return
+        }
+
+        let script = """
+        (() => {
+          const selection = String(window.getSelection ? window.getSelection().toString() : '').trim();
+          const text = String(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim();
+          return { selection, text: text.slice(0, 16000), textLength: text.length, title: document.title || '' };
+        })();
+        """
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if error != nil {
+                    self.updateTab(tabID) { $0.contextStatus = "Limited" }
+                    return
+                }
+                let payload = result as? [String: Any]
+                self.updateTab(tabID) { tab in
+                    tab.selectedText = payload?["selection"] as? String ?? ""
+                    tab.readableText = payload?["text"] as? String ?? ""
+                    tab.readableTextCharacterCount = payload?["textLength"] as? Int ?? 0
+                    if let title = payload?["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        tab.title = title
+                    }
+                    tab.contextStatus = tab.readableTextCharacterCount > 0 || !tab.selectedText.isEmpty ? "Active" : "Limited"
+                }
+            }
+        }
+    }
+
+    func discoverChromeProfiles() {
+        let profiles = OpenClickyChromeCookieImporter.discoverProfiles()
+        chromeProfiles = profiles
+        if selectedChromeProfileID == nil || !profiles.contains(where: { $0.id == selectedChromeProfileID }) {
+            selectedChromeProfileID = profiles.first?.id
+        }
+        chromeCookieStatus = profiles.isEmpty
+            ? "No readable Chrome cookie profiles found. OpenClicky may need Full Disk Access, or Chrome may not be installed."
+            : "Found \(profiles.count) Chrome profile\(profiles.count == 1 ? "" : "s"). Choose one and import site cookies or all cookies."
+    }
+
+    func importChromeCookies(scope: OpenClickyChromeCookieImportScope) async {
+        if chromeProfiles.isEmpty { discoverChromeProfiles() }
+        guard let selectedChromeProfileID, let profile = chromeProfiles.first(where: { $0.id == selectedChromeProfileID }) else {
+            chromeCookieStatus = "Choose a Chrome profile first."
+            return
+        }
+
+        let host = scope == .activeSite ? activeTab.currentURL?.host : nil
+        if scope == .activeSite && host == nil {
+            chromeCookieStatus = "Open a real website first, then import site cookies."
+            return
+        }
+
+        isImportingChromeCookies = true
+        chromeCookieStatus = "Importing cookies from \(profile.displayName)…"
+        let result = await OpenClickyChromeCookieImporter.importCookies(from: profile, matchingHost: host)
+        isImportingChromeCookies = false
+        chromeCookieStatus = result.summary
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: result.summary, isUser: false))
+    }
+
+    private func inlineBrowserReply(for prompt: String) -> String {
+        let lowercasedPrompt = prompt.lowercased()
+        let tab = activeTab
+        let sourceText = tab.selectedText.isEmpty ? tab.readableText : tab.selectedText
+        let trimmedText = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedText.isEmpty else {
+            return "OpenClicky has full access to the browser instance, but this page is not exposing readable text yet. Try selecting text, refreshing context, or asking OpenClicky to click, type, search, or fill a page control."
+        }
+
+        if lowercasedPrompt.contains("summar") {
+            return Self.summaryReply(from: trimmedText, title: tab.title)
+        }
+
+        if lowercasedPrompt.contains("key point") || lowercasedPrompt.contains("takeaway") {
+            return Self.keyPointsReply(from: trimmedText)
+        }
+
+        if lowercasedPrompt.contains("explain") {
+            return "OpenClicky can work from the visible page text here. The most relevant excerpt is: \(Self.truncatedContext(trimmedText, limit: 900))"
+        }
+
+        return "OpenClicky is handling this in the Browser Workspace chat, with access to the current tab. For this first inline pass, I can summarize, pull key points, explain selected text, navigate, search, click, type, and fill page controls without starting a background agent."
+    }
+
+    private static func summaryReply(from text: String, title: String) -> String {
+        let sentences = sentenceCandidates(from: text, limit: 3)
+        let heading = title.isEmpty ? "This page" : title
+        guard !sentences.isEmpty else {
+            return "\(heading): \(truncatedContext(text, limit: 700))"
+        }
+        return "\(heading): " + sentences.joined(separator: " ")
+    }
+
+    private static func keyPointsReply(from text: String) -> String {
+        let points = sentenceCandidates(from: text, limit: 4)
+        guard !points.isEmpty else {
+            return truncatedContext(text, limit: 800)
+        }
+        return points.enumerated().map { index, point in "\(index + 1). \(point)" }.joined(separator: "\n")
+    }
+
+    private static func sentenceCandidates(from text: String, limit: Int) -> [String] {
+        let separators = CharacterSet(charactersIn: ".!?\n")
+        return text.components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count > 24 }
+            .prefix(limit)
+            .map { sentence in
+                let clipped = truncatedContext(sentence, limit: 240)
+                return clipped.hasSuffix(".") ? clipped : clipped + "."
+            }
+    }
+
+    private static func needsBackgroundAgent(_ prompt: String) -> Bool {
+        let lowercased = prompt.lowercased()
+        let triggers = [
+            "background agent",
+            "agent mode",
+            "start a task",
+            "make a task",
+            "long running",
+            "run in the background",
+            "write files",
+            "edit the repo",
+            "implement",
+            "deep research"
+        ]
+        return triggers.contains { lowercased.contains($0) }
+    }
+
+    func sendBrowserMessage(_ prompt: String, specialist: OpenClickyBrowserSpecialist) {
+        refreshPageContext(for: activeTabID, trigger: "Message send")
+        messages.append(OpenClickyBrowserChatMessage(role: "You", text: prompt, isUser: true))
+
+        if let browserPlan = OpenClickyBrowserResearchPlan(prompt: prompt) {
+            performBrowserResearchPlan(browserPlan)
+            return
+        }
+
+        if let directAction = OpenClickyBrowserDirectPageAction(prompt: prompt) {
+            performDirectPageAction(directAction)
+            return
+        }
+
+        if !Self.needsBackgroundAgent(prompt) {
+            let hasSDK = self.hasAgentSDK()
+            let apiKey = AppBundleConfiguration.anthropicAPIKey() ?? ""
+            if hasSDK || !apiKey.isEmpty {
+                let modelID = OpenClickyModelCatalog.defaultComputerUseModelID
+                isRunningBrowserPlan = true
+                Task {
+                    let agent = OpenClickyBrowserAgentRunner(apiKey: apiKey, modelName: modelID, browserModel: self)
+                    await agent.run(prompt: prompt)
+                    await MainActor.run {
+                        self.isRunningBrowserPlan = false
+                    }
+                }
+            } else {
+                messages.append(
+                    OpenClickyBrowserChatMessage(
+                        role: "OpenClicky",
+                        text: inlineBrowserReply(for: prompt) + "\n\n(Tip: Ensure the Claude Agent SDK is installed locally, or configure ANTHROPIC_API_KEY in settings to enable the fully autonomous CUA Browser Agent.)",
+                        isUser: false
+                    )
+                )
+            }
+            return
+        }
+
+        let agentPrompt = browserScopedAgentPrompt(userPrompt: prompt, specialist: specialist)
+        if let linkedAgentSessionID, companionManager?.codexAgentSessions.contains(where: { $0.id == linkedAgentSessionID }) == true {
+            companionManager?.selectCodexAgentSession(linkedAgentSessionID)
+            companionManager?.submitAgentPromptFromUI(agentPrompt)
+            linkedAgentSummary = "Sent follow-up to the linked OpenClicky agent task."
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Sent that follow-up to the linked OpenClicky Agent Mode task with the current page context attached.", isUser: false))
+            return
+        }
+
+        guard let session = companionManager?.submitNewAgentTaskFromUI(agentPrompt, source: "browser_workspace_chat") else {
+            linkedAgentSummary = "Could not start an OpenClicky Agent Mode task for this page."
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "I could not start an Agent Mode task for this page, so the message stayed in the workspace chat.", isUser: false))
+            return
+        }
+        linkedAgentSessionID = session.id
+        linkedAgentSummary = "Started \(session.title). Future page-chat messages continue in that same task."
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Started a linked OpenClicky Agent Mode task for this page. Future messages in this workspace will continue that same task with fresh page context.", isUser: false))
+    }
+
+    private func performBrowserResearchPlan(_ plan: OpenClickyBrowserResearchPlan) {
+        guard !isRunningBrowserPlan else {
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "OpenClicky is already running a browser plan in this workspace. Let that finish, then send the next one.", isUser: false))
+            return
+        }
+
+        isRunningBrowserPlan = true
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Plan: search for “\(plan.query)”, open the first \(plan.resultCount) result\(plan.resultCount == 1 ? "" : "s") in Browser Workspace tabs, then summarize them here.", isUser: false))
+
+        Task { [weak self] in
+            let outcome = await OpenClickyBrowserResearchRunner.run(plan)
+            await MainActor.run {
+                guard let self else { return }
+                self.isRunningBrowserPlan = false
+                self.applyBrowserResearchOutcome(outcome, plan: plan)
+            }
+        }
+    }
+
+    private func applyBrowserResearchOutcome(_ outcome: OpenClickyBrowserResearchOutcome, plan: OpenClickyBrowserResearchPlan) {
+        guard !outcome.items.isEmpty else {
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: outcome.failureMessage ?? "OpenClicky could not find usable web results for “\(plan.query)” yet.", isUser: false))
+            return
+        }
+
+        if let searchURL = OpenClickyBrowserResearchRunner.searchURL(for: plan.query) {
+            updateActiveTab { tab in
+                tab.currentURL = searchURL
+                tab.title = "Search: \(plan.query)"
+                tab.addressText = searchURL.absoluteString
+                tab.errorText = nil
+                tab.loadRequest = OpenClickyBrowserLoadRequest(url: searchURL)
+            }
+        }
+
+        let openedTabs = outcome.items.map { OpenClickyBrowserTab(researchItem: $0) }
+        tabs.append(contentsOf: openedTabs)
+        if let first = openedTabs.first {
+            activateTab(first.id)
+        }
+
+        let summary = outcome.items.enumerated().map { index, item in
+            let title = item.title.isEmpty ? item.url.absoluteString : item.title
+            return "\(index + 1). \(title)\n\(item.summary)\n\(item.url.absoluteString)"
+        }.joined(separator: "\n\n")
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Opened \(outcome.items.count) result\(outcome.items.count == 1 ? "" : "s") for “\(plan.query)” in tabs and summarized them here:\n\n\(summary)", isUser: false))
+    }
+
+    private func performDirectPageAction(_ action: OpenClickyBrowserDirectPageAction) {
+        if action.kind == .navigate {
+            let destination = action.value ?? action.target
+            if loadAddress(destination) {
+                messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Opened \(addressText) in the active tab.", isUser: false))
+            } else {
+                messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "OpenClicky could not understand that as a URL or local path.", isUser: false))
+            }
+            return
+        }
+
+        guard let webView = webViews[activeTabID] else {
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "OpenClicky could not act on the page yet because the web view is still loading.", isUser: false))
+            return
+        }
+
+        guard let script = action.javascript() else {
+            messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "OpenClicky could not prepare that page action.", isUser: false))
+            return
+        }
+
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    self.messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "OpenClicky could not complete that directly on the page: \(error.localizedDescription)", isUser: false))
+                    return
+                }
+                let payload = result as? [String: Any]
+                let ok = payload?["ok"] as? Bool ?? false
+                let summary = payload?["summary"] as? String
+                self.messages.append(
+                    OpenClickyBrowserChatMessage(
+                        role: "OpenClicky",
+                        text: summary ?? (ok ? "Done on the page." : "OpenClicky could not find a matching page control."),
+                        isUser: false
+                    )
+                )
+                self.refreshPageContext(for: self.activeTabID, trigger: "Direct page action")
+            }
+        }
+    }
+
+    func openLinkedAgentInOpenClicky() {
+        guard let linkedAgentSessionID else { return }
+        companionManager?.selectCodexAgentSession(linkedAgentSessionID)
+    }
+
+    private func browserScopedAgentPrompt(userPrompt: String, specialist: OpenClickyBrowserSpecialist) -> String {
+        let currentTab = activeTab
+        let pageLabel = currentTab.title.isEmpty ? (currentTab.currentURL?.absoluteString ?? "the local preview") : currentTab.title
+        let urlLine = currentTab.currentURL?.absoluteString ?? "open-clicky://welcome"
+        let selectionLine = currentTab.selectedText.isEmpty ? "No selected text." : Self.truncatedContext(currentTab.selectedText, limit: 2_000)
+        let readableTextLine = currentTab.readableText.isEmpty ? "No readable text extracted." : Self.truncatedContext(currentTab.readableText, limit: 6_000)
+        let splitLine = splitTabID.flatMap { splitID in tab(for: splitID)?.title }.map { "Split view is also open with: \($0)." } ?? "No split view is active."
+        return """
+        OpenClicky Browser Workspace chat request.
+
+        Specialist mode: \(specialist.title) - \(specialist.help)
+        User request: \(userPrompt)
+
+        Current page:
+        - Title: \(pageLabel)
+        - URL: \(urlLine)
+        - Context status: \(currentTab.contextStatus)
+        - Readable text count: \(currentTab.readableTextCharacterCount) characters
+        - Selection: \(selectionLine)
+        - Readable text excerpt: \(readableTextLine)
+        - Split: \(splitLine)
+
+        Answer as OpenClicky and stay scoped to this browser workspace/page unless the user asks for broader work.
+        """.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func truncatedContext(_ text: String, limit: Int) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        return String(trimmed.prefix(limit)) + "…"
+    }
+
+    private func tab(for tabID: UUID) -> OpenClickyBrowserTab? {
+        tabs.first { $0.id == tabID }
+    }
+
+    private func updateActiveTab(_ update: (inout OpenClickyBrowserTab) -> Void) {
+        updateTab(activeTabID, update)
+    }
+
+    private func updateTab(_ tabID: UUID, _ update: (inout OpenClickyBrowserTab) -> Void) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        update(&tabs[index])
+        if tabID == activeTabID {
+            addressText = tabs[index].addressText
+        }
+    }
+
+    func getActiveWebView() -> WKWebView? {
+        return webViews[activeTabID]
+    }
+
+    func captureActiveTabScreenshot() async -> Data? {
+        guard let webView = webViews[activeTabID] else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            webView.takeSnapshot(with: nil) { image, error in
+                guard let image = image else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                if let tiffData = image.tiffRepresentation,
+                   let bitmapImage = NSBitmapImageRep(data: tiffData),
+                   let jpegData = bitmapImage.representation(using: .jpeg, properties: [.compressionFactor: 0.7]) {
+                    continuation.resume(returning: jpegData)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    func appendAgentMessage(text: String) {
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: text, isUser: false))
+    }
+
+    func updateLastAgentMessage(text: String) {
+        if !messages.isEmpty, !messages.last!.isUser {
+            messages[messages.count - 1] = OpenClickyBrowserChatMessage(role: "OpenClicky", text: text, isUser: false)
+        } else {
+            appendAgentMessage(text: text)
+        }
+    }
+
+    func hasAgentSDK() -> Bool {
+        return companionManager?.claudeAgentSDKAPI != nil
+    }
+
+    func analyzeImageWithAgentSDK(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String {
+        guard let sdk = companionManager?.claudeAgentSDKAPI else {
+            throw NSError(domain: "BrowserWorkspace", code: -404, userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK not available."])
+        }
+        sdk.model = OpenClickyModelCatalog.defaultComputerUseModelID
+        let (text, _) = try await sdk.analyzeImageStreaming(
+            images: images,
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt,
+            onTextChunk: onTextChunk
+        )
+        return text
+    }
+
+    private static func url(from rawValue: String) -> URL? {
+        let expandedValue: String
+        if rawValue.hasPrefix("~/") {
+            expandedValue = NSString(string: rawValue).expandingTildeInPath
+        } else {
+            expandedValue = rawValue
+        }
+
+        if expandedValue.hasPrefix("/") {
+            return URL(fileURLWithPath: expandedValue)
+        }
+
+        if expandedValue.hasPrefix("localhost:") {
+            return URL(string: "http://\(expandedValue)")
+        }
+
+        if let url = URL(string: expandedValue), url.scheme != nil {
+            return url
+        }
+
+        if expandedValue.contains(".") {
+            return URL(string: "https://\(expandedValue)")
+        }
+
+        return nil
+    }
+
+    nonisolated static let welcomeHTML = """
+    <!doctype html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>
+        :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif; }
+        body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top right, #30205d, transparent 34%), #080b12; color: white; }
+        main { padding: 76px 64px; max-width: 980px; }
+        .eyebrow { color: #a88cff; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; font-size: 13px; }
+        h1 { font-size: 58px; line-height: 1; margin: 18px 0; max-width: 760px; }
+        p { color: rgba(255,255,255,.72); font-size: 18px; line-height: 1.55; max-width: 720px; }
+        .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 42px; }
+        .card { border: 1px solid rgba(255,255,255,.11); background: rgba(255,255,255,.055); border-radius: 22px; padding: 22px; min-height: 150px; box-shadow: 0 18px 60px rgba(0,0,0,.25); }
+        .icon { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; background: linear-gradient(135deg, #7c3aed, #2563eb); margin-bottom: 22px; }
+        a { color: #b59cff; }
+      </style>
+    </head>
+    <body>
+      <main>
+        <div class="eyebrow">OpenClicky Local Page</div>
+        <h1>Browser workspace prototype</h1>
+        <p>This local page proves the left canvas can render local content while the right panel keeps OpenClicky's own chat, specialists, context actions, and composer visible.</p>
+        <section class="cards">
+          <article class="card"><div class="icon">🌐</div><h3>Web or local</h3><p>Load URLs, localhost routes, and file paths from the address bar.</p></article>
+          <article class="card"><div class="icon">💬</div><h3>Collapsible chat</h3><p>OpenClicky's chat copy can collapse to a rail or resize from the divider.</p></article>
+          <article class="card"><div class="icon">🧭</div><h3>Tabs and splits</h3><p>Tabs switch real WebViews, and dragging a tab into the page opens a split view.</p></article>
+        </section>
+      </main>
+    </body>
+    </html>
+    """
+}
+
+private enum OpenClickyChromeCookieImportScope {
+    case activeSite
+    case all
+}
+
+private struct OpenClickyBrowserDirectPageAction {
+    enum Kind: String {
+        case click
+        case type
+        case navigate
+    }
+
+    let kind: Kind
+    let target: String
+    let value: String?
+    let submitAfterTyping: Bool
+
+    init?(prompt: String) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = Self.normalizedCommand(trimmed)
+        guard !normalized.isEmpty else { return nil }
+
+        if let destination = Self.captureNavigationDestination(normalized) {
+            self.kind = .navigate
+            self.target = destination
+            self.value = destination
+            self.submitAfterTyping = false
+            return
+        }
+
+        if let searchValue = Self.capture(normalized, pattern: #"^(?:search|find|look up|google)\s+(?:for\s+)?(.+)$"#) {
+            self.kind = .type
+            self.target = "search"
+            self.value = searchValue
+            self.submitAfterTyping = true
+            return
+        }
+
+        if let fill = Self.capturePair(normalized, pattern: #"^(?:type|enter|put|paste)\s+(.+?)\s+(?:in|into|inside)\s+(.+)$"#) {
+            self.kind = .type
+            self.target = fill.second
+            self.value = fill.first
+            self.submitAfterTyping = false
+            return
+        }
+
+        if let fill = Self.capturePair(normalized, pattern: #"^(?:fill|set)\s+(.+?)\s+(?:with|to)\s+(.+)$"#) {
+            self.kind = .type
+            self.target = fill.first
+            self.value = fill.second
+            self.submitAfterTyping = false
+            return
+        }
+
+        if let openTarget = Self.capture(normalized, pattern: #"^open\s+(.+)$"#) {
+            let cleanedTarget = Self.cleanTarget(openTarget)
+            if Self.looksLikeNavigableDestination(cleanedTarget) {
+                self.kind = .navigate
+                self.target = cleanedTarget
+                self.value = cleanedTarget
+                self.submitAfterTyping = false
+            } else {
+                self.kind = .click
+                self.target = cleanedTarget
+                self.value = nil
+                self.submitAfterTyping = false
+            }
+            return
+        }
+
+        if let clickTarget = Self.capture(normalized, pattern: #"^(?:click|press|tap|choose|select)\s+(.+)$"#) {
+            self.kind = .click
+            self.target = Self.cleanTarget(clickTarget)
+            self.value = nil
+            self.submitAfterTyping = false
+            return
+        }
+
+        return nil
+    }
+
+    func javascript() -> String? {
+        let payload: [String: Any] = [
+            "kind": kind.rawValue,
+            "target": target,
+            "value": value ?? "",
+            "submitAfterTyping": submitAfterTyping
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+
+        return """
+        (() => {
+          const action = \(json);
+          const norm = (value) => String(value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+          const visible = (element) => {
+            if (!element || element.disabled || element.hidden) return false;
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+          };
+          const labelFor = (element) => {
+            if (!element) return '';
+            const parts = [
+              element.innerText,
+              element.value,
+              element.getAttribute('aria-label'),
+              element.getAttribute('title'),
+              element.getAttribute('placeholder'),
+              element.getAttribute('name'),
+              element.id
+            ];
+            if (element.id) {
+              const escapedID = window.CSS?.escape ? CSS.escape(element.id) : element.id.replace(/"/g, '\\"');
+              const explicit = document.querySelector(`label[for="${escapedID}"]`);
+              if (explicit) parts.push(explicit.innerText);
+            }
+            const wrappingLabel = element.closest('label');
+            if (wrappingLabel) parts.push(wrappingLabel.innerText);
+            return norm(parts.filter(Boolean).join(' '));
+          };
+          const score = (label, target) => {
+            if (!target) return 1;
+            if (!label) return 0;
+            if (label === target) return 100;
+            if (label.includes(target)) return 70;
+            const tokens = target.split(' ').filter(Boolean);
+            if (tokens.length && tokens.every((token) => label.includes(token))) return 45;
+            return 0;
+          };
+          const best = (elements, target) => {
+            const wanted = norm(target);
+            let match = null;
+            let bestScore = 0;
+            for (const element of elements) {
+              if (!visible(element)) continue;
+              const elementScore = score(labelFor(element), wanted);
+              if (elementScore > bestScore) {
+                bestScore = elementScore;
+                match = element;
+              }
+            }
+            return match;
+          };
+          const describe = (element) => {
+            const raw = (element.innerText || element.value || element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || element.id || element.tagName || '').trim();
+            return raw.replace(/\\s+/g, ' ').slice(0, 80) || element.tagName.toLowerCase();
+          };
+          const clickables = () => Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"], input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], summary, [aria-label], [title]'));
+          const fields = () => Array.from(document.querySelectorAll('input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="password"], input[type="tel"], input[type="url"], input[type="number"], textarea, [contenteditable="true"], [role="textbox"]'));
+          const focusAndScroll = (element) => {
+            element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+            element.focus({ preventScroll: true });
+          };
+
+          if (action.kind === 'click') {
+            const element = best(clickables(), action.target);
+            if (!element) return { ok: false, summary: `OpenClicky could not find a visible page control matching “${action.target}”.` };
+            focusAndScroll(element);
+            element.click();
+            return { ok: true, summary: `Clicked “${describe(element)}” on the page.` };
+          }
+
+          if (action.kind === 'type') {
+            const editable = document.activeElement && (document.activeElement.matches?.('input, textarea, [contenteditable="true"], [role="textbox"]'));
+            const element = best(fields(), action.target) || (editable ? document.activeElement : null) || fields().find(visible);
+            if (!element) return { ok: false, summary: `OpenClicky could not find a visible page field matching “${action.target}”.` };
+            focusAndScroll(element);
+            if (element.isContentEditable) {
+              element.textContent = action.value || '';
+            } else {
+              element.value = action.value || '';
+            }
+            element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: action.value || '' }));
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+            if (action.submitAfterTyping) {
+              const form = element.closest('form');
+              if (form?.requestSubmit) {
+                form.requestSubmit();
+              } else if (form) {
+                form.submit();
+              } else {
+                element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+                element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+              }
+              return { ok: true, summary: `Searched for “${action.value}” on the page.` };
+            }
+            return { ok: true, summary: `Typed into “${describe(element)}” on the page.` };
+          }
+
+          return { ok: false, summary: 'OpenClicky did not recognise that page action.' };
+        })();
+        """
+    }
+
+    private static func normalizedCommand(_ value: String) -> String {
+        var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["please ", "can you ", "could you ", "would you ", "on this page ", "on the page "]
+        let lowercased = normalized.lowercased()
+        for prefix in prefixes where lowercased.hasPrefix(prefix) {
+            normalized.removeFirst(prefix.count)
+            break
+        }
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func captureNavigationDestination(_ value: String) -> String? {
+        guard let destination = capture(value, pattern: #"^(?:go to|goto|navigate to|visit|load|browse to)\s+(.+)$"#) else { return nil }
+        return looksLikeNavigableDestination(destination) ? destination : nil
+    }
+
+    private static func looksLikeNavigableDestination(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(" ") else { return false }
+        let lowercased = trimmed.lowercased()
+        return lowercased == "open-clicky://welcome"
+            || lowercased.hasPrefix("~/")
+            || lowercased.hasPrefix("/")
+            || lowercased.hasPrefix("localhost:")
+            || lowercased.hasPrefix("http://")
+            || lowercased.hasPrefix("https://")
+            || lowercased.contains(".")
+    }
+
+    private static func cleanTarget(_ value: String) -> String {
+        var cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = cleaned.lowercased()
+        for prefix in ["the ", "a ", "an "] where lowercased.hasPrefix(prefix) {
+            cleaned.removeFirst(prefix.count)
+            break
+        }
+        let suffixLowercased = cleaned.lowercased()
+        for suffix in [" button", " link", " field", " box", " on the page", " on this page"] where suffixLowercased.hasSuffix(suffix) {
+            cleaned.removeLast(suffix.count)
+            break
+        }
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func capture(_ value: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range), match.numberOfRanges > 1,
+              let capturedRange = Range(match.range(at: 1), in: value) else { return nil }
+        return cleanTarget(String(value[capturedRange]))
+    }
+
+    private static func capturePair(_ value: String, pattern: String) -> (first: String, second: String)? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range), match.numberOfRanges > 2,
+              let firstRange = Range(match.range(at: 1), in: value),
+              let secondRange = Range(match.range(at: 2), in: value) else { return nil }
+        return (cleanTarget(String(value[firstRange])), cleanTarget(String(value[secondRange])))
+    }
+}
+
+private struct OpenClickyBrowserResearchPlan {
+    let query: String
+    let resultCount: Int
+
+    init?(prompt: String) {
+        let normalized = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = normalized.lowercased()
+        guard lowercased.contains("result") || lowercased.contains("summar") || lowercased.contains("search") else { return nil }
+        guard lowercased.contains("summar") || lowercased.contains("open") || lowercased.contains("click") else { return nil }
+
+        let quotedQuery = Self.capture(normalized, pattern: #"[“"]([^”"]+)[”"]"#)
+        let searchQuery = Self.capture(normalized, pattern: #"(?i)(?:search|look up|google|find)\s+(?:for\s+)?(.+?)(?:,?\s+(?:then|and)\s+|$)"#)
+        let query = (quotedQuery ?? searchQuery ?? "")
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"“”'")))
+        guard !query.isEmpty else { return nil }
+
+        let requestedCount = Self.capture(normalized, pattern: #"(?i)(?:first|top)\s+(\d+)"#).flatMap(Int.init) ?? 4
+        self.query = query
+        self.resultCount = min(max(requestedCount, 1), 8)
+    }
+
+    private static func capture(_ value: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        guard let match = regex.firstMatch(in: value, range: range), match.numberOfRanges > 1,
+              let capturedRange = Range(match.range(at: 1), in: value) else { return nil }
+        return String(value[capturedRange])
+    }
+}
+
+private struct OpenClickyBrowserResearchItem {
+    let title: String
+    let url: URL
+    let summary: String
+    let readableText: String
+}
+
+private struct OpenClickyBrowserResearchOutcome {
+    let items: [OpenClickyBrowserResearchItem]
+    let failureMessage: String?
+}
+
+private enum OpenClickyBrowserResearchRunner {
+    static func searchURL(for query: String) -> URL? {
+        var components = URLComponents(string: "https://duckduckgo.com/html/")
+        components?.queryItems = [URLQueryItem(name: "q", value: query)]
+        return components?.url
+    }
+
+    static func run(_ plan: OpenClickyBrowserResearchPlan) async -> OpenClickyBrowserResearchOutcome {
+        guard let searchURL = searchURL(for: plan.query) else {
+            return OpenClickyBrowserResearchOutcome(items: [], failureMessage: "OpenClicky could not build a search URL for “\(plan.query)”.")
+        }
+
+        do {
+            let searchHTML = try await fetchText(from: searchURL, limit: 900_000)
+            let results = parseDuckDuckGoResults(from: searchHTML, limit: plan.resultCount)
+            guard !results.isEmpty else {
+                return OpenClickyBrowserResearchOutcome(items: [], failureMessage: "OpenClicky searched for “\(plan.query)”, but could not extract usable result links yet.")
+            }
+
+            var items: [OpenClickyBrowserResearchItem] = []
+            for result in results {
+                let pageText = (try? await fetchText(from: result.url, limit: 1_200_000)) ?? ""
+                let extractedTitle = pageTitle(from: pageText)
+                let readable = readableText(from: pageText)
+                let title = extractedTitle.isEmpty ? result.title : extractedTitle
+                let summary = summaryText(from: readable, fallback: result.title)
+                items.append(OpenClickyBrowserResearchItem(title: title, url: result.url, summary: summary, readableText: readable))
+            }
+
+            return OpenClickyBrowserResearchOutcome(items: items, failureMessage: nil)
+        } catch {
+            return OpenClickyBrowserResearchOutcome(items: [], failureMessage: "OpenClicky could not complete that browser plan: \(error.localizedDescription)")
+        }
+    }
+
+    private static func fetchText(from url: URL, limit: Int) async throws -> String {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 18
+        request.setValue("Mozilla/5.0 AppleWebKit/605.1.15 OpenClickyBrowserWorkspace/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let clipped = data.prefix(limit)
+        return String(data: clipped, encoding: .utf8)
+            ?? String(data: clipped, encoding: .isoLatin1)
+            ?? ""
+    }
+
+    private static func parseDuckDuckGoResults(from html: String, limit: Int) -> [(title: String, url: URL)] {
+        let patterns = [
+            #"<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>"#,
+            #"<a[^>]+class="[^"]*result-link[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>"#
+        ]
+
+        var seen = Set<String>()
+        var results: [(title: String, url: URL)] = []
+        for pattern in patterns {
+            for match in captures(in: html, pattern: pattern) {
+                guard let url = normalizeSearchResultURL(match.first),
+                      !seen.contains(url.absoluteString) else { continue }
+                seen.insert(url.absoluteString)
+                results.append((title: cleanHTML(match.second), url: url))
+                if results.count >= limit { return results }
+            }
+        }
+        return results
+    }
+
+    private static func normalizeSearchResultURL(_ rawValue: String) -> URL? {
+        let decoded = decodeHTMLEntities(rawValue).removingPercentEncoding ?? decodeHTMLEntities(rawValue)
+        if let components = URLComponents(string: decoded),
+           components.path == "/l/",
+           let uddg = components.queryItems?.first(where: { $0.name == "uddg" })?.value,
+           let url = URL(string: uddg) {
+            return url
+        }
+        if decoded.hasPrefix("//") {
+            return URL(string: "https:\(decoded)")
+        }
+        return URL(string: decoded)
+    }
+
+    private static func pageTitle(from html: String) -> String {
+        guard let match = captures(in: html, pattern: #"(?is)<title[^>]*>(.*?)</title>"#).first else { return "" }
+        return cleanHTML(match.first)
+    }
+
+    private static func readableText(from html: String) -> String {
+        var text = html
+        let removals = [
+            #"(?is)<script[^>]*>.*?</script>"#,
+            #"(?is)<style[^>]*>.*?</style>"#,
+            #"(?is)<noscript[^>]*>.*?</noscript>"#,
+            #"(?is)<svg[^>]*>.*?</svg>"#,
+            #"(?is)<[^>]+>"#
+        ]
+        for pattern in removals {
+            text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        return decodeHTMLEntities(text)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func summaryText(from text: String, fallback: String) -> String {
+        let source = text.isEmpty ? fallback : text
+        let separators = CharacterSet(charactersIn: ".!?\n")
+        let sentences = source.components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count > 50 }
+            .prefix(2)
+            .map { sentence in
+                let clipped = sentence.count > 260 ? String(sentence.prefix(260)) + "…" : sentence
+                return clipped.hasSuffix(".") ? clipped : clipped + "."
+            }
+        if sentences.isEmpty {
+            let clipped = source.count > 360 ? String(source.prefix(360)) + "…" : source
+            return clipped.isEmpty ? "OpenClicky opened this result, but it did not expose readable text." : clipped
+        }
+        return sentences.joined(separator: " ")
+    }
+
+    private static func captures(in value: String, pattern: String) -> [(first: String, second: String)] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return [] }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return regex.matches(in: value, range: range).compactMap { match in
+            guard match.numberOfRanges > 2,
+                  let firstRange = Range(match.range(at: 1), in: value),
+                  let secondRange = Range(match.range(at: 2), in: value) else { return nil }
+            return (String(value[firstRange]), String(value[secondRange]))
+        }
+    }
+
+    private static func cleanHTML(_ value: String) -> String {
+        decodeHTMLEntities(value.replacingOccurrences(of: #"(?is)<[^>]+>"#, with: " ", options: .regularExpression))
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func decodeHTMLEntities(_ value: String) -> String {
+        var decoded = value
+        let replacements = [
+            "&amp;": "&",
+            "&quot;": "\"",
+            "&#39;": "'",
+            "&apos;": "'",
+            "&lt;": "<",
+            "&gt;": ">",
+            "&nbsp;": " "
+        ]
+        for (entity, replacement) in replacements {
+            decoded = decoded.replacingOccurrences(of: entity, with: replacement)
+        }
+        return decoded
+    }
+}
+
+private struct OpenClickyChromeProfile: Identifiable, Equatable {
+    let id = UUID()
+    let displayName: String
+    let profilePath: URL
+    let cookiesPath: URL
+}
+
+private struct OpenClickyChromeCookieImportResult {
+    let imported: Int
+    let skipped: Int
+    let failed: Int
+
+    var summary: String {
+        "Imported \(imported) Chrome cookie\(imported == 1 ? "" : "s") into OpenClicky. Skipped \(skipped), failed \(failed)."
+    }
+}
+
+private enum OpenClickyChromeCookieImporter {
+    static func discoverProfiles() -> [OpenClickyChromeProfile] {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Google/Chrome", isDirectory: true)
+        guard let profileNames = try? FileManager.default.contentsOfDirectory(atPath: base.path) else { return [] }
+
+        let localStateNames = chromeLocalStateProfileNames(base: base)
+        return profileNames.sorted().compactMap { name in
+            guard name == "Default" || name.hasPrefix("Profile ") else { return nil }
+            let profilePath = base.appendingPathComponent(name, isDirectory: true)
+            let networkCookies = profilePath.appendingPathComponent("Network/Cookies")
+            let legacyCookies = profilePath.appendingPathComponent("Cookies")
+            let cookiesPath: URL
+            if FileManager.default.fileExists(atPath: networkCookies.path) {
+                cookiesPath = networkCookies
+            } else if FileManager.default.fileExists(atPath: legacyCookies.path) {
+                cookiesPath = legacyCookies
+            } else {
+                return nil
+            }
+            let displayName = localStateNames[name].map { "\($0) (\(name))" } ?? name
+            return OpenClickyChromeProfile(displayName: displayName, profilePath: profilePath, cookiesPath: cookiesPath)
+        }
+    }
+
+    @MainActor
+    static func importCookies(from profile: OpenClickyChromeProfile, matchingHost host: String?) async -> OpenClickyChromeCookieImportResult {
+        let rows = readCookieRows(from: profile.cookiesPath, matchingHost: host)
+        guard !rows.isEmpty else { return OpenClickyChromeCookieImportResult(imported: 0, skipped: 0, failed: 0) }
+
+        let chromeKey = chromeSafeStorageKey()
+        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+        var imported = 0
+        var skipped = 0
+        var failed = 0
+
+        for row in rows {
+            guard let value = cookieValue(for: row, chromeKey: chromeKey), !value.isEmpty || !row.name.isEmpty else {
+                skipped += 1
+                continue
+            }
+            guard let cookie = httpCookie(from: row, value: value) else {
+                failed += 1
+                continue
+            }
+            await withCheckedContinuation { continuation in
+                cookieStore.setCookie(cookie) { continuation.resume() }
+            }
+            imported += 1
+        }
+
+        return OpenClickyChromeCookieImportResult(imported: imported, skipped: skipped, failed: failed)
+    }
+
+    private static func readCookieRows(from cookiesPath: URL, matchingHost host: String?) -> [OpenClickyChromeCookieRow] {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenClickyChromeCookies-\(UUID().uuidString).sqlite")
+        do {
+            if FileManager.default.fileExists(atPath: tempURL.path) { try FileManager.default.removeItem(at: tempURL) }
+            try FileManager.default.copyItem(at: cookiesPath, to: tempURL)
+        } catch {
+            return []
+        }
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(tempURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return [] }
+        defer { sqlite3_close(db) }
+
+        let query = "SELECT host_key, name, path, expires_utc, is_secure, is_httponly, samesite, value, encrypted_value FROM cookies"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK, let statement else { return [] }
+        defer { sqlite3_finalize(statement) }
+
+        var rows: [OpenClickyChromeCookieRow] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let hostKey = columnString(statement, 0)
+            if let host, !matches(hostKey: hostKey, activeHost: host) { continue }
+            rows.append(
+                OpenClickyChromeCookieRow(
+                    hostKey: hostKey,
+                    name: columnString(statement, 1),
+                    path: columnString(statement, 2).isEmpty ? "/" : columnString(statement, 2),
+                    expiresUTC: sqlite3_column_int64(statement, 3),
+                    isSecure: sqlite3_column_int(statement, 4) != 0,
+                    isHTTPOnly: sqlite3_column_int(statement, 5) != 0,
+                    sameSite: sqlite3_column_int(statement, 6),
+                    value: columnString(statement, 7),
+                    encryptedValue: columnData(statement, 8)
+                )
+            )
+        }
+        return rows
+    }
+
+    private static func httpCookie(from row: OpenClickyChromeCookieRow, value: String) -> HTTPCookie? {
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .domain: row.hostKey,
+            .path: row.path,
+            .name: row.name,
+            .value: value,
+            .secure: row.isSecure ? "TRUE" : "FALSE"
+        ]
+        if row.isHTTPOnly {
+            properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE"
+        }
+        if let expires = chromeExpiryDate(row.expiresUTC) {
+            properties[.expires] = expires
+        }
+        if let sameSite = sameSiteName(row.sameSite) {
+            properties[HTTPCookiePropertyKey("SameSite")] = sameSite
+        }
+        return HTTPCookie(properties: properties)
+    }
+
+    private static func cookieValue(for row: OpenClickyChromeCookieRow, chromeKey: [UInt8]?) -> String? {
+        if !row.value.isEmpty { return row.value }
+        guard let chromeKey else { return nil }
+        return decryptChromeCookie(row.encryptedValue, key: chromeKey)
+    }
+
+    private static func decryptChromeCookie(_ encryptedValue: Data, key: [UInt8]) -> String? {
+        guard encryptedValue.count > 3 else { return nil }
+        let prefix = String(data: encryptedValue.prefix(3), encoding: .utf8)
+        guard prefix == "v10" || prefix == "v11" else { return nil }
+        let cipherText = encryptedValue.dropFirst(3)
+        let iv = Array(repeating: UInt8(ascii: " "), count: kCCBlockSizeAES128)
+        var output = [UInt8](repeating: 0, count: cipherText.count + kCCBlockSizeAES128)
+        var outputLength = 0
+        let status = key.withUnsafeBytes { keyBytes in
+            iv.withUnsafeBytes { ivBytes in
+                cipherText.withUnsafeBytes { inputBytes in
+                    CCCrypt(
+                        CCOperation(kCCDecrypt),
+                        CCAlgorithm(kCCAlgorithmAES),
+                        CCOptions(kCCOptionPKCS7Padding),
+                        keyBytes.baseAddress,
+                        key.count,
+                        ivBytes.baseAddress,
+                        inputBytes.baseAddress,
+                        cipherText.count,
+                        &output,
+                        output.count,
+                        &outputLength
+                    )
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        return String(data: Data(output.prefix(outputLength)), encoding: .utf8)
+    }
+
+    private static func chromeSafeStorageKey() -> [UInt8]? {
+        let password = chromeSafeStoragePassword() ?? "peanuts"
+        let salt = Array("saltysalt".utf8)
+        var key = [UInt8](repeating: 0, count: kCCKeySizeAES128)
+        let status = password.withCString { passwordBytes in
+            CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                passwordBytes,
+                strlen(passwordBytes),
+                salt,
+                salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+                1003,
+                &key,
+                key.count
+            )
+        }
+        return status == kCCSuccess ? key : nil
+    }
+
+    private static func chromeSafeStoragePassword() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Chrome Safe Storage",
+            kSecAttrAccount as String: "Chrome",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func chromeLocalStateProfileNames(base: URL) -> [String: String] {
+        let url = base.appendingPathComponent("Local State")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let infoCache = (json["profile"] as? [String: Any])?["info_cache"] as? [String: Any] else { return [:] }
+
+        var names: [String: String] = [:]
+        for (profileID, payload) in infoCache {
+            if let payload = payload as? [String: Any], let name = payload["name"] as? String, !name.isEmpty {
+                names[profileID] = name
+            }
+        }
+        return names
+    }
+
+    private static func chromeExpiryDate(_ expiresUTC: Int64) -> Date? {
+        guard expiresUTC > 0 else { return nil }
+        let unixTime = TimeInterval(expiresUTC / 1_000_000) - 11_644_473_600
+        guard unixTime > 0 else { return nil }
+        return Date(timeIntervalSince1970: unixTime)
+    }
+
+    private static func sameSiteName(_ value: Int32) -> String? {
+        switch value {
+        case 0: return "None"
+        case 1: return "Lax"
+        case 2: return "Strict"
+        default: return nil
+        }
+    }
+
+    private static func matches(hostKey: String, activeHost: String) -> Bool {
+        let cookieHost = hostKey.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        let pageHost = activeHost.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        return pageHost == cookieHost || pageHost.hasSuffix("." + cookieHost) || cookieHost.hasSuffix("." + pageHost)
+    }
+
+    private static func columnString(_ statement: OpaquePointer, _ index: Int32) -> String {
+        guard let pointer = sqlite3_column_text(statement, index) else { return "" }
+        return String(cString: pointer)
+    }
+
+    private static func columnData(_ statement: OpaquePointer, _ index: Int32) -> Data {
+        let count = Int(sqlite3_column_bytes(statement, index))
+        guard count > 0, let bytes = sqlite3_column_blob(statement, index) else { return Data() }
+        return Data(bytes: bytes, count: count)
+    }
+}
+
+private struct OpenClickyChromeCookieRow {
+    let hostKey: String
+    let name: String
+    let path: String
+    let expiresUTC: Int64
+    let isSecure: Bool
+    let isHTTPOnly: Bool
+    let sameSite: Int32
+    let value: String
+    let encryptedValue: Data
+}
+
+private struct OpenClickyBrowserTab: Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var addressText: String
+    var currentURL: URL?
+    var errorText: String?
+    var canGoBack = false
+    var canGoForward = false
+    var selectedText = ""
+    var readableText = ""
+    var readableTextCharacterCount = 0
+    var contextStatus = "Local"
+    var loadRequest: OpenClickyBrowserLoadRequest
+
+    init(initialURL: URL?) {
+        self.id = UUID()
+        if let initialURL {
+            self.currentURL = initialURL
+            self.addressText = initialURL.absoluteString
+            self.title = initialURL.host ?? initialURL.lastPathComponent
+            self.loadRequest = OpenClickyBrowserLoadRequest(url: initialURL)
+        } else {
+            self.currentURL = nil
+            self.addressText = "open-clicky://welcome"
+            self.title = "OpenClicky Browser Workspace"
+            self.readableText = OpenClickyBrowserWorkspaceModel.welcomeHTMLForTabs
+            self.readableTextCharacterCount = OpenClickyBrowserWorkspaceModel.welcomeHTMLCharacterCount
+            self.loadRequest = OpenClickyBrowserLoadRequest(html: OpenClickyBrowserWorkspaceModel.welcomeHTMLForTabs)
+        }
+    }
+
+    init(researchItem: OpenClickyBrowserResearchItem) {
+        self.id = UUID()
+        self.currentURL = researchItem.url
+        self.addressText = researchItem.url.absoluteString
+        self.title = researchItem.title.isEmpty ? (researchItem.url.host ?? researchItem.url.absoluteString) : researchItem.title
+        self.errorText = nil
+        self.selectedText = ""
+        self.readableText = researchItem.readableText
+        self.readableTextCharacterCount = researchItem.readableText.count
+        self.contextStatus = researchItem.readableText.isEmpty ? "Limited" : "Active"
+        self.loadRequest = OpenClickyBrowserLoadRequest(url: researchItem.url)
+    }
+
+    func duplicateForSplit() -> OpenClickyBrowserTab {
+        var copy = self
+        copy.errorText = nil
+        copy.canGoBack = false
+        copy.canGoForward = false
+        copy.selectedText = ""
+        copy.readableText = ""
+        copy.id = UUID()
+        return copy
+    }
+}
+
+private extension OpenClickyBrowserWorkspaceModel {
+    nonisolated static var welcomeHTMLForTabs: String { welcomeHTML }
+    nonisolated static var welcomeHTMLCharacterCount: Int { welcomeHTML.count }
+}
+
+private enum OpenClickyBrowserPanePlacement {
+    case single
+    case primary
+    case secondary
+
+    var systemImage: String {
+        switch self {
+        case .single: return "rectangle"
+        case .primary: return "rectangle.split.2x1"
+        case .secondary: return "sidebar.right"
+        }
+    }
+}
+
+private struct OpenClickyBrowserChatMessage: Identifiable, Equatable {
+    let id = UUID()
+    let role: String
+    let text: String
+    let isUser: Bool
+}
+
+private struct OpenClickyBrowserLoadRequest: Equatable {
+    let id = UUID()
+    let url: URL?
+    let html: String?
+
+    init(url: URL) {
+        self.url = url
+        self.html = nil
+    }
+
+    init(html: String) {
+        self.url = nil
+        self.html = html
+    }
+}
+
+private struct OpenClickyBrowserPageMetadata {
+    let title: String
+    let url: URL?
+    let canGoBack: Bool
+    let canGoForward: Bool
+}
+
+private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
+    let loadRequest: OpenClickyBrowserLoadRequest
+    let onWebViewReady: (WKWebView) -> Void
+    let onMetadataChange: (OpenClickyBrowserPageMetadata) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onMetadataChange: onMetadataChange)
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = true
+        webView.setValue(false, forKey: "drawsBackground")
+        DispatchQueue.main.async { onWebViewReady(webView) }
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onMetadataChange = onMetadataChange
+        guard context.coordinator.loadedRequestID != loadRequest.id else { return }
+        context.coordinator.loadedRequestID = loadRequest.id
+
+        if let url = loadRequest.url {
+            webView.load(URLRequest(url: url))
+        } else if let html = loadRequest.html {
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loadedRequestID: UUID?
+        var onMetadataChange: (OpenClickyBrowserPageMetadata) -> Void
+
+        init(onMetadataChange: @escaping (OpenClickyBrowserPageMetadata) -> Void) {
+            self.onMetadataChange = onMetadataChange
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.evaluateJavaScript("document.title") { [weak self, weak webView] result, _ in
+                let title = (result as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    self?.onMetadataChange(
+                        OpenClickyBrowserPageMetadata(
+                            title: title?.isEmpty == false ? title! : "Untitled page",
+                            url: webView?.url,
+                            canGoBack: webView?.canGoBack ?? false,
+                            canGoForward: webView?.canGoForward ?? false
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+private enum OpenClickyBrowserSpecialist: String, CaseIterable, Identifiable {
+    case researcher = "Researcher"
+    case analyst = "Analyst"
+    case writer = "Writer"
+    case dev = "Dev"
+
+    var id: String { rawValue }
+    var title: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .researcher: return "magnifyingglass"
+        case .analyst: return "chart.bar.xaxis"
+        case .writer: return "pencil"
+        case .dev: return "curlybraces"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .researcher: return "Summarize, compare, cite, and extract claims."
+        case .analyst: return "Structure decisions, risks, and tradeoffs."
+        case .writer: return "Draft, rewrite, and turn pages into notes."
+        case .dev: return "Inspect local previews and implementation details."
+        }
+    }
+
+    func sampleReply(for pageTitle: String) -> String {
+        let title = pageTitle.isEmpty ? "this page" : pageTitle
+        switch self {
+        case .researcher:
+            return "I can read \(title), pull out the core claims, summarize the page, and keep references attached to the current URL."
+        case .analyst:
+            return "I can turn \(title) into decisions, risks, open questions, and a short action plan while keeping the page visible."
+        case .writer:
+            return "I can draft notes, posts, or concise rewrites from \(title) without moving you out of the browser workspace."
+        case .dev:
+            return "I can inspect local pages, localhost previews, and implementation notes while keeping OpenClicky's tools on the right."
+        }
+    }
+}

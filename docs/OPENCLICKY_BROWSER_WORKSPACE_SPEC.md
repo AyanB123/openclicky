@@ -69,50 +69,33 @@ Panel sections, top to bottom:
 1. Header
    - OpenClicky title.
    - Current page/site indicator.
-   - Pin, overflow, close/collapse controls.
+   - Clear chat, close/collapse controls.
 
-2. Specialist chips
-   - Example chips: Researcher, Analyst, Writer, Dev.
-   - Active chip has purple accent, soft glow, and tooltip/description.
-   - Plus button opens specialist picker or custom skill selector.
+2. Page context strip
+   - Context status, readable text count, selection state, split state.
+   - Current URL/path label.
+   - Manual refresh action.
 
 3. Chat transcript
-   - Threaded user/assistant messages.
-   - Rich answer cards with references.
-   - Per-message actions: copy, save note, cite, continue, make task.
+   - Blank by default.
+   - Clearable by the user.
+   - Threaded user/assistant messages once the user starts chatting.
    - Auto-scroll only when user is already near the bottom.
 
-4. Page actions
-   - Compact chips for common page-aware actions:
+4. Basic suggestion chips
+   - Compact chips only for the first useful page-aware actions:
      - Summarize
-     - Key takeaways
-     - Explain terms
-     - Translate
-     - Extract links
-     - Create task
-     - Capture screenshot
+     - Key points
+     - Search
+     - Click
+     - Fill
 
-5. Tool/status strip
-   - Web context: Active / unavailable / permission needed.
-   - Memory: On / off / scoped.
-   - Notes count.
-   - Tasks count.
-   - Local page status when applicable.
-
-6. Page context card
-   - URL or local path label.
-   - Page title.
-   - Loaded timestamp.
-   - Word count or DOM/text extraction count.
-   - Green freshness dot if current.
-   - Refocus button to return focus to the page.
-
-7. Composer
+5. Composer
    - Same OpenClicky prompt composer behavior as the main panel/HUD.
    - Multiline wrapping and vertical growth.
    - Shift+Enter inserts newline.
    - Enter sends.
-   - Attachment, @ mention, slash command, code/context, screenshot, and tool buttons.
+   - Minimal attachment/context buttons only when they are wired to real actions.
 
 ## Interaction model
 
@@ -138,16 +121,14 @@ OpenClicky should attach context in layers:
 
 The panel should show what context is active instead of silently guessing.
 
-### Specialist behavior
+### Side chat behavior
 
-Specialist chips switch the instruction lens for the current chat, not the visible workspace.
+The side chat is the first-class browser agent for this workspace. It should work in the current Browser Workspace instance by default, with full access to the active WebKit tab, extracted text, selection, URL, and direct page actions.
 
-- Researcher: summarize, compare, cite, extract claims.
-- Analyst: structure, evaluate, identify risks or decisions.
-- Writer: rewrite, draft, turn page into notes or posts.
-- Dev: inspect local pages, explain UI/code behavior, suggest implementation steps.
-
-Switching specialists should preserve the transcript but clearly mark the new mode for future responses. If a specialist needs a long-running task, it should create an Agent Mode task and surface it in the same side panel.
+- Simple page questions, summaries, key points, navigation, search, click, type, and fill actions happen inline in the side chat.
+- The chat starts blank and can be cleared without resetting the browser tab.
+- Do not start a background Agent Mode task for ordinary page chat.
+- Create an Agent Mode task only when the user explicitly asks for background work or the request clearly needs longer-running coding, file, or deep research work.
 
 ### Local page support
 
@@ -285,4 +266,41 @@ Success criteria:
 
 ## First implementation recommendation
 
-Start with a narrow, non-invasive prototype: one new browser workspace window, one WebView, one copied OpenClicky chat panel layout, and mock specialist chips. Once the shell feels right, wire the composer to the existing chat pipeline with a small page-context object containing URL, title, selected text, and optional extracted body text.
+Start with a narrow, non-invasive prototype: one new browser workspace window, one WebView, and a clean OpenClicky chat panel with blank transcript, clear action, page context, and basic suggestion chips. Keep ordinary page chat inside the Browser Workspace instance, with a small page-context object containing URL, title, selected text, and optional extracted body text.
+
+## Prototype status - 2026-05-20
+
+Implemented in `leanring-buddy/OpenClickyBrowserWorkspaceWindowManager.swift` and opened from the app menu with Browser Workspace / Command-Option-B after rebuild.
+
+Current prototype covers:
+
+- Native OpenClicky Browser Workspace window shell.
+- WebKit canvas for remote URLs, localhost routes, and validated local file paths.
+- Welcome/local preview page.
+- Basic back, forward, reload, and address loading.
+- Docked right OpenClicky chat with a blank default transcript, clear action, page context strip, and basic suggestion chips.
+- Collapsible chat side rail and resizable chat side panel, clamped to the spec's 340-540 pt range.
+- Functional tab strip: add, activate, close, independent addresses, independent WebViews, and active-tab navigation.
+- Split view: drag a tab into the page canvas or use the split rail action to show two tabs side by side.
+- Chrome cookie import from selectable local Chrome profiles, with active-site or all-cookie import into OpenClicky's WebKit cookie store.
+- Direct page actions from chat for click, press, tap, choose, select, search, type, fill, and enter requests against visible WebKit controls.
+- Inline browser plans for prompts such as “search/click the first 4 results and summarize them here”: OpenClicky extracts the query, searches from the Browser Workspace, opens the first result pages as tabs, and posts compact summaries back into the same side chat.
+- Page metadata context card with title, URL/path, and web/local state.
+- Ordinary page chat, summaries, and key points resolve inline in the Browser Workspace instance.
+- Basic page context extraction for readable text, readable text length, and current selection readiness.
+
+Next implementation slice:
+
+1. Replace the prototype chat message handler with the real OpenClicky chat/composer pipeline.
+2. Pass active tab URL, title, selected text, readable text, cookie-import state, and split-tab state into the request context.
+3. Route only explicitly background/long-running actions into Agent Mode tasks and return results to this workspace thread.
+
+## 2026-05-20 implementation update: chat and persistence
+
+- Browser Workspace chat starts blank, can be cleared, and keeps only basic suggestion chips.
+- Browser Workspace chat now handles straightforward page-control requests directly in the active WebKit tab and answers ordinary page prompts inline instead of creating background tasks.
+- Browser Workspace chat now has a first inline planning executor for multi-step search-result workflows, keeping “search/open first N/summarize here” inside the browser instance.
+- Agent Mode is reserved for prompts that explicitly request background work or clearly require longer-running coding, file, or deep research work.
+- When Agent Mode is needed, the prompt includes title, URL/local route, context status, readable text, selected text, and split-view state.
+- Agent history after app restart now persists all visible unarchived sessions, not only interrupted/resumeable ones. Completed sessions should return in the active history after relaunch; archived sessions still remain under Archived.
+- Restored sessions are sorted by latest activity so the most recent work appears first, and completed restored sessions do not misleadingly show the resume-after-relaunch action.

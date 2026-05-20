@@ -21,6 +21,9 @@ enum ChatWorkspaceArchiveStore {
     let entries: [CodexTranscriptEntry]
     let activeThreadID: String?
     let lastSubmittedPrompt: String?
+    let createdAt: Date?
+    let latestActivityAt: Date?
+    let wasRelaunchResumeCandidate: Bool?
   }
 
   private static let key = "openClickyArchivedSessions"
@@ -51,7 +54,10 @@ enum ChatWorkspaceArchiveStore {
         accentThemeRawValue: session.accentTheme.rawValue,
         entries: session.entries,
         activeThreadID: session.activeThreadID,
-        lastSubmittedPrompt: session.lastSubmittedPromptText
+        lastSubmittedPrompt: session.lastSubmittedPromptText,
+        createdAt: session.createdAt,
+        latestActivityAt: session.latestActivityDate,
+        wasRelaunchResumeCandidate: false
       )
     )
     saveSnapshots(snapshots)
@@ -63,15 +69,19 @@ enum ChatWorkspaceArchiveStore {
 
   static func loadRelaunchableSnapshots() -> [Snapshot] {
     guard let data = UserDefaults.standard.data(forKey: relaunchableSnapshotsKey) else { return [] }
-    return (try? JSONDecoder().decode([Snapshot].self, from: data)) ?? []
+    let snapshots = (try? JSONDecoder().decode([Snapshot].self, from: data)) ?? []
+    return snapshots.sorted { left, right in
+      let leftDate = left.latestActivityAt ?? left.entries.last?.createdAt ?? left.createdAt ?? .distantPast
+      let rightDate = right.latestActivityAt ?? right.entries.last?.createdAt ?? right.createdAt ?? .distantPast
+      return leftDate > rightDate
+    }
   }
 
   @MainActor
   static func saveRelaunchableSnapshots(for sessions: [CodexAgentSession], archivedSessionIDs: Set<UUID>) {
     let snapshots = sessions.compactMap { session -> Snapshot? in
       guard !archivedSessionIDs.contains(session.id),
-            session.hasVisibleActivity,
-            session.isRelaunchResumeCandidate else {
+            session.hasVisibleActivity else {
         return nil
       }
       return Snapshot(
@@ -80,7 +90,10 @@ enum ChatWorkspaceArchiveStore {
         accentThemeRawValue: session.accentTheme.rawValue,
         entries: session.entries,
         activeThreadID: session.activeThreadID,
-        lastSubmittedPrompt: session.lastSubmittedPromptText
+        lastSubmittedPrompt: session.lastSubmittedPromptText,
+        createdAt: session.createdAt,
+        latestActivityAt: session.latestActivityDate,
+        wasRelaunchResumeCandidate: session.isRelaunchResumeCandidate
       )
     }
     guard let data = try? JSONEncoder().encode(snapshots) else { return }

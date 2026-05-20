@@ -111,15 +111,29 @@ struct ConversationSidebarView: View {
   }
 
   private var activeSessions: [CodexAgentSession] {
-    companion.codexAgentSessions
-      .filter { !companion.archivedSessionIDs.contains($0.id) }
-      .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+    sortedHistorySessions(
+      companion.codexAgentSessions
+        .filter { !companion.archivedSessionIDs.contains($0.id) }
+        .filter { $0.hasVisibleActivity || $0.id == companion.activeCodexAgentSessionID }
+        .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+    )
   }
 
   private var archivedSessions: [CodexAgentSession] {
-    companion.codexAgentSessions
-      .filter { companion.archivedSessionIDs.contains($0.id) }
-      .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+    sortedHistorySessions(
+      companion.codexAgentSessions
+        .filter { companion.archivedSessionIDs.contains($0.id) }
+        .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+    )
+  }
+
+  private func sortedHistorySessions(_ sessions: [CodexAgentSession]) -> [CodexAgentSession] {
+    sessions.sorted { left, right in
+      if left.latestActivityDate != right.latestActivityDate {
+        return left.latestActivityDate > right.latestActivityDate
+      }
+      return left.createdAt > right.createdAt
+    }
   }
 
   private var list: some View {

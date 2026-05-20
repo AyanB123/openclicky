@@ -334,7 +334,7 @@ final class CompanionManager: ObservableObject {
         )
     }()
 
-    private lazy var claudeAgentSDKAPI: ClaudeAgentSDKAPI? = {
+    lazy var claudeAgentSDKAPI: ClaudeAgentSDKAPI? = {
         let modelOption = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
         return ClaudeAgentSDKAPI(model: modelOption.id, maxOutputTokens: modelOption.maxOutputTokens)
     }()
@@ -1083,7 +1083,8 @@ final class CompanionManager: ObservableObject {
             session.restoreInterruptedRelaunchState(
                 entries: snapshot.entries,
                 activeThreadID: snapshot.activeThreadID,
-                lastSubmittedPrompt: snapshot.lastSubmittedPrompt
+                lastSubmittedPrompt: snapshot.lastSubmittedPrompt,
+                canResume: snapshot.wasRelaunchResumeCandidate ?? false
             )
             return session
         }
@@ -1099,7 +1100,7 @@ final class CompanionManager: ObservableObject {
         archivedSessionIDs = restoredArchiveIDs
         let restoredArchivedSessions = Self.restoredArchivedSessions(from: restoredArchiveIDs)
         let restoredInterruptedSessions = Self.restoredInterruptedSessions(archivedSessionIDs: restoredArchiveIDs)
-        codexAgentSessions = [initialAgentSession] + restoredInterruptedSessions + restoredArchivedSessions
+        codexAgentSessions = restoredInterruptedSessions + [initialAgentSession] + restoredArchivedSessions
         activeCodexAgentSessionID = restoredInterruptedSessions.first?.id ?? initialAgentSession.id
         OpenClickyMessageLogStore.shared.append(
             lane: "system",

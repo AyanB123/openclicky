@@ -142,6 +142,7 @@ function assistantText(message) {
 }
 
 function handleSDKMessage(message) {
+  console.error("[Bridge SDK Message]:", JSON.stringify(message));
   if (!currentRequestID) return;
 
   if (message.type === "stream_event") {

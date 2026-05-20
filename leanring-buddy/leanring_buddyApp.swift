@@ -32,6 +32,13 @@ struct leanring_buddyApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
+
+            CommandMenu("OpenClicky") {
+                Button("Browser Workspace…") {
+                    appDelegate.showBrowserWorkspaceFromApplicationMenu()
+                }
+                .keyboardShortcut("b", modifiers: [.command, .option])
+            }
         }
     }
 }
@@ -89,6 +96,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
 
     func showSettingsWindowFromApplicationMenu() {
         companionManager.showSettingsWindow()
+    }
+
+    func showBrowserWorkspaceFromApplicationMenu() {
+        OpenClickyBrowserWorkspaceWindowManager.shared.show(companionManager: companionManager)
     }
 
     /// Registers the app as a login item so it launches automatically on
