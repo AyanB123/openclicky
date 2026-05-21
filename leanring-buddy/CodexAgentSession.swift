@@ -1,6 +1,8 @@
 import AppKit
 import Combine
 import Foundation
+import OpenClickyBrowser
+import OpenClickyCore
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -226,10 +228,10 @@ enum CodexAgentProgressStage: Equatable {
 }
 
 @MainActor
-final class CodexAgentSession: ObservableObject, Identifiable {
+final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceAgentSessionProtocol {
     let id: UUID
     let createdAt: Date
-    let accentTheme: ClickyAccentTheme
+    let accentTheme: OpenClickyCore.ClickyAccentTheme
     @Published private(set) var status: CodexAgentSessionStatus = .stopped
     @Published private(set) var entries: [CodexTranscriptEntry] = []
     @Published private(set) var activeThreadID: String?
@@ -367,7 +369,7 @@ final class CodexAgentSession: ObservableObject, Identifiable {
     init(
         id: UUID = UUID(),
         title: String = "Agent",
-        accentTheme: ClickyAccentTheme = .blue,
+        accentTheme: OpenClickyCore.ClickyAccentTheme = .blue,
         homeManager: CodexHomeManager? = nil,
         processManager: CodexProcessManager? = nil
     ) {

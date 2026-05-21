@@ -9,6 +9,8 @@
 import AppKit
 import SwiftUI
 import Combine
+import OpenClickyCore
+import OpenClickyUI
 
 /// Lightweight UserDefaults-backed store for archived session IDs.
 /// Lives here (not in CompanionManager.swift) so the additive patch

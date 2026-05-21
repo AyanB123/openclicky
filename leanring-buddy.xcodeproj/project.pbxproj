@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		24D85D612FBEE5D8004FEDAD /* OpenClickyBrowser in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D602FBEE5D8004FEDAD /* OpenClickyBrowser */; };
+		24D85D632FBEE5D8004FEDAD /* OpenClickyCore in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D622FBEE5D8004FEDAD /* OpenClickyCore */; };
+		24D85D652FBEE5D8004FEDAD /* OpenClickyMarkdown in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D642FBEE5D8004FEDAD /* OpenClickyMarkdown */; };
+		24D85D672FBEE5D8004FEDAD /* OpenClickyMemory in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D662FBEE5D8004FEDAD /* OpenClickyMemory */; };
+		24D85D692FBEE5D8004FEDAD /* OpenClickyUI in Frameworks */ = {isa = PBXBuildFile; productRef = 24D85D682FBEE5D8004FEDAD /* OpenClickyUI */; };
 		24E363952FB3400600B27AB1 /* GLTFSceneKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB042F6500040039DA55 /* GLTFSceneKit */; };
 		AA00BB032F6500030039DA55 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB022F6500020039DA55 /* Sparkle */; };
 		AA20BF010000000000000001 /* OpenClickyWidgetModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA20FR010000000000000001 /* OpenClickyWidgetModels.swift */; };
@@ -54,6 +59,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		24D85D592FBEE591004FEDAD /* OpenClickyBrowser */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = OpenClickyBrowser; sourceTree = "<group>"; };
+		24D85D5A2FBEE591004FEDAD /* OpenClickyCore */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = OpenClickyCore; sourceTree = "<group>"; };
+		24D85D5B2FBEE591004FEDAD /* OpenClickyMarkdown */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = OpenClickyMarkdown; sourceTree = "<group>"; };
+		24D85D5C2FBEE591004FEDAD /* OpenClickyMemory */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = OpenClickyMemory; sourceTree = "<group>"; };
+		24D85D5D2FBEE591004FEDAD /* OpenClickyUI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = OpenClickyUI; sourceTree = "<group>"; };
 		28F22CBF2F56440300A0FC59 /* OpenClicky.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenClicky.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		28F22CCC2F56440300A0FC59 /* leanring-buddyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "leanring-buddyTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		28F22CD62F56440300A0FC59 /* leanring-buddyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "leanring-buddyUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -101,8 +111,13 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				24D85D632FBEE5D8004FEDAD /* OpenClickyCore in Frameworks */,
+				24D85D652FBEE5D8004FEDAD /* OpenClickyMarkdown in Frameworks */,
+				24D85D672FBEE5D8004FEDAD /* OpenClickyMemory in Frameworks */,
 				24E363952FB3400600B27AB1 /* GLTFSceneKit in Frameworks */,
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
+				24D85D692FBEE5D8004FEDAD /* OpenClickyUI in Frameworks */,
+				24D85D612FBEE5D8004FEDAD /* OpenClickyBrowser in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,6 +145,25 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		24D85D5E2FBEE591004FEDAD /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				24D85D592FBEE591004FEDAD /* OpenClickyBrowser */,
+				24D85D5A2FBEE591004FEDAD /* OpenClickyCore */,
+				24D85D5B2FBEE591004FEDAD /* OpenClickyMarkdown */,
+				24D85D5C2FBEE591004FEDAD /* OpenClickyMemory */,
+				24D85D5D2FBEE591004FEDAD /* OpenClickyUI */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+		24D85D5F2FBEE5D8004FEDAD /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		28F22CB62F56440300A0FC59 = {
 			isa = PBXGroup;
 			children = (
@@ -138,6 +172,8 @@
 				28F22CCF2F56440300A0FC59 /* leanring-buddyTests */,
 				28F22CD92F56440300A0FC59 /* leanring-buddyUITests */,
 				28F22CC02F56440300A0FC59 /* Products */,
+				24D85D5E2FBEE591004FEDAD /* Packages */,
+				24D85D5F2FBEE5D8004FEDAD /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -189,6 +225,11 @@
 			packageProductDependencies = (
 				AA00BB022F6500020039DA55 /* Sparkle */,
 				AA00BB042F6500040039DA55 /* GLTFSceneKit */,
+				24D85D602FBEE5D8004FEDAD /* OpenClickyBrowser */,
+				24D85D622FBEE5D8004FEDAD /* OpenClickyCore */,
+				24D85D642FBEE5D8004FEDAD /* OpenClickyMarkdown */,
+				24D85D662FBEE5D8004FEDAD /* OpenClickyMemory */,
+				24D85D682FBEE5D8004FEDAD /* OpenClickyUI */,
 			);
 			productName = "leanring-buddy";
 			productReference = 28F22CBF2F56440300A0FC59 /* OpenClicky.app */;
@@ -863,6 +904,26 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		24D85D602FBEE5D8004FEDAD /* OpenClickyBrowser */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenClickyBrowser;
+		};
+		24D85D622FBEE5D8004FEDAD /* OpenClickyCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenClickyCore;
+		};
+		24D85D642FBEE5D8004FEDAD /* OpenClickyMarkdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenClickyMarkdown;
+		};
+		24D85D662FBEE5D8004FEDAD /* OpenClickyMemory */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenClickyMemory;
+		};
+		24D85D682FBEE5D8004FEDAD /* OpenClickyUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenClickyUI;
+		};
 		AA00BB022F6500020039DA55 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */;

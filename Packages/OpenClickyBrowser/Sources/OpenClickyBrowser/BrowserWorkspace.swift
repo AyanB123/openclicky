@@ -15,27 +15,31 @@ import SQLite3
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
+import OpenClickyCore
+import OpenClickyUI
 
 @MainActor
-final class OpenClickyBrowserWorkspaceWindowManager {
-    static let shared = OpenClickyBrowserWorkspaceWindowManager()
+public final class OpenClickyBrowserWorkspaceWindowManager {
+    public static let shared = OpenClickyBrowserWorkspaceWindowManager()
 
     private var window: NSWindow?
 
-    func show(initialURL: URL? = nil, companionManager: CompanionManager) {
+    public init() {}
+
+    public func show(initialURL: URL? = nil, delegate: BrowserWorkspaceAgentDelegate) {
         if window == nil {
-            window = makeWindow(initialURL: initialURL, companionManager: companionManager)
+            window = makeWindow(initialURL: initialURL, delegate: delegate)
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func close() {
+    public func close() {
         window?.close()
     }
 
-    private func makeWindow(initialURL: URL?, companionManager: CompanionManager) -> NSWindow {
-        let content = OpenClickyBrowserWorkspaceView(initialURL: initialURL, companionManager: companionManager)
+    private func makeWindow(initialURL: URL?, delegate: BrowserWorkspaceAgentDelegate) -> NSWindow {
+        let content = OpenClickyBrowserWorkspaceView(initialURL: initialURL, delegate: delegate)
         let hostingView = OpenClickyBrowserWorkspaceHostingView(rootView: content)
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -53,7 +57,7 @@ final class OpenClickyBrowserWorkspaceWindowManager {
         glassBackdrop.configure(
             cornerRadius: 28,
             roundsTopCorners: true,
-            accentColor: OpenClickyNotchCaptureWindowManager.nsAccentColor(for: ClickyAccentTheme.current),
+            accentColor: ClickyAccentTheme.current.nsColor,
             strength: .expanded
         )
         containerView.addSubview(glassBackdrop)
@@ -146,13 +150,13 @@ private struct OpenClickyBrowserWorkspaceView: View {
     @State private var isSplitDropTargeted = false
     @State private var isChatDropTargeted = false
     @State private var draggingTabID: UUID?
-    @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var selectedThemeRawValue = ClickyTheme.system.rawValue
+    @AppStorage(OpenClickyDefaults.userThemeDefaultsKey) private var selectedThemeRawValue = ClickyTheme.system.rawValue
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentRawValue = ClickyAccentTheme.blue.rawValue
-    @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
-    @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
+    @AppStorage(OpenClickyDefaults.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
+    @AppStorage(OpenClickyDefaults.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
 
-    init(initialURL: URL?, companionManager: CompanionManager) {
-        _model = StateObject(wrappedValue: OpenClickyBrowserWorkspaceModel(initialURL: initialURL, companionManager: companionManager))
+    init(initialURL: URL?, delegate: BrowserWorkspaceAgentDelegate) {
+        _model = StateObject(wrappedValue: OpenClickyBrowserWorkspaceModel(initialURL: initialURL, delegate: delegate))
     }
 
     private var selectedAccentTheme: ClickyAccentTheme {
@@ -1148,7 +1152,7 @@ protocol OpenClickyBrowserWorkspaceModelProtocol: AnyObject {
 
 @MainActor
 private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClickyBrowserWorkspaceModelProtocol {
-    private weak var companionManager: CompanionManager?
+    private weak var delegate: BrowserWorkspaceAgentDelegate?
     @Published private(set) var tabs: [OpenClickyBrowserTab]
     @Published var activeTabID: UUID
     @Published var splitTabID: UUID?
@@ -1167,8 +1171,8 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
     private var webViews: [UUID: WKWebView] = [:]
 
-    init(initialURL: URL?, companionManager: CompanionManager) {
-        self.companionManager = companionManager
+    init(initialURL: URL?, delegate: BrowserWorkspaceAgentDelegate) {
+        self.delegate = delegate
         let firstTab = OpenClickyBrowserTab(initialURL: initialURL)
         self.tabs = [firstTab]
         self.activeTabID = firstTab.id
@@ -1878,9 +1882,9 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
         if !Self.needsBackgroundAgent(prompt) {
             let hasSDK = self.hasAgentSDK()
-            let apiKey = AppBundleConfiguration.anthropicAPIKey() ?? ""
+            let apiKey = delegate?.getAnthropicAPIKey() ?? ""
             if hasSDK || !apiKey.isEmpty {
-                let modelID = OpenClickyModelCatalog.defaultComputerUseModelID
+                let modelID = delegate?.getDefaultComputerUseModelID() ?? ""
                 isRunningBrowserPlan = true
                 Task {
                     let agent = OpenClickyBrowserAgentRunner(apiKey: apiKey, modelName: modelID, browserModel: self)
@@ -1902,15 +1906,15 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         }
 
         let agentPrompt = browserScopedAgentPrompt(userPrompt: prompt, specialist: specialist)
-        if let linkedAgentSessionID, companionManager?.codexAgentSessions.contains(where: { $0.id == linkedAgentSessionID }) == true {
-            companionManager?.selectCodexAgentSession(linkedAgentSessionID)
-            companionManager?.submitAgentPromptFromUI(agentPrompt)
+        if let linkedAgentSessionID, delegate?.hasLinkedAgentSession(id: linkedAgentSessionID) == true {
+            delegate?.selectCodexAgentSession(linkedAgentSessionID)
+            delegate?.submitAgentPromptFromUI(agentPrompt)
             linkedAgentSummary = "Sent follow-up to the linked OpenClicky agent task."
             messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Sent that follow-up to the linked OpenClicky Agent Mode task with the current page context attached.", isUser: false))
             return
         }
 
-        guard let session = companionManager?.submitNewAgentTaskFromUI(agentPrompt, source: "browser_workspace_chat") else {
+        guard let session = delegate?.submitNewAgentTaskFromUI(agentPrompt, source: "browser_workspace_chat") else {
             linkedAgentSummary = "Could not start an OpenClicky Agent Mode task for this page."
             messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "I could not start an Agent Mode task for this page, so the message stayed in the workspace chat.", isUser: false))
             return
@@ -2037,7 +2041,7 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
     func openLinkedAgentInOpenClicky() {
         guard let linkedAgentSessionID else { return }
-        companionManager?.selectCodexAgentSession(linkedAgentSessionID)
+        delegate?.selectCodexAgentSession(linkedAgentSessionID)
     }
 
     private func browserScopedAgentPrompt(userPrompt: String, specialist: OpenClickyBrowserSpecialist) -> String {
@@ -2130,7 +2134,7 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
     }
 
     func hasAgentSDK() -> Bool {
-        return companionManager?.claudeAgentSDKAPI != nil
+        return delegate?.hasAgentSDK() ?? false
     }
 
     func analyzeImageWithAgentSDK(
@@ -2140,18 +2144,16 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         userPrompt: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        guard let sdk = companionManager?.claudeAgentSDKAPI else {
-            throw NSError(domain: "BrowserWorkspace", code: -404, userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK not available."])
+        guard let delegate else {
+            throw NSError(domain: "BrowserWorkspace", code: -404, userInfo: [NSLocalizedDescriptionKey: "Delegate not available."])
         }
-        sdk.model = OpenClickyModelCatalog.defaultComputerUseModelID
-        let (text, _) = try await sdk.analyzeImageStreaming(
+        return try await delegate.analyzeImageWithAgentSDK(
             images: images,
             systemPrompt: systemPrompt,
             conversationHistory: conversationHistory,
             userPrompt: userPrompt,
             onTextChunk: onTextChunk
         )
-        return text
     }
 
     private static func url(from rawValue: String) -> URL? {

@@ -13,6 +13,8 @@
 
 import AppKit
 import SwiftUI
+import OpenClickyCore
+import OpenClickyUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")

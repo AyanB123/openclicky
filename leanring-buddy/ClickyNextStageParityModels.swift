@@ -1,196 +1,7 @@
 import Combine
 import CoreGraphics
 import Foundation
-
-enum WikiManager {
-    struct Article: Identifiable, Equatable {
-        var id: String { relativePath }
-        var relativePath: String
-        var title: String
-        var body: String
-        var aliases: [String]
-    }
-
-    struct Skill: Identifiable, Equatable {
-        var id: String { identifier }
-        var identifier: String
-        var title: String
-        var summary: String
-        var body: String
-    }
-
-    struct Index: Equatable {
-        var articles: [Article]
-        var skills: [Skill]
-
-        static let empty = Index(articles: [], skills: [])
-
-        static func loadForAppBundle(bundle: Bundle = .main, fileManager: FileManager = .default) -> Index {
-            do {
-                if let resourcesRoot = bundle.resourceURL {
-                    return try load(fromBundledResourcesRoot: resourcesRoot, fileManager: fileManager)
-                }
-                if let sourceResources = CodexRuntimeLocator.sourceAppResourcesDirectory(fileManager: fileManager) {
-                    return try load(fromBundledResourcesRoot: sourceResources, fileManager: fileManager)
-                }
-            } catch {
-                print("⚠️ OpenClicky wiki index load failed: \(error)")
-            }
-            return .empty
-        }
-
-        static func load(fromBundledResourcesRoot resourcesRoot: URL, fileManager: FileManager = .default) throws -> Index {
-            let wikiRoot = resourcesRoot.appendingPathComponent("OpenClickyBundledWikiSeed", isDirectory: true)
-            let skillsRoot = resourcesRoot.appendingPathComponent("OpenClickyBundledSkills", isDirectory: true)
-
-            return try load(
-                articleRoots: [wikiRoot],
-                skillRoots: [skillsRoot],
-                fileManager: fileManager
-            )
-        }
-
-        static func load(articleRoots: [URL], skillRoots: [URL], fileManager: FileManager = .default) throws -> Index {
-            let articles = try articleRoots.flatMap { try loadArticles(root: $0, fileManager: fileManager) }
-            let skills = try skillRoots.flatMap { try loadSkills(root: $0, fileManager: fileManager) }
-            return Index(articles: articles, skills: skills)
-        }
-
-        func combined(with other: Index) -> Index {
-            let mergedArticles = Dictionary(grouping: articles + other.articles, by: \.id)
-                .compactMap { $0.value.last }
-                .sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
-            let mergedSkills = Dictionary(grouping: skills + other.skills, by: \.id)
-                .compactMap { $0.value.last }
-                .sorted { $0.identifier.localizedStandardCompare($1.identifier) == .orderedAscending }
-            return Index(articles: mergedArticles, skills: mergedSkills)
-        }
-
-        func article(containingTitle query: String) -> Article? {
-            articles.first { article in
-                article.title.localizedCaseInsensitiveContains(query)
-                    || article.aliases.contains { $0.localizedCaseInsensitiveContains(query) }
-            }
-        }
-
-        private static func loadArticles(root: URL, fileManager: FileManager) throws -> [Article] {
-            guard fileManager.fileExists(atPath: root.path) else { return [] }
-            let markdownFiles = markdownFiles(under: root, fileManager: fileManager)
-            return try markdownFiles.map { url in
-                let body = try String(contentsOf: url, encoding: .utf8)
-                let relativePath = relativePath(from: root, to: url)
-                let aliases = extractAliases(from: body)
-                return Article(
-                    relativePath: relativePath,
-                    title: articleTitle(for: url, body: body),
-                    body: body,
-                    aliases: aliases
-                )
-            }
-            .sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
-        }
-
-        private static func loadSkills(root: URL, fileManager: FileManager) throws -> [Skill] {
-            guard fileManager.fileExists(atPath: root.path) else { return [] }
-            let skillFiles = markdownFiles(under: root, fileManager: fileManager)
-                .filter { $0.lastPathComponent == "SKILL.md" }
-            return try skillFiles.map { url in
-                let body = try String(contentsOf: url, encoding: .utf8)
-                let frontmatter = parseFrontmatter(body)
-                let identifier = url.deletingLastPathComponent().lastPathComponent
-                let title = frontmatter["name"] ?? headingTitle(from: body) ?? identifier
-                let summary = frontmatter["description"] ?? firstNonMetadataParagraph(from: body)
-                return Skill(identifier: identifier, title: title, summary: summary, body: body)
-            }
-            .sorted { $0.identifier.localizedStandardCompare($1.identifier) == .orderedAscending }
-        }
-
-        private static func markdownFiles(under root: URL, fileManager: FileManager) -> [URL] {
-            guard let enumerator = fileManager.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]
-            ) else { return [] }
-
-            return enumerator.compactMap { item -> URL? in
-                guard let url = item as? URL, url.pathExtension.lowercased() == "md" else { return nil }
-                return url
-            }
-        }
-
-        private static func relativePath(from root: URL, to file: URL) -> String {
-            let rootPath = root.standardizedFileURL.path
-            let filePath = file.standardizedFileURL.path
-            let trimmed = filePath.hasPrefix(rootPath + "/") ? String(filePath.dropFirst(rootPath.count + 1)) : file.lastPathComponent
-            return trimmed
-        }
-
-        private static func articleTitle(for url: URL, body: String) -> String {
-            if url.lastPathComponent == "_index.md" {
-                return "Index"
-            }
-            if let frontmatterTitle = parseFrontmatter(body)["title"] {
-                return frontmatterTitle
-            }
-            return headingTitle(from: body)
-                ?? url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "-", with: " ").capitalized
-        }
-
-        private static func headingTitle(from body: String) -> String? {
-            body.split(separator: "\n", omittingEmptySubsequences: false)
-                .compactMap { line -> String? in
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard trimmed.hasPrefix("# ") else { return nil }
-                    return String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                .first
-        }
-
-        private static func extractAliases(from body: String) -> [String] {
-            body.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { $0.localizedCaseInsensitiveContains("also:") }
-                .flatMap { line -> [String] in
-                    guard let range = line.range(of: "also:", options: .caseInsensitive) else { return [] }
-                    return line[range.upperBound...]
-                        .split(separator: ",")
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                }
-        }
-
-        private static func parseFrontmatter(_ body: String) -> [String: String] {
-            let lines = body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            guard lines.first == "---" else { return [:] }
-            var result: [String: String] = [:]
-            for line in lines.dropFirst() {
-                if line == "---" { break }
-                guard let separator = line.firstIndex(of: ":") else { continue }
-                let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
-                var value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
-                value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                if !key.isEmpty, !value.isEmpty {
-                    result[key] = value
-                }
-            }
-            return result
-        }
-
-        private static func firstNonMetadataParagraph(from body: String) -> String {
-            var insideFrontmatter = false
-            for line in body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed == "---" {
-                    insideFrontmatter.toggle()
-                    continue
-                }
-                guard !insideFrontmatter, !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
-                return trimmed
-            }
-            return ""
-        }
-    }
-}
+import OpenClickyCore
 
 enum PermissionStatus: Equatable {
     case missing
@@ -458,7 +269,7 @@ struct WikiViewerEntry: Identifiable, Equatable {
     var body: String
     var relativePath: String
 
-    init(article: WikiManager.Article) {
+    init(article: OpenClickyCore.WikiManager.Article) {
         self.id = "article:\(article.id)"
         self.kind = .article
         self.title = article.title
@@ -467,7 +278,7 @@ struct WikiViewerEntry: Identifiable, Equatable {
         self.relativePath = article.relativePath
     }
 
-    init(skill: WikiManager.Skill) {
+    init(skill: OpenClickyCore.WikiManager.Skill) {
         self.id = "skill:\(skill.id)"
         self.kind = .skill
         self.title = skill.title
@@ -481,7 +292,7 @@ struct WikiViewerEntry: Identifiable, Equatable {
     }
 }
 
-extension WikiManager.Index {
+extension OpenClickyCore.WikiManager.Index {
     @MainActor
     var viewerEntries: [WikiViewerEntry] {
         let articleEntries = articles.map(WikiViewerEntry.init(article:))

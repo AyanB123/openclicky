@@ -10,6 +10,7 @@
 
 import AppKit
 import SwiftUI
+import OpenClickyCore
 
 private final class OpenClickyNotchCapturePanel: NSPanel {
     override var canBecomeKey: Bool { true }

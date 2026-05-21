@@ -12,6 +12,7 @@ import Carbon
 import ServiceManagement
 import SwiftUI
 import Sparkle
+import OpenClickyBrowser
 
 @main
 struct leanring_buddyApp: App {
@@ -99,7 +100,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
     }
 
     func showBrowserWorkspaceFromApplicationMenu() {
-        OpenClickyBrowserWorkspaceWindowManager.shared.show(companionManager: companionManager)
+        OpenClickyBrowserWorkspaceWindowManager.shared.show(delegate: companionManager)
     }
 
     /// Registers the app as a login item so it launches automatically on

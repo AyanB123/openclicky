@@ -1,6 +1,6 @@
 //
-//  OpenClickyMarkdownViewerWindowManager.swift
-//  leanring-buddy
+//  OpenClickyMarkdownViewer.swift
+//  OpenClickyMarkdown
 //
 //  A first-party Markdown document window for OpenClicky-owned notes,
 //  memories, agent outputs, and files found by Agent Mode.
@@ -8,14 +8,17 @@
 
 import AppKit
 import SwiftUI
+import OpenClickyUI
 
 @MainActor
-final class OpenClickyMarkdownViewerWindowManager {
-    static let shared = OpenClickyMarkdownViewerWindowManager()
+public final class OpenClickyMarkdownViewerWindowManager {
+    public static let shared = OpenClickyMarkdownViewerWindowManager()
+
+    public init() {}
 
     private var window: NSWindow?
 
-    func show(fileURL: URL) {
+    public func show(fileURL: URL) {
         let standardizedURL = fileURL.standardizedFileURL
 
         if window == nil {

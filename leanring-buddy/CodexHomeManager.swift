@@ -1,4 +1,6 @@
 import Foundation
+import OpenClickyCore
+
 
 struct CodexHomeLayout: Equatable {
     let homeDirectory: URL
@@ -294,7 +296,7 @@ final class CodexHomeManager {
     }
 
     @discardableResult
-    func saveMemory(title: String, body: String, createdAt: Date = Date()) throws -> WikiManager.Article {
+    func saveMemory(title: String, body: String, createdAt: Date = Date()) throws -> OpenClickyCore.WikiManager.Article {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -336,7 +338,7 @@ final class CodexHomeManager {
 
         try markdown.write(to: destinationURL, atomically: true, encoding: .utf8)
 
-        return WikiManager.Article(
+        return OpenClickyCore.WikiManager.Article(
             relativePath: destinationURL.lastPathComponent,
             title: trimmedTitle,
             body: markdown,

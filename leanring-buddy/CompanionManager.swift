@@ -14,6 +14,11 @@ import Foundation
 import ScreenCaptureKit
 import SwiftUI
 import UniformTypeIdentifiers
+import OpenClickyCore
+import OpenClickyUI
+import OpenClickyBrowser
+import OpenClickyMarkdown
+import OpenClickyMemory
 
 enum CompanionVoiceState: String {
     case idle
@@ -295,7 +300,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var archivedSessionIDs: Set<UUID> = ChatWorkspaceArchiveStore.load()
     let codexHUDWindowManager = CodexHUDWindowManager()
     let wikiViewerPanelManager = WikiViewerPanelManager()
-    @Published private(set) var bundledKnowledgeIndex = WikiManager.Index.empty
+    @Published private(set) var bundledKnowledgeIndex = OpenClickyCore.WikiManager.Index.empty
     @Published private(set) var latestVoiceResponseCard: ClickyResponseCard?
     @Published private(set) var homeChatEntries: [CodexTranscriptEntry] = []
     @Published private(set) var isHomeChatModeActive = false
@@ -2211,13 +2216,13 @@ final class CompanionManager: ObservableObject {
         let learnedSkillsDirectory = codexHomeManager.learnedSkillsDirectory
 
         Task.detached(priority: .utility) {
-            let bundledIndex = await WikiManager.Index.loadForAppBundle()
-            let resolvedIndex: WikiManager.Index
+            let bundledIndex = await OpenClickyCore.WikiManager.Index.loadForAppBundle()
+            let resolvedIndex: OpenClickyCore.WikiManager.Index
 
             do {
                 try FileManager.default.createDirectory(at: memoriesDirectory, withIntermediateDirectories: true)
                 try FileManager.default.createDirectory(at: learnedSkillsDirectory, withIntermediateDirectories: true)
-                let memoryIndex = try await WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [learnedSkillsDirectory])
+                let memoryIndex = try await OpenClickyCore.WikiManager.Index.load(articleRoots: [memoriesDirectory], skillRoots: [learnedSkillsDirectory])
                 resolvedIndex = await bundledIndex.combined(with: memoryIndex)
             } catch {
                 print("⚠️ OpenClicky memory index load failed: \(error)")
@@ -10517,7 +10522,7 @@ final class CompanionManager: ObservableObject {
     }
 
     @discardableResult
-    func submitNewAgentTaskFromUI(_ prompt: String, source: String = "agent_new_task_prompt") -> CodexAgentSession? {
+    func submitNewAgentTaskFromUI(_ prompt: String, source: String = "agent_new_task_prompt") -> BrowserWorkspaceAgentSessionProtocol? {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else { return nil }
         let timing = beginRequestTiming(source: source, text: trimmedPrompt)
@@ -13138,7 +13143,7 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    func createMemory(title: String, body: String) throws -> WikiManager.Article {
+    func createMemory(title: String, body: String) throws -> OpenClickyCore.WikiManager.Article {
         let article = try codexHomeManager.saveMemory(title: title, body: body)
         loadBundledKnowledgeIndex()
         return article
@@ -14228,5 +14233,44 @@ private final class OpenClickyDirectActionMemoryStore: @unchecked Sendable {
         return base
             .appendingPathComponent("OpenClicky", isDirectory: true)
             .appendingPathComponent("direct-computer-use-shortcuts.json", isDirectory: false)
+    }
+}
+
+extension CompanionManager: BrowserWorkspaceAgentDelegate {
+    public func hasLinkedAgentSession(id: UUID) -> Bool {
+        return codexAgentSessions.contains(where: { $0.id == id })
+    }
+
+    public func hasAgentSDK() -> Bool {
+        return claudeAgentSDKAPI != nil
+    }
+
+    public func analyzeImageWithAgentSDK(
+        images: [(data: Data, label: String)],
+        systemPrompt: String,
+        conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
+        userPrompt: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String {
+        guard let sdk = claudeAgentSDKAPI else {
+            throw NSError(domain: "CompanionManager", code: -404, userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK not available."])
+        }
+        sdk.model = OpenClickyModelCatalog.defaultComputerUseModelID
+        let (text, _) = try await sdk.analyzeImageStreaming(
+            images: images,
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistory,
+            userPrompt: userPrompt,
+            onTextChunk: onTextChunk
+        )
+        return text
+    }
+
+    public func getAnthropicAPIKey() -> String {
+        return AppBundleConfiguration.anthropicAPIKey() ?? ""
+    }
+
+    public func getDefaultComputerUseModelID() -> String {
+        return OpenClickyModelCatalog.defaultComputerUseModelID
     }
 }

@@ -9,6 +9,8 @@
 //
 
 import SwiftUI
+import OpenClickyCore
+import OpenClickyUI
 
 struct MemoryDrawerView: View {
   @ObservedObject var companion: CompanionManager
