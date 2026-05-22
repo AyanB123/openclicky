@@ -117,8 +117,6 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainPanel: OpenClickyNotchCapturePanel?
     private let dynamicNotchKitBridge = OpenClickyDynamicNotchKitBridge()
     private var contentView: OpenClickyNotchCaptureRootView?
-    private var externalHoverStatusPanel: OpenClickyNotchCapturePanel?
-    private var externalHoverStatusContentView: OpenClickyNotchCaptureRootView?
     private var mainHostingView: NSHostingView<OpenClickyNotchPanelView>?
     private var mainPanelGlassBackdrop: OpenClickyLiquidGlassBackdropView?
     private var mainPanelGlobalClickMonitor: Any?
@@ -163,9 +161,6 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let minimumExternalCollapsedPanelWidth: CGFloat = 260
     private static let maximumExternalCollapsedPanelWidth: CGFloat = 420
     private static let maximumExpandedStatusPanelWidth: CGFloat = 420
-    private static let hoverExpandedExternalPanelWidth: CGFloat = 620
-    private static let hoverExpandedExternalPanelHeight: CGFloat = 78
-    private static let hoverExpandedExternalTopInset: CGFloat = 6
     private static let collapsedLabelFont = NSFont.systemFont(ofSize: 13, weight: .heavy)
     private static let collapsedLabelMaxWidth: CGFloat = 300
     // leading pad + app icon (28) + stack spacing (4) + gap before trailing (8) + play/dots (14) + trailing pad
@@ -267,7 +262,6 @@ final class OpenClickyNotchCaptureWindowManager {
             foregroundAppName: foregroundAppName,
             hasRunningAgentWork: persistentHasRunningAgentWork,
             hidesAppNameText: Self.hidesCollapsedAppNameText(on: preferredAnchorScreen()),
-            allowsHoverExpansion: false,
             expand: { [weak self] in
                 self?.pinAnchorScreenToPointerIfNeeded()
                 self?.persistentShowMainPanel?()
@@ -403,12 +397,10 @@ final class OpenClickyNotchCaptureWindowManager {
 
         guard activeMode == .collapsedText else { return }
         contentView?.setAgentWorkActive(activity.isActive, foregroundAppName: foregroundAppName)
-        externalHoverStatusContentView?.setAgentWorkActive(activity.isActive, foregroundAppName: foregroundAppName)
     }
 
     func showTextInput(accentTheme: ClickyAccentTheme? = nil, submitText: @escaping (String) -> Void) {
         hideDynamicNotchKitStatusSurface()
-        hideExternalHoverStatusPanel()
         let accentColor = Self.nsAccentColor(for: accentTheme)
         expandTextInput(accentColor: accentColor, submitText: submitText)
     }
@@ -438,7 +430,6 @@ final class OpenClickyNotchCaptureWindowManager {
                 foregroundAppIcon: foregroundAppIcon,
                 foregroundAppName: foregroundAppName,
                 hidesStatusText: hidesStatusText,
-                allowsHoverExpansion: false,
                 expand: { [weak self] in
                     self?.pinAnchorScreenToPointerIfNeeded()
                     self?.persistentShowMainPanel?()
@@ -467,13 +458,11 @@ final class OpenClickyNotchCaptureWindowManager {
             dynamicNotchKitBridge.updateAudioPowerLevel(audioPowerLevel)
         }
         contentView?.updateAudioPowerLevel(audioPowerLevel)
-        externalHoverStatusContentView?.updateAudioPowerLevel(audioPowerLevel)
     }
 
     func hide() {
         panel?.orderOut(nil)
         hideDynamicNotchKitStatusSurface()
-        hideExternalHoverStatusPanel()
         hideMainPanel()
         stopCollapsedHoverProbe()
         activeMode = nil
@@ -501,7 +490,6 @@ final class OpenClickyNotchCaptureWindowManager {
             foregroundAppName: foregroundAppName,
             hasRunningAgentWork: persistentHasRunningAgentWork,
             hidesAppNameText: Self.hidesCollapsedAppNameText(on: preferredAnchorScreen()),
-            allowsHoverExpansion: false,
             expand: { [weak self] in
                 self?.pinAnchorScreenToPointerIfNeeded()
                 if let showMainPanel = self?.persistentShowMainPanel {
@@ -529,7 +517,6 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func expandTextInput(accentColor: NSColor, submitText: @escaping (String) -> Void) {
         stopCollapsedHoverProbe()
-        hideExternalHoverStatusPanel()
         activeMode = .text
         persistentAccentColor = accentColor
         persistentSubmitText = submitText
@@ -549,7 +536,6 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func showMainPanel(companionManager: CompanionManager, focusedAgentSessionID: UUID? = nil) {
         stopCollapsedHoverProbe()
-        hideExternalHoverStatusPanel()
         pinAnchorScreenToPointerIfNeeded()
         ensureMainPanel()
         applyMainPanelResizeBehavior()
@@ -1144,24 +1130,13 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func probeCollapsedNotchHover() {
         guard (activeMode == .collapsedText || activeMode == .voice), mainPanel?.isVisible != true else {
-            hideExternalHoverStatusPanel()
             stopCollapsedHoverProbe()
             return
         }
         let mouseLocation = NSEvent.mouseLocation
-        if let externalHoverStatusPanel,
-           externalHoverStatusPanel.isVisible,
-           let statusScreen = externalHoverStatusPanel.screen ?? preferredAnchorScreen() ?? NSScreen.main ?? NSScreen.screens.first,
-           !externalHoverStatusPanel.frame.contains(mouseLocation),
-           !Self.notchHoverRegion(on: statusScreen).contains(mouseLocation) {
-            hideExternalHoverStatusPanel()
-        }
         guard let hoveredScreen = NSScreen.screens.first(where: { Self.notchHoverRegion(on: $0).contains(mouseLocation) }) else { return }
 
-        if !Self.hasPhysicalNotch(on: hoveredScreen) {
-            showExternalHoverStatusPanel(on: hoveredScreen)
-            return
-        }
+        guard Self.hasPhysicalNotch(on: hoveredScreen) else { return }
 
         if anchorScreenOverride?.displayID != hoveredScreen.displayID {
             anchorScreenOverride = hoveredScreen
@@ -1174,89 +1149,6 @@ final class OpenClickyNotchCaptureWindowManager {
         if showDynamicNotchKitStatusForCurrentModeIfAvailable(on: hoveredScreen, opensExpanded: true) {
             panel?.orderOut(nil)
         }
-    }
-
-    private func showExternalHoverStatusPanel(on screen: NSScreen) {
-        guard !Self.hasPhysicalNotch(on: screen), activeMode == .collapsedText || activeMode == .voice else { return }
-        anchorScreenOverride = screen
-
-        let panel = externalHoverStatusPanel ?? Self.makeStatusPanel(
-            width: Self.hoverExpandedExternalPanelWidth,
-            height: Self.hoverExpandedExternalPanelHeight
-        )
-        let rootView: OpenClickyNotchCaptureRootView
-        if let existing = externalHoverStatusContentView {
-            rootView = existing
-        } else {
-            rootView = OpenClickyNotchCaptureRootView(
-                frame: NSRect(
-                    x: 0,
-                    y: 0,
-                    width: Self.hoverExpandedExternalPanelWidth,
-                    height: Self.hoverExpandedExternalPanelHeight
-                )
-            )
-            rootView.autoresizingMask = [.width, .height]
-            rootView.onHoverExpansionChanged = { [weak self] isHovering in
-                guard !isHovering else { return }
-                self?.hideExternalHoverStatusPanel()
-            }
-            panel.contentView = rootView
-            externalHoverStatusPanel = panel
-            externalHoverStatusContentView = rootView
-        }
-
-        let usableFrame = screen.visibleFrame.isEmpty ? screen.frame : screen.visibleFrame
-        let targetSize = NSSize(
-            width: min(Self.hoverExpandedExternalPanelWidth, usableFrame.width - (Self.screenEdgePadding * 2)),
-            height: Self.hoverExpandedExternalPanelHeight
-        )
-        let x = min(
-            max(Self.centeredX(for: targetSize, on: screen), usableFrame.minX + Self.screenEdgePadding),
-            usableFrame.maxX - targetSize.width - Self.screenEdgePadding
-        )
-        let y = Self.statusLozengeY(for: targetSize, on: screen) - Self.hoverExpandedExternalTopInset
-        let targetFrame = NSRect(origin: NSPoint(x: x, y: y), size: targetSize)
-
-        rootView.setCanvas(size: targetSize, animated: false)
-        switch activeMode {
-        case .voice:
-            rootView.configureVoice(
-                phase: currentVoicePhase,
-                audioPowerLevel: currentAudioPowerLevel,
-                accentColor: Self.nsAccentColor(for: nil),
-                foregroundAppIcon: foregroundAppIcon,
-                foregroundAppName: foregroundAppName,
-                hidesStatusText: false,
-                allowsHoverExpansion: true,
-                expand: { [weak self] in
-                    self?.pinAnchorScreenToPointerIfNeeded()
-                    self?.persistentShowMainPanel?()
-                }
-            )
-        default:
-            rootView.configureCollapsed(
-                accentColor: persistentAccentColor,
-                foregroundAppIcon: foregroundAppIcon,
-                foregroundAppName: foregroundAppName,
-                hasRunningAgentWork: persistentHasRunningAgentWork,
-                hidesAppNameText: false,
-                allowsHoverExpansion: true,
-                expand: { [weak self] in
-                    self?.pinAnchorScreenToPointerIfNeeded()
-                    self?.persistentShowMainPanel?()
-                },
-                dismiss: {}
-            )
-        }
-        rootView.setHoverExpanded(true, foregroundAppName: foregroundAppName, hasRunningAgentWork: persistentHasRunningAgentWork)
-        panel.setFrame(targetFrame, display: true, animate: false)
-        panel.orderFrontRegardless()
-    }
-
-    private func hideExternalHoverStatusPanel() {
-        externalHoverStatusPanel?.orderOut(nil)
-        externalHoverStatusContentView?.setHoverExpanded(false, foregroundAppName: foregroundAppName, hasRunningAgentWork: persistentHasRunningAgentWork)
     }
 
     private static func notchHoverRegion(on screen: NSScreen) -> NSRect {
@@ -1548,7 +1440,6 @@ final class OpenClickyNotchCaptureWindowManager {
         }
         foregroundAppName = name
         contentView?.updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName)
-        externalHoverStatusContentView?.updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName)
         if isUsingDynamicNotchKitStatusSurface {
             dynamicNotchKitBridge.updateForegroundApp(icon: foregroundAppIcon, name: foregroundAppName)
         }
@@ -1594,7 +1485,6 @@ final class OpenClickyNotchCaptureWindowManager {
         let accentColor = Self.nsAccentColor(for: nil)
         persistentAccentColor = accentColor
         contentView?.updateAccentColor(accentColor)
-        externalHoverStatusContentView?.updateAccentColor(accentColor)
         if let glassBackdrop = mainPanelGlassBackdrop {
             glassBackdrop.configure(
                 cornerRadius: 28,
@@ -1629,7 +1519,6 @@ final class OpenClickyNotchCaptureWindowManager {
 
         applyToWindow(panel)
         applyToWindow(mainPanel)
-        applyToWindow(externalHoverStatusPanel)
     }
 
     static func nsAccentColor(for theme: ClickyAccentTheme?) -> NSColor {
@@ -1678,10 +1567,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private let inputShell = OpenClickyRoundedView(cornerRadius: 21)
     private let textField = NSTextField()
     private let suggestionStack = NSStackView()
-    private let hoverPreviewStack = NSStackView()
-    private let hoverTitleLabel = NSTextField(labelWithString: "OpenClicky ready")
-    private let hoverSubtitleLabel = NSTextField(labelWithString: "Hover suggestions available")
-    private let hoverSuggestionStack = NSStackView()
     private let actionStack = NSStackView()
     private let voiceTitleLabel = NSTextField(labelWithString: "Listening")
     private let voiceSubtitleLabel = NSTextField(labelWithString: "")
@@ -1703,12 +1588,9 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private var submitText: ((String) -> Void)?
     private var dismiss: (() -> Void)?
     private var expand: (() -> Void)?
-    private var canHoverExpand = false
-    private var isHoverExpanded = false
     private var accentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
 
     private static let collapsedLabelMaxWidth: CGFloat = 300
-    var onHoverExpansionChanged: ((Bool) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1738,14 +1620,12 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         needsDisplay = true
     }
 
-    func configureCollapsed(accentColor: NSColor, foregroundAppIcon: NSImage?, foregroundAppName: String, hasRunningAgentWork: Bool, hidesAppNameText: Bool = false, allowsHoverExpansion: Bool = false, expand: @escaping () -> Void, dismiss: @escaping () -> Void) {
+    func configureCollapsed(accentColor: NSColor, foregroundAppIcon: NSImage?, foregroundAppName: String, hasRunningAgentWork: Bool, hidesAppNameText: Bool = false, expand: @escaping () -> Void, dismiss: @escaping () -> Void) {
         mode = .collapsed
         self.accentColor = accentColor
         self.expand = expand
         self.dismiss = dismiss
         hidesCollapsedAppNameText = hidesAppNameText
-        canHoverExpand = allowsHoverExpansion
-        setHoverExpanded(false, foregroundAppName: foregroundAppName, hasRunningAgentWork: hasRunningAgentWork)
         textStack.isHidden = true
         voiceStack.isHidden = true
         let nameIsPlaceholder = foregroundAppName.trimmingCharacters(in: .whitespaces).isEmpty
@@ -1779,8 +1659,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         self.submitText = submitText
         self.dismiss = dismiss
         self.expand = nil
-        canHoverExpand = false
-        setHoverExpanded(false, foregroundAppName: "Current app", hasRunningAgentWork: false)
         notchHandle.isHidden = true
         shellView.isHidden = false
         shellGlassView.isHidden = false
@@ -1812,14 +1690,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         foregroundAppIcon: NSImage?,
         foregroundAppName: String,
         hidesStatusText: Bool = false,
-        allowsHoverExpansion: Bool = false,
         expand: (() -> Void)? = nil
     ) {
         mode = .voice
         self.accentColor = accentColor
         self.expand = expand
-        canHoverExpand = allowsHoverExpansion
-        setHoverExpanded(false, foregroundAppName: foregroundAppName, hasRunningAgentWork: false)
         notchHandle.isHidden = true
         shellView.isHidden = false
         shellGlassView.isHidden = false
@@ -1855,7 +1730,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         voiceAppIconView.image = icon
         collapsedAppNameLabel.stringValue = name
         collapsedAppIconView.isHidden = mode != .collapsed || icon == nil
-        collapsedAppNameLabel.isHidden = mode != .collapsed || isHoverExpanded || hidesCollapsedAppNameText || nameIsPlaceholder
+        collapsedAppNameLabel.isHidden = mode != .collapsed || hidesCollapsedAppNameText || nameIsPlaceholder
         collapsedPlayIconView.isHidden = mode != .collapsed || !collapsedAgentDotsView.isHidden
         if mode != .collapsed {
             collapsedAgentDotsView.isHidden = true
@@ -1921,19 +1796,10 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
 
     override func mouseEntered(with event: NSEvent) {
         guard mode == .collapsed || mode == .voice else { return }
-        if let screen = window?.screen, OpenClickyNotchCaptureWindowManager.hasPhysicalNotch(on: screen) {
-            let localPoint = convert(event.locationInWindow, from: nil)
-            guard shellView.frame.contains(localPoint) else { return }
-            expand?()
-            return
-        }
-        guard canHoverExpand else { return }
-        onHoverExpansionChanged?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        guard canHoverExpand else { return }
-        onHoverExpansionChanged?(false)
+        guard let screen = window?.screen, OpenClickyNotchCaptureWindowManager.hasPhysicalNotch(on: screen) else { return }
+        let localPoint = convert(event.locationInWindow, from: nil)
+        guard shellView.frame.contains(localPoint) else { return }
+        expand?()
     }
 
     override func viewDidMoveToWindow() {
@@ -2057,7 +1923,6 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         // avoids "drag fires expand as well" double-events.
 
         configureForegroundAppIconViews()
-        configureHoverPreviewStack()
         configureTextStack()
         configureVoiceStack()
 
@@ -2158,100 +2023,11 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
         expand?()
     }
 
-    func setHoverExpanded(_ expanded: Bool, foregroundAppName: String, hasRunningAgentWork: Bool) {
-        guard isHoverExpanded != expanded || hoverPreviewStack.isHidden == expanded else { return }
-        isHoverExpanded = expanded
-        hoverPreviewStack.isHidden = !expanded
-        let name = foregroundAppName.trimmingCharacters(in: .whitespacesAndNewlines)
-        hoverTitleLabel.stringValue = hasRunningAgentWork ? "Agent work running" : "Ask OpenClicky"
-        hoverSubtitleLabel.stringValue = name.isEmpty || name == "Current app"
-            ? "Choose a chip, or open the main panel"
-            : "Focused in \(name) · choose a chip or open"
-        collapsedAppNameLabel.isHidden = expanded || hidesCollapsedAppNameText || name.isEmpty || name == "Current app"
-        hoverPreviewStack.alphaValue = expanded ? 1 : 0
-        needsLayout = true
-        needsDisplay = true
-    }
-
-    func setAgentWorkActive(_ isActive: Bool, foregroundAppName: String) {
+    func setAgentWorkActive(_ isActive: Bool, foregroundAppName _: String) {
         collapsedPlayIconView.isHidden = isActive
         collapsedAgentDotsView.isHidden = !isActive
         collapsedAgentDotsView.isActive = isActive
-        if isHoverExpanded {
-            setHoverExpanded(true, foregroundAppName: foregroundAppName, hasRunningAgentWork: isActive)
-        }
         needsDisplay = true
-    }
-
-    private func configureHoverPreviewStack() {
-        hoverPreviewStack.orientation = .vertical
-        hoverPreviewStack.alignment = .leading
-        hoverPreviewStack.spacing = 2
-        hoverPreviewStack.translatesAutoresizingMaskIntoConstraints = false
-        hoverPreviewStack.isHidden = true
-
-        hoverTitleLabel.font = .systemFont(ofSize: 11, weight: .heavy)
-        hoverTitleLabel.textColor = NSColor.white.withAlphaComponent(0.96)
-        hoverTitleLabel.lineBreakMode = .byTruncatingTail
-        hoverSubtitleLabel.font = .systemFont(ofSize: 9, weight: .semibold)
-        hoverSubtitleLabel.textColor = NSColor.white.withAlphaComponent(0.58)
-        hoverSubtitleLabel.lineBreakMode = .byTruncatingTail
-
-        hoverSuggestionStack.orientation = .horizontal
-        hoverSuggestionStack.alignment = .centerY
-        hoverSuggestionStack.spacing = 4
-        for suggestion in [
-            OpenClickyNotchCaptureSuggestion(token: "/agent", title: "Agent", systemImage: "shippingbox"),
-            OpenClickyNotchCaptureSuggestion(token: "@screen", title: "Screen", systemImage: "rectangle.dashed"),
-            OpenClickyNotchCaptureSuggestion(token: "/skills", title: "Skills", systemImage: "sparkles")
-        ] {
-            hoverSuggestionStack.addArrangedSubview(makeHoverSuggestionButton(suggestion))
-        }
-        hoverSuggestionStack.addArrangedSubview(makeHoverOpenButton())
-
-        hoverPreviewStack.addArrangedSubview(hoverTitleLabel)
-        hoverPreviewStack.addArrangedSubview(hoverSubtitleLabel)
-        hoverPreviewStack.addArrangedSubview(hoverSuggestionStack)
-        shellView.addSubview(hoverPreviewStack)
-
-        NSLayoutConstraint.activate([
-            hoverPreviewStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 44),
-            hoverPreviewStack.trailingAnchor.constraint(lessThanOrEqualTo: shellView.trailingAnchor, constant: -38),
-            hoverPreviewStack.topAnchor.constraint(greaterThanOrEqualTo: shellView.topAnchor, constant: 8),
-            hoverPreviewStack.bottomAnchor.constraint(lessThanOrEqualTo: shellView.bottomAnchor, constant: -8),
-            hoverPreviewStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
-        ])
-    }
-
-    private func makeHoverSuggestionButton(_ suggestion: OpenClickyNotchCaptureSuggestion) -> NSButton {
-        let button = OpenClickyClosureButton(systemName: suggestion.systemImage, title: suggestion.title, action: { [weak self] in
-            self?.textField.stringValue = "\(suggestion.token) "
-            self?.expand?()
-        })
-        button.symbolPointSize = 8.5
-        button.font = .systemFont(ofSize: 8.5, weight: .bold)
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.90)
-        button.cornerRadius = 8
-        button.fillColor = NSColor.white.withAlphaComponent(0.11)
-        button.borderColor = NSColor.white.withAlphaComponent(0.12)
-        button.toolTip = suggestion.title
-        button.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        return button
-    }
-
-    private func makeHoverOpenButton() -> NSButton {
-        let button = OpenClickyClosureButton(systemName: "rectangle.topthird.inset.filled", title: "Open", action: { [weak self] in
-            self?.expand?()
-        })
-        button.symbolPointSize = 8.5
-        button.font = .systemFont(ofSize: 8.5, weight: .bold)
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.96)
-        button.cornerRadius = 8
-        button.fillColor = accentColor.withAlphaComponent(0.26)
-        button.borderColor = accentColor.withAlphaComponent(0.30)
-        button.toolTip = "Open main OpenClicky panel"
-        button.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        return button
     }
 
     private func configureTextStack() {
