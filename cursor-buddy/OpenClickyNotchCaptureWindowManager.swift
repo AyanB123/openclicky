@@ -146,17 +146,6 @@ final class OpenClickyNotchCaptureWindowManager {
     private var foregroundAppActivationObserver: NSObjectProtocol?
     private var foregroundAppIcon: NSImage?
     private var foregroundAppName: String = "Current app"
-    // When the user drags or resizes a pill, this captures the resulting
-    // frame and locks it in for the rest of the session, keyed by the
-    // CGDirectDisplayID of the screen that pill is on. Auto-positioning
-    // (centeredX) and auto-sizing (collapsedPanelWidth) are bypassed for any
-    // display whose entry is non-nil. Foreground-app changes still refresh
-    // the displayed icon/name but no longer reflow geometry. If the primary
-    // pill moves between screens, each screen's lock is read independently.
-    private var userPillFrames: [CGDirectDisplayID: NSRect] = [:]
-    private var statsHUDPanel: NSPanel?
-    private var statsHUDLabel: NSTextField?
-
     // AppKit window frames are in points, not pixels. Keep these as real
     // point sizes; do not divide by backingScaleFactor or the content clips on
     // Retina displays.
@@ -196,48 +185,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let screenEdgePadding: CGFloat = 12
     private static let escapeKeyCode: UInt16 = 53
 
-    private static let userPillFramesDefaultsKey = "OpenClickyUserPillFrames"
-
-    private func persistUserPillFrames() {
-        var encoded: [String: [String: Double]] = [:]
-        for (displayID, frame) in userPillFrames {
-            encoded[String(displayID)] = [
-                "x": Double(frame.origin.x),
-                "y": Double(frame.origin.y),
-                "w": Double(frame.size.width),
-                "h": Double(frame.size.height)
-            ]
-        }
-        UserDefaults.standard.set(encoded, forKey: Self.userPillFramesDefaultsKey)
-    }
-
-    private func loadPersistedUserPillFrames() {
-        guard let raw = UserDefaults.standard.dictionary(forKey: Self.userPillFramesDefaultsKey)
-                as? [String: [String: Double]] else { return }
-        let screens = NSScreen.screens
-        for (idString, dict) in raw {
-            guard let id = UInt32(idString),
-                  let x = dict["x"], let y = dict["y"],
-                  let w = dict["w"], let h = dict["h"] else { continue }
-            let displayID = CGDirectDisplayID(id)
-            // Frame must (a) belong to a still-attached display and
-            // (b) genuinely intersect that display's frame. Pre-fix corruption
-            // wrote the same y to every screen's entry, putting some pills
-            // far off their own display; we drop those here so the user can
-            // recover by dragging once instead of editing UserDefaults.
-            guard let screen = screens.first(where: { $0.displayID == displayID }) else { continue }
-            let frame = NSRect(x: x, y: y, width: w, height: h)
-            guard Self.isRestorablePillFrame(frame, on: screen) else { continue }
-            userPillFrames[displayID] = frame
-        }
-        if userPillFrames.count != raw.count {
-            // Persist the cleaned-up set so the bad entries don't come back.
-            persistUserPillFrames()
-        }
-    }
-
     init() {
-        loadPersistedUserPillFrames()
         mainPanelContentSizeObserver = NotificationCenter.default.addObserver(
             forName: .clickyPanelContentSizeDidChange,
             object: nil,
@@ -861,118 +809,9 @@ final class OpenClickyNotchCaptureWindowManager {
         if contentView != nil { return }
         let rootView = OpenClickyNotchCaptureRootView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         rootView.autoresizingMask = [.width, .height]
-        // Drag ticks only refresh the HUD (so x/y/w/h follow the cursor live).
-        // The userPillFrames write happens once on commit (mouseUp), to avoid
-        // recording intermediate per-screen entries when a drag crosses
-        // monitors.
-        rootView.onPillFrameChanged = { [weak self] _ in
-            self?.refreshStatsHUD()
-        }
-        rootView.onPillFrameCommitted = { [weak self] frame in
-            guard let self else { return }
-            let displayID = self.panel?.screen?.displayID
-                ?? self.preferredAnchorScreen()?.displayID
-            if let displayID {
-                self.userPillFrames[displayID] = frame
-                self.persistUserPillFrames()
-            }
-            self.refreshStatsHUD()
-        }
         panel?.contentView = rootView
         contentView = rootView
         mainHostingView = nil
-    }
-
-    private func ensureStatsHUD() -> NSPanel {
-        if let existing = statsHUDPanel { return existing }
-        let hud = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 220, height: 60),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        hud.isFloatingPanel = true
-        hud.level = OpenClickyWindowLevels.statusSurface
-        hud.isOpaque = false
-        hud.backgroundColor = .clear
-        hud.hasShadow = true
-        hud.hidesOnDeactivate = false
-        hud.isReleasedWhenClosed = false
-        hud.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        hud.isMovableByWindowBackground = true
-
-        let container = OpenClickyRoundedView(cornerRadius: 10)
-        container.fillColor = NSColor.black.withAlphaComponent(0.85)
-        container.borderColor = NSColor.white.withAlphaComponent(0.15)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        hud.contentView?.addSubview(container)
-
-        let label = NSTextField(labelWithString: "")
-        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        label.textColor = NSColor.white.withAlphaComponent(0.95)
-        label.alignment = .left
-        label.maximumNumberOfLines = 2
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-
-        if let contentView = hud.contentView {
-            NSLayoutConstraint.activate([
-                container.topAnchor.constraint(equalTo: contentView.topAnchor),
-                container.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-                container.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-                container.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-                label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-                label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-                label.centerYAnchor.constraint(equalTo: container.centerYAnchor)
-            ])
-        }
-
-        statsHUDPanel = hud
-        statsHUDLabel = label
-
-        if let screen = NSScreen.main {
-            let x = screen.visibleFrame.maxX - 232
-            let y = screen.visibleFrame.maxY - 72
-            hud.setFrameOrigin(NSPoint(x: x, y: y))
-        }
-        return hud
-    }
-
-    // Builds one stats line for the currently visible primary pill.
-    private func refreshStatsHUD() {
-        let hud = ensureStatsHUD()
-        var lines: [String] = []
-        if let panel, panel.isVisible {
-            lines.append(statsLine(for: panel, label: screenLabel(for: panel.screen)))
-        }
-        if let externalHoverStatusPanel, externalHoverStatusPanel.isVisible {
-            lines.append(statsLine(for: externalHoverStatusPanel, label: screenLabel(for: externalHoverStatusPanel.screen)))
-        }
-        if lines.isEmpty { lines.append("no pills visible") }
-        statsHUDLabel?.stringValue = lines.joined(separator: "\n")
-        if !hud.isVisible {
-            hud.orderFrontRegardless()
-        }
-    }
-
-    private func statsLine(for panel: NSPanel, label: String) -> String {
-        let frame = panel.frame
-        let displayID = panel.screen?.displayID
-        let lockState: String = displayID.flatMap { userPillFrames[$0] } != nil ? "locked" : "auto"
-        return String(
-            format: "%@  x=%5d  y=%5d  w=%4d  h=%2d  %@",
-            label.padding(toLength: 10, withPad: " ", startingAt: 0),
-            Int(frame.origin.x), Int(frame.origin.y),
-            Int(frame.width), Int(frame.height), lockState
-        )
-    }
-
-    private func screenLabel(for screen: NSScreen?) -> String {
-        guard let screen else { return "screen?" }
-        // Trim/shorten the OS-reported name so the HUD line stays readable.
-        let raw = screen.localizedName
-        if raw.isEmpty { return "scr \(screen.displayID)" }
-        return String(raw.prefix(10))
     }
 
     private func resizeAndReposition(width: CGFloat, height: CGFloat) {
@@ -983,7 +822,6 @@ final class OpenClickyNotchCaptureWindowManager {
             panel.setFrame(staticFrame, display: true, animate: false)
             contentView?.setCanvas(size: staticFrame.size)
             repositionMainPanelIfVisible()
-            refreshStatsHUD()
             return
         }
         let size = NSSize(width: width, height: height)
@@ -992,7 +830,6 @@ final class OpenClickyNotchCaptureWindowManager {
         contentView?.setCanvas(size: size)
         positionPanel(size: size)
         repositionMainPanelIfVisible()
-        refreshStatsHUD()
     }
 
     private func resizeAndRepositionMainPanel(width: CGFloat, height: CGFloat) {
@@ -1415,18 +1252,11 @@ final class OpenClickyNotchCaptureWindowManager {
         rootView.setHoverExpanded(true, foregroundAppName: foregroundAppName, hasRunningAgentWork: persistentHasRunningAgentWork)
         panel.setFrame(targetFrame, display: true, animate: false)
         panel.orderFrontRegardless()
-        if statsHUDPanel?.isVisible == true {
-            refreshStatsHUD()
-        }
     }
 
     private func hideExternalHoverStatusPanel() {
-        let wasVisible = externalHoverStatusPanel?.isVisible == true
         externalHoverStatusPanel?.orderOut(nil)
         externalHoverStatusContentView?.setHoverExpanded(false, foregroundAppName: foregroundAppName, hasRunningAgentWork: persistentHasRunningAgentWork)
-        if wasVisible || statsHUDPanel?.isVisible == true {
-            refreshStatsHUD()
-        }
     }
 
     private static func notchHoverRegion(on screen: NSScreen) -> NSRect {
@@ -1748,7 +1578,6 @@ final class OpenClickyNotchCaptureWindowManager {
         guard let primaryScreen else { return }
         let primaryWidth = widthForScreen(primaryScreen)
         resizeAndReposition(width: primaryWidth, height: height)
-        refreshStatsHUD()
     }
 
     private static func detectForegroundApp() -> (icon: NSImage?, name: String) {
@@ -1878,25 +1707,7 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
     private var isHoverExpanded = false
     private var accentColor = NSColor(calibratedRed: 0.20, green: 0.50, blue: 1.00, alpha: 1.0)
 
-    // Pill drag/resize support. While in collapsed mode, mousing down anywhere
-    // on the pill begins tracking; if the user moves > 3pt horizontally we
-    // switch from "click to expand" to "drag/resize", reposition the panel
-    // frame, and notify the manager via onPillFrameChanged.
-    private struct PillDragState {
-        enum Mode { case move, resizeLeft, resizeRight }
-        let mode: Mode
-        let startMouse: NSPoint
-        let startFrame: NSRect
-        var hasDragged: Bool
-    }
-    private var pillDragState: PillDragState?
-    private let pillEdgeHitWidth: CGFloat = 16
-    private let pillMinWidth: CGFloat = 260
-    private let pillMaxWidth: CGFloat = 1000
-    private let pillDragThreshold: CGFloat = 3
     private static let collapsedLabelMaxWidth: CGFloat = 300
-    var onPillFrameChanged: ((NSRect) -> Void)?
-    var onPillFrameCommitted: ((NSRect) -> Void)?
     var onHoverExpansionChanged: ((Bool) -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -2827,76 +2638,17 @@ private final class OpenClickyNotchCaptureRootView: NSView, NSTextFieldDelegate 
             return
         }
         if mode == .collapsed {
-            pillDragState = nil
             return
         }
         super.mouseDown(with: event)
     }
 
-    override func mouseDragged(with event: NSEvent) {
-        guard var state = pillDragState, let window else {
-            super.mouseDragged(with: event)
-            return
-        }
-        let mouseLocation = NSEvent.mouseLocation
-        let dx = mouseLocation.x - state.startMouse.x
-
-        // Resize modes track the cursor 1:1 from the first pixel of motion --
-        // a dead zone here makes the pill feel like it jumps. Move mode keeps
-        // the small threshold so a sub-3pt click doesn't shift the panel and
-        // still gets interpreted as a click-to-expand in mouseUp.
-        switch state.mode {
-        case .resizeLeft, .resizeRight:
-            state.hasDragged = state.hasDragged || dx != 0
-        case .move:
-            if !state.hasDragged && abs(dx) > pillDragThreshold {
-                state.hasDragged = true
-            }
-        }
-
-        if state.hasDragged {
-            var newFrame = state.startFrame
-            switch state.mode {
-            case .move:
-                newFrame.origin.x = state.startFrame.origin.x + dx
-            case .resizeLeft:
-                let newWidth = min(max(state.startFrame.width - dx, pillMinWidth), pillMaxWidth)
-                newFrame.origin.x = state.startFrame.maxX - newWidth
-                newFrame.size.width = newWidth
-            case .resizeRight:
-                let newWidth = min(max(state.startFrame.width + dx, pillMinWidth), pillMaxWidth)
-                newFrame.size.width = newWidth
-            }
-            // Defensive: keep the window's minSize floored at our pill
-            // minimum on every tick. Otherwise AppKit can silently clamp the
-            // setFrame call up to whatever minSize was last set (the original
-            // 520pt content rect on first create, or a stale value from a
-            // previous render pass).
-            let floor = NSSize(width: pillMinWidth, height: max(window.minSize.height, 24))
-            if window.minSize != floor { window.minSize = floor }
-            if window.contentMinSize != floor { window.contentMinSize = floor }
-            window.setFrame(newFrame, display: true, animate: false)
-            window.invalidateCursorRects(for: self)
-            onPillFrameChanged?(newFrame)
-        }
-        pillDragState = state
-    }
-
     override func mouseUp(with event: NSEvent) {
-        let didDrag = pillDragState?.hasDragged ?? false
-        pillDragState = nil
-        if mode == .collapsed, !didDrag {
+        if mode == .collapsed {
             expand?()
             return
         }
-        if didDrag, let window {
-            onPillFrameCommitted?(window.frame)
-        }
         super.mouseUp(with: event)
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
     }
 
     func controlTextDidChange(_ obj: Notification) {

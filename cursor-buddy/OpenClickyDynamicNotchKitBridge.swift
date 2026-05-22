@@ -16,18 +16,11 @@ struct OpenClickyAgentLiveActivity: Equatable {
     }
 
     var subtitle: String {
-        let title = primaryTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let phase = phaseLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let detail = detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let status: String
-        switch (phase.isEmpty, detail.isEmpty) {
-        case (false, false): status = "\(phase) · \(detail)"
-        case (false, true): status = phase
-        case (true, false): status = detail
-        case (true, true): status = runningCount > 1 ? "Multiple background agents are active" : "Background agent is active"
+        if !phase.isEmpty {
+            return phase
         }
-        guard runningCount > 1, !title.isEmpty else { return status }
-        return "\(title) · \(status)"
+        return runningCount > 1 ? "\(runningCount) agents active" : "Agent active"
     }
 }
 
@@ -265,9 +258,13 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
                 Text(expandedTitle)
                     .font(.system(size: 14, weight: .heavy))
                     .foregroundStyle(.white.opacity(0.98))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(expandedSubtitle)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             .frame(width: 170, alignment: .leading)
 
@@ -283,7 +280,9 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
                 }
             }
         }
+        .frame(height: 46, alignment: .center)
         .padding(.vertical, 2)
+        .clipped()
         .onHover { isHovering in
             if isHovering {
                 model.openNotch()
