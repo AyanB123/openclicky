@@ -25,6 +25,8 @@ public struct OpenClickySDKPanelActions {
     public var onOpenHUD: () -> Void
     /// Opens the OpenClicky memory window in the host environment.
     public var onOpenMemory: () -> Void
+    /// Opens the OpenClicky visual intelligence workspace in the host environment.
+    public var onOpenVisual: () -> Void
     /// Opens the OpenClicky feedback/inbox link.
     public var onOpenFeedback: () -> Void
     /// Opens the settings surface in the host environment.
@@ -35,6 +37,7 @@ public struct OpenClickySDKPanelActions {
         onQuit: @escaping () -> Void = {},
         onOpenHUD: @escaping () -> Void = {},
         onOpenMemory: @escaping () -> Void = {},
+        onOpenVisual: @escaping () -> Void = {},
         onOpenFeedback: @escaping () -> Void = {},
         onShowSettings: @escaping () -> Void = {}
     ) {
@@ -42,6 +45,7 @@ public struct OpenClickySDKPanelActions {
         self.onQuit = onQuit
         self.onOpenHUD = onOpenHUD
         self.onOpenMemory = onOpenMemory
+        self.onOpenVisual = onOpenVisual
         self.onOpenFeedback = onOpenFeedback
         self.onShowSettings = onShowSettings
     }
@@ -135,6 +139,7 @@ public final class OpenClickySDKSession: ObservableObject {
                 onQuit: actions.onQuit,
                 onOpenHUD: actions.onOpenHUD,
                 onOpenMemory: actions.onOpenMemory,
+                onOpenVisual: actions.onOpenVisual,
                 onOpenFeedback: actions.onOpenFeedback,
                 onShowSettings: actions.onShowSettings
             )
@@ -164,6 +169,7 @@ public struct OpenClickySDKPanel: View {
     private let onQuit: () -> Void
     private let onOpenHUD: () -> Void
     private let onOpenMemory: () -> Void
+    private let onOpenVisual: () -> Void
     private let onOpenFeedback: () -> Void
     private let onShowSettings: () -> Void
 
@@ -175,6 +181,7 @@ public struct OpenClickySDKPanel: View {
         onQuit: @escaping () -> Void,
         onOpenHUD: @escaping () -> Void,
         onOpenMemory: @escaping () -> Void,
+        onOpenVisual: @escaping () -> Void,
         onOpenFeedback: @escaping () -> Void,
         onShowSettings: @escaping () -> Void
     ) {
@@ -185,6 +192,7 @@ public struct OpenClickySDKPanel: View {
         self.onQuit = onQuit
         self.onOpenHUD = onOpenHUD
         self.onOpenMemory = onOpenMemory
+        self.onOpenVisual = onOpenVisual
         self.onOpenFeedback = onOpenFeedback
         self.onShowSettings = onShowSettings
     }
@@ -201,6 +209,7 @@ public struct OpenClickySDKPanel: View {
             onQuit: onQuit,
             onOpenHUD: onOpenHUD,
             onOpenMemory: onOpenMemory,
+            onOpenVisual: onOpenVisual,
             onOpenFeedback: onOpenFeedback,
             onShowSettings: onShowSettings
         )

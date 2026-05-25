@@ -7,8 +7,21 @@ import Foundation
 
 /// Claude API helper with streaming for progressive text display.
 class ClaudeAPI {
-    private static let tlsWarmupLock = NSLock()
-    nonisolated(unsafe) private static var hasStartedTLSWarmup = false
+    private final class TLSWarmupGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var hasStarted = false
+
+        func beginIfNeeded() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+
+            guard !hasStarted else { return false }
+            hasStarted = true
+            return true
+        }
+    }
+
+    private static let tlsWarmupGate = TLSWarmupGate()
 
     private var apiKey: String?
     private let apiURL: URL
@@ -88,14 +101,7 @@ class ClaudeAPI {
     /// Sends a no-op HEAD request to the API host to establish and cache a TLS session.
     /// Failures are silently ignored — this is purely an optimization.
     private func warmUpTLSConnectionIfNeeded() {
-        Self.tlsWarmupLock.lock()
-        let shouldStartTLSWarmup = !Self.hasStartedTLSWarmup
-        if shouldStartTLSWarmup {
-            Self.hasStartedTLSWarmup = true
-        }
-        Self.tlsWarmupLock.unlock()
-
-        guard shouldStartTLSWarmup else { return }
+        guard Self.tlsWarmupGate.beginIfNeeded() else { return }
 
         guard var warmupURLComponents = URLComponents(url: apiURL, resolvingAgainstBaseURL: false) else {
             return

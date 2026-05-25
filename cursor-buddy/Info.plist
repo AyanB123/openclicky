@@ -30,6 +30,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>OpenClicky uses the selected camera only when you enable visual intelligence or meeting notes, so it can understand camera images and visible text.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenClicky uses the microphone for push-to-talk voice input and optional meeting notes transcription.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>OpenClicky needs screen recording access to see your screen and help you.</string>
 	<key>NSUserNotificationAlertStyle</key>

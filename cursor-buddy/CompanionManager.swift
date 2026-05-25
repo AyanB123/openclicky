@@ -221,6 +221,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasMicrophonePermission = false
     @Published private(set) var hasScreenContentPermission = false
     @Published private(set) var hasFullDiskAccessPermission = false
+    @Published private(set) var hasCameraPermission = false
 
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from Claude's response;
@@ -285,6 +286,7 @@ final class CompanionManager: ObservableObject {
     let agentDockWindowManager = ClickyAgentDockWindowManager()
     let agentMenuBarStatusManager = AgentMenuBarStatusManager()
     let settingsWindowManager = OpenClickySettingsWindowManager()
+    let visualIntelligenceWindowManager = OpenClickyVisualIntelligenceWindowManager()
     let logViewerWindowManager = OpenClickyLogViewerWindowManager()
     let markdownViewerWindowManager = OpenClickyMarkdownViewerWindowManager()
     let widgetStateStore = OpenClickyWidgetStateStore()
@@ -1427,6 +1429,10 @@ final class CompanionManager: ObservableObject {
         settingsWindowManager.show(companionManager: self)
     }
 
+    func showVisualIntelligenceWorkspace() {
+        visualIntelligenceWindowManager.show(companionManager: self)
+    }
+
     func showLogViewerWindow() {
         logViewerWindowManager.show()
     }
@@ -1477,6 +1483,8 @@ final class CompanionManager: ObservableObject {
             showLogViewerWindow()
         case "memory":
             showMemoryWindow()
+        case "visual", "camera", "meeting":
+            showVisualIntelligenceWorkspace()
         default:
             showSettingsWindow()
         }
@@ -1618,7 +1626,7 @@ final class CompanionManager: ObservableObject {
             hasCompletedOnboarding = true
         }
         print("OpenClicky runtime identity - bundleID: \(Bundle.main.bundleIdentifier ?? "unknown"), appPath: \(Bundle.main.bundleURL.path)")
-        print("OpenClicky start - accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), fullDiskAccess: \(hasFullDiskAccessPermission), onboarded: \(hasCompletedOnboarding)")
+        print("OpenClicky start - accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), camera: \(hasCameraPermission), screenContent: \(hasScreenContentPermission), fullDiskAccess: \(hasFullDiskAccessPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         if runtimeMode == .menuBar {
             notchCaptureWindowManager.showPersistentPill(
@@ -2100,6 +2108,7 @@ final class CompanionManager: ObservableObject {
         let previouslyHadAccessibility = hasAccessibilityPermission
         let previouslyHadScreenRecording = hasScreenRecordingPermission
         let previouslyHadMicrophone = hasMicrophonePermission
+        let previouslyHadCamera = hasCameraPermission
         let previouslyHadFullDiskAccess = hasFullDiskAccessPermission
         let previouslyHadAll = allPermissionsGranted
 
@@ -2117,6 +2126,9 @@ final class CompanionManager: ObservableObject {
         let micAuthStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         hasMicrophonePermission = micAuthStatus == .authorized
 
+        let cameraAuthStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        hasCameraPermission = cameraAuthStatus == .authorized
+
         // Screen content permission is persisted after the ScreenCaptureKit
         // picker approves it, but it is only useful when real Screen Recording
         // permission is also present.
@@ -2128,8 +2140,9 @@ final class CompanionManager: ObservableObject {
         if previouslyHadAccessibility != hasAccessibilityPermission
             || previouslyHadScreenRecording != hasScreenRecordingPermission
             || previouslyHadMicrophone != hasMicrophonePermission
+            || previouslyHadCamera != hasCameraPermission
             || previouslyHadFullDiskAccess != hasFullDiskAccessPermission {
-            print("Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), fullDiskAccess: \(hasFullDiskAccessPermission)")
+            print("Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), camera: \(hasCameraPermission), screenContent: \(hasScreenContentPermission), fullDiskAccess: \(hasFullDiskAccessPermission)")
         }
 
         // Track individual permission grants as they happen
@@ -2141,6 +2154,9 @@ final class CompanionManager: ObservableObject {
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
             ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+        }
+        if !previouslyHadCamera && hasCameraPermission {
+            ClickyAnalytics.trackPermissionGranted(permission: "camera")
         }
         if !previouslyHadFullDiskAccess && hasFullDiskAccessPermission {
             ClickyAnalytics.trackPermissionGranted(permission: "full_disk_access")
@@ -11402,7 +11418,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s), and when the user has enabled camera context you may also receive a camera image labeled as such. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     YOUR JOB IS NARROW. you only do these things:
     1. POINT and ANNOTATE things on the user's screen using the [POINT:...] tag.
@@ -11431,6 +11447,7 @@ final class CompanionManager: ObservableObject {
     - never say "simply" or "just".
     - don't read out code verbatim. describe what code does conversationally.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize it.
+    - if you receive a camera image, use it for real visual understanding: describe objects, people, scene context, visible text, labels, products, documents, warnings, and important information when relevant. for lookup-style requests, identify likely names and useful search terms from the image; do not claim live web browsing happened unless OpenClicky routed the task to Agent Mode.
     - don't end with dead-end yes/no questions ("want me to explain more?"). when it fits, plant a seed — mention something bigger or related they could try.
 
     element pointing:
@@ -11669,6 +11686,7 @@ final class CompanionManager: ObservableObject {
                     prewarmedScreenshotStartedAt = nil
                     screenCaptures = []
                 }
+                let cameraFrame = await captureCameraFrameForVoiceResponseIfAvailable(transcript: transcript)
                 self.markRequestStageCompleted(
                     route: "voice.response",
                     stage: "screen_capture",
@@ -11680,7 +11698,8 @@ final class CompanionManager: ObservableObject {
                         "controller": "ScreenCaptureKit",
                         "screenContextNeeded": shouldAttachScreenContext,
                         "screenCount": screenCaptures.count,
-                        "imageBytes": screenCaptures.reduce(0) { $0 + $1.imageData.count }
+                        "cameraContextAttached": cameraFrame != nil,
+                        "imageBytes": screenCaptures.reduce(0) { $0 + $1.imageData.count } + (cameraFrame?.data.count ?? 0)
                     ]
                 )
 
@@ -11692,9 +11711,12 @@ final class CompanionManager: ObservableObject {
                 // Build image labels with the actual screenshot pixel dimensions
                 // so Claude's coordinate space matches the image it sees. We
                 // scale from screenshot pixels to display points ourselves.
-                let labeledImages = screenCaptures.map { capture in
+                var labeledImages = screenCaptures.map { capture in
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
+                }
+                if let cameraFrame {
+                    labeledImages.append((data: cameraFrame.data, label: cameraFrame.label))
                 }
 
                 let userPromptForClaude: String
@@ -11704,8 +11726,9 @@ final class CompanionManager: ObservableObject {
                     userPromptForClaude = transcript
                 }
 
+                let hasVisualContext = !labeledImages.isEmpty
                 let isRealtimeResponseModel = OpenClickyModelCatalog.isSpeechModelID(self.selectedModel)
-                let visualAnalysisModelID = isRealtimeResponseModel && shouldAttachScreenContext
+                let visualAnalysisModelID = isRealtimeResponseModel && hasVisualContext
                     ? OpenClickyModelCatalog.defaultVoiceResponseModelID
                     : self.selectedModel
 
@@ -11713,7 +11736,7 @@ final class CompanionManager: ObservableObject {
                 // carry OpenClicky's screenshot payload into the response model,
                 // so visual requests must continue through the screenshot-aware
                 // voice path below. The playback engine can still be Realtime.
-                if isRealtimeResponseModel && !shouldAttachScreenContext {
+                if isRealtimeResponseModel && !hasVisualContext {
                     let realtimeStartedAt = Date()
                     var didMarkRealtimeAudioStarted = false
                     let realtimeText = try await self.openAIRealtimeSpeechClient.speakResponse(
@@ -11802,7 +11825,7 @@ final class CompanionManager: ObservableObject {
                 // neutral filler while capture + vision processing happens.
                 let shouldUseFiller = Self.shouldUsePreResponseFiller(
                     transcript: transcript,
-                    screenContextNeeded: shouldAttachScreenContext,
+                    screenContextNeeded: hasVisualContext,
                     modelProvider: OpenClickyModelCatalog.voiceResponseModel(withID: visualAnalysisModelID).provider
                 )
                 let chosenFiller = shouldUseFiller ? FillerPhraseLibrary.shared.randomFiller() : nil
@@ -12390,6 +12413,58 @@ final class CompanionManager: ObservableObject {
         )
     }
 
+    func analyzeVisualWorkspace(
+        images: [(data: Data, label: String)],
+        userPrompt: String,
+        source: String,
+        onTextChunk: @MainActor @Sendable @escaping (String) -> Void
+    ) async throws -> String {
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        let modelID: String
+        if OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id) || selectedVoiceResponseModel.provider == .deepgram {
+            modelID = OpenClickyModelCatalog.defaultVoiceResponseModelID
+        } else {
+            modelID = selectedVoiceResponseModel.id
+        }
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "visual",
+            direction: "outgoing",
+            event: "visual.workspace.request",
+            fields: [
+                "source": source,
+                "model": modelID,
+                "imageCount": images.count,
+                "promptLength": userPrompt.count
+            ]
+        )
+
+        let systemPrompt = """
+        You are OpenClicky's Visual Intelligence workspace. Analyze attached camera and screen images carefully and answer the user's prompt.
+
+        Capabilities to apply when relevant:
+        - identify objects, products, devices, people-present/not-present, scene, setting, actions, and situations.
+        - scan and transcribe visible text, labels, prices, dates, codes, warnings, UI text, document snippets, and important information.
+        - infer useful lookup/search terms for visible objects, logos, documents, books, products, or places. Do not claim live web browsing unless a separate Agent Mode task actually performed it.
+        - call out uncertainty, ambiguous visual evidence, and what detail would verify an identification.
+
+        Output style:
+        - concise markdown is allowed.
+        - no [POINT] tags, no hidden routing syntax, no spoken-TTS constraints.
+        - prioritize details that help the user act now.
+        """
+
+        return try await analyzeVoiceResponse(
+            images: images,
+            modelID: modelID,
+            systemPrompt: systemPrompt,
+            conversationHistory: [],
+            userPrompt: userPrompt,
+            assistantPrefill: nil,
+            onTextChunk: onTextChunk
+        )
+    }
+
     private func analyzeVoiceResponse(
         images: [(data: Data, label: String)],
         modelID: String? = nil,
@@ -12666,6 +12741,40 @@ final class CompanionManager: ObservableObject {
         }
 
         return false
+    }
+
+    private static func shouldAttachCameraContext(to transcript: String) -> Bool {
+        let normalized = transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        let commandText = normalizedSpokenCommandText(transcript)
+        let cameraPhrases = [
+            "camera", "webcam", "cam", "through the camera", "from the camera",
+            "what am i holding", "what is this object", "what's this object",
+            "what is in my hand", "what's in my hand", "on my desk", "behind me",
+            "in the room", "in front of me", "scan this", "read this label",
+            "look at this item", "identify this", "identify that", "what product is this"
+        ]
+        return cameraPhrases.contains { normalized.contains($0) || commandText.contains($0) }
+    }
+
+    private func captureCameraFrameForVoiceResponseIfAvailable(transcript: String) async -> OpenClickyCameraFrame? {
+        let userEnabledCameraContext = UserDefaults.standard.bool(forKey: AppBundleConfiguration.userCameraVoiceContextEnabledDefaultsKey)
+        guard userEnabledCameraContext || Self.shouldAttachCameraContext(to: transcript) else { return nil }
+        do {
+            return try await OpenClickyCameraCaptureController.shared.captureJPEGFrame(labelPrefix: "camera context")
+        } catch {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "error",
+                event: "voice.camera_context_unavailable",
+                fields: [
+                    "error": error.localizedDescription,
+                    "userEnabledCameraContext": userEnabledCameraContext
+                ]
+            )
+            return nil
+        }
     }
 
     private func captureAllScreensForVoiceResponseIfAvailable() async throws -> [CompanionScreenCapture] {

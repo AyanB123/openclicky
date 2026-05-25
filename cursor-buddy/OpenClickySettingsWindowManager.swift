@@ -1089,6 +1089,11 @@ struct OpenClickySettingsView: View {
                     settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
                 )
                 permissionRow(
+                    title: "Camera",
+                    isGranted: companionManager.hasCameraPermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!
+                )
+                permissionRow(
                     title: "Full Disk Access",
                     isGranted: companionManager.hasFullDiskAccessPermission,
                     settingsURL: OpenClickyMacPrivacyPermissionProbe.fullDiskAccessSettingsURL
@@ -1143,6 +1148,9 @@ struct OpenClickySettingsView: View {
                 }
                 actionRow(title: "Open Microphone settings", systemImageName: "mic") {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                }
+                actionRow(title: "Open Camera settings", systemImageName: "camera") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!)
                 }
                 actionRow(title: "Open Full Disk Access settings", systemImageName: "externaldrive.badge.checkmark") {
                     companionManager.openFullDiskAccessSettings()
