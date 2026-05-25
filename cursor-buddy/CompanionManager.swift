@@ -1065,7 +1065,9 @@ final class CompanionManager: ObservableObject {
     }
 
     var codexAgentSession: CodexAgentSession {
-        codexAgentSessions.first { $0.id == activeCodexAgentSessionID } ?? codexAgentSessions[0]
+        codexAgentSessions.first { $0.id == activeCodexAgentSessionID }
+            ?? codexAgentSessions.first
+            ?? CodexAgentSession(title: "Ask Agent", accentTheme: .blue)
     }
 
     private static func restoredArchivedSessions(from archivedSessionIDs: Set<UUID>) -> [CodexAgentSession] {
