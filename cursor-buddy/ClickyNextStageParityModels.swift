@@ -12,6 +12,7 @@ struct PermissionSnapshot: Equatable {
     var accessibility: PermissionStatus
     var screenRecording: PermissionStatus
     var microphone: PermissionStatus
+    var camera: PermissionStatus
     var screenContent: PermissionStatus
 }
 
@@ -26,6 +27,7 @@ enum PermissionGuideAssistant {
         case accessibility
         case screenRecording
         case microphone
+        case camera
         case screenContent
 
         var title: String {
@@ -33,6 +35,7 @@ enum PermissionGuideAssistant {
             case .accessibility: return "Accessibility"
             case .screenRecording: return "Screen Recording"
             case .microphone: return "Microphone"
+            case .camera: return "Camera"
             case .screenContent: return "Screen Content"
             }
         }
@@ -42,6 +45,7 @@ enum PermissionGuideAssistant {
             case .accessibility: return "hand.raised"
             case .screenRecording: return "rectangle.dashed.badge.record"
             case .microphone: return "mic"
+            case .camera: return "camera"
             case .screenContent: return "eye"
             }
         }
@@ -54,6 +58,8 @@ enum PermissionGuideAssistant {
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
             case .microphone:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
+            case .camera:
+                return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")!
             case .screenContent:
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
             }
@@ -67,6 +73,8 @@ enum PermissionGuideAssistant {
                 return "Lets OpenClicky capture a screenshot only when you ask for help."
             case .microphone:
                 return "Lets OpenClicky hear your push-to-talk request."
+            case .camera:
+                return "Lets OpenClicky use the camera for Visual Intelligence and meeting notes."
             case .screenContent:
                 return "Confirms ScreenCaptureKit can read the selected screen."
             }
@@ -100,15 +108,16 @@ enum PermissionGuideAssistant {
             Step(kind: .accessibility, status: snapshot.accessibility),
             Step(kind: .screenRecording, status: snapshot.screenRecording),
             Step(kind: .microphone, status: snapshot.microphone),
+            Step(kind: .camera, status: snapshot.camera),
             Step(kind: .screenContent, status: snapshot.screenContent)
         ]
         let primaryStep = steps.first { $0.status == .missing }
         let headline = primaryStep == nil ? "Permissions ready" : "Permissions needed"
         let summary: String
         if let primaryStep {
-            summary = "Start with \(primaryStep.title). OpenClicky needs all four checks before voice and Agent Mode can run cleanly."
+            summary = "Start with \(primaryStep.title). OpenClicky needs all five checks before voice, Visual Intelligence, and Agent Mode can run cleanly."
         } else {
-            summary = "OpenClicky can listen, see the active screen when invoked, and hand work to Agent Mode."
+            summary = "OpenClicky can listen, see the active screen and camera when invoked, and hand work to Agent Mode."
         }
         return ViewState(headline: headline, summary: summary, steps: steps, primaryStep: primaryStep, entryContext: entryContext)
     }

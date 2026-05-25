@@ -1040,10 +1040,15 @@ final class CompanionManager: ObservableObject {
     private var transientHideTask: Task<Void, Never>?
     private var voiceFollowUpStopTask: Task<Void, Never>?
 
-    /// True when all three required permissions (accessibility, screen recording,
-    /// microphone) are granted. Used by the panel to show a single "all good" state.
+    /// True when all required permissions (accessibility, screen recording,
+    /// microphone, camera, screen content) are granted. Used by the panel to
+    /// show a single "all good" state.
     var allPermissionsGranted: Bool {
-        hasAccessibilityPermission && hasScreenRecordingPermission && hasMicrophonePermission && hasScreenContentPermission
+        hasAccessibilityPermission
+            && hasScreenRecordingPermission
+            && hasMicrophonePermission
+            && hasCameraPermission
+            && hasScreenContentPermission
     }
 
     var permissionSnapshot: PermissionSnapshot {
@@ -1051,6 +1056,7 @@ final class CompanionManager: ObservableObject {
             accessibility: hasAccessibilityPermission ? .granted : .missing,
             screenRecording: hasScreenRecordingPermission ? .granted : .missing,
             microphone: hasMicrophonePermission ? .granted : .missing,
+            camera: hasCameraPermission ? .granted : .missing,
             screenContent: hasScreenContentPermission ? .granted : .missing
         )
     }
@@ -2249,6 +2255,46 @@ final class CompanionManager: ObservableObject {
                 self?.hasMicrophonePermission = granted
             }
         }
+    }
+
+    /// Triggers the system camera prompt if the user has never been asked.
+    /// Once granted/denied the status sticks and polling picks it up.
+    private func promptForCameraIfNotDetermined() {
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined else { return }
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            Task { @MainActor [weak self] in
+                self?.hasCameraPermission = granted
+            }
+        }
+    }
+
+    /// Public entry point used by the permission guide and first-run onboarding
+    /// to surface the native camera prompt. If the user has already responded,
+    /// fall back to opening System Settings so they can flip the toggle.
+    func requestCameraPermission() {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
+        case .notDetermined:
+            promptForCameraIfNotDetermined()
+        case .denied, .restricted:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
+                NSWorkspace.shared.open(url)
+            }
+        case .authorized:
+            hasCameraPermission = true
+        @unknown default:
+            break
+        }
+    }
+
+    /// Called when the permission guide or first-run onboarding becomes visible
+    /// so OpenClicky surfaces the macOS prompts for any permissions the user
+    /// has not yet responded to (currently microphone and camera). Permissions
+    /// that require System Settings (accessibility, screen recording) are left
+    /// to the dedicated onboarding buttons.
+    func requestPendingPermissionPrompts() {
+        promptForMicrophoneIfNotDetermined()
+        promptForCameraIfNotDetermined()
     }
 
     /// Polls all permissions frequently so the UI updates live after the

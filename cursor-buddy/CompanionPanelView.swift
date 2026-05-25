@@ -90,6 +90,14 @@ struct CompanionPanelView: View {
             alignment: .topLeading
         )
         .background(panelBackground)
+        .onAppear {
+            // Surface the native macOS prompts for microphone/camera the first
+            // time the permission guide becomes visible so users don't have to
+            // discover them via the per-feature entry points.
+            if !companionManager.allPermissionsGranted {
+                companionManager.requestPendingPermissionPrompts()
+            }
+        }
         .onChange(of: companionManager.isAdvancedModeEnabled) {
             schedulePanelContentSizeRefresh()
         }

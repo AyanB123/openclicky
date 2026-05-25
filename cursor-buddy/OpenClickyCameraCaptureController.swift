@@ -264,12 +264,12 @@ final class OpenClickyCameraCaptureController: NSObject, ObservableObject, AVCap
                 connection.isVideoMirrored = device.position == .front || device.position == .unspecified
             }
             if #available(macOS 14.0, *) {
-                let portraitRotationAngle: CGFloat = 90
-                if connection.isVideoRotationAngleSupported(portraitRotationAngle) {
-                    connection.videoRotationAngle = portraitRotationAngle
+                let landscapeRotationAngle: CGFloat = 0
+                if connection.isVideoRotationAngleSupported(landscapeRotationAngle) {
+                    connection.videoRotationAngle = landscapeRotationAngle
                 }
             } else if connection.isVideoOrientationSupported {
-                connection.videoOrientation = .portrait
+                connection.videoOrientation = .landscapeRight
             }
         }
 
