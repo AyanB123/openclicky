@@ -12,10 +12,34 @@ import AppKit
 
 @MainActor
 final class OpenClickyBrowserAgentRunner {
+    /// Hard cap on autonomous loop iterations. Multi-step browser plans
+    /// (open three retailers, compare prices, summarize, etc.) need
+    /// substantially more than the original 15 — every navigation +
+    /// screenshot + click counts as a turn.
+    static let maxAutonomousSteps = 40
+
+    /// Interval at which the loop injects a synthetic plan-progress
+    /// reminder so the model doesn't drift away from its committed plan
+    /// on long tasks.
+    private static let planReminderInterval = 5
+
     private let apiKey: String
     private let modelName: String
     private weak var browserModel: OpenClickyBrowserWorkspaceModelProtocol?
-    
+
+    /// Set from the workspace via `cancel()` (e.g. `/stop` slash command or
+    /// the Cancel button). Polled at the top of each loop iteration; the
+    /// runner exits cleanly and posts a status message when set.
+    private var cancelRequested = false
+
+    /// Bumped per loop iteration so the UI can surface "Step N/40" status.
+    private(set) var currentStep: Int = 0
+
+    /// Allows the chat host to request cancellation between iterations.
+    func cancel() {
+        cancelRequested = true
+    }
+
     // Tools schema matching Anthropic's Messages API format
     static let tools: [[String: Any]] = [
         [
@@ -173,6 +197,20 @@ final class OpenClickyBrowserAgentRunner {
                 ],
                 "required": ["script"]
             ]
+        ],
+        [
+            "name": "done",
+            "description": "Signal that the user's goal has been fully achieved. Call this once with a concise natural-language summary of what was accomplished and any final answer the user asked for. After calling `done` you MUST stop emitting tool calls.",
+            "input_schema": [
+                "type": "object",
+                "properties": [
+                    "summary": [
+                        "type": "string",
+                        "description": "A 1-3 sentence natural-language summary of the result for the user. Include any direct answer they asked for."
+                    ]
+                ],
+                "required": ["summary"]
+            ]
         ]
     ]
 
@@ -182,27 +220,102 @@ final class OpenClickyBrowserAgentRunner {
         self.browserModel = browserModel
     }
 
+    /// Conversation history for follow-up turns — every prior user prompt and
+    /// the assistant's final reply, in chronological order. The runner uses
+    /// this to seed the next run so the user can say "now do X" and the agent
+    /// remembers the prior plan and what was accomplished.
+    struct PriorTurn: Sendable {
+        let userPrompt: String
+        let assistantSummary: String
+        init(userPrompt: String, assistantSummary: String) {
+            self.userPrompt = userPrompt
+            self.assistantSummary = assistantSummary
+        }
+    }
+
+    /// Plan-first, step-disciplined CUA system prompt shared by both code paths.
+    private static let systemPrompt = """
+    You are OpenClicky's Browser CUA (Computer Use Agent). You drive the active
+    tab of OpenClicky's built-in browser to achieve the user's goal. You can
+    see the page via screenshots, read text via `get_content`, and act via
+    `click`, `type`, `press_key`, `scroll`, `wait_for`, `navigate`, `click_at`,
+    and `evaluate`.
+
+    PLANNING DISCIPLINE
+    1. On your VERY FIRST assistant turn, before calling any tool, emit a short
+       numbered plan (1 line per step, 2-8 steps total). Wrap it like:
+         Plan:
+         1. ...
+         2. ...
+       Then immediately start executing step 1 with a tool call in the same turn.
+    2. Before each subsequent tool call, briefly state which plan step you are
+       executing (e.g. "Step 3: typing the search query").
+    3. After tool results come back, decide: continue, revise the plan, or
+       finish. If you revise, emit "Plan update:" and the new numbered list.
+    4. Prefer selector-based tools (`click`, `type`) with CSS / `text=...` /
+       `contains(...)` / `xpath=...`. Use `click_at` only when selectors fail.
+    5. After navigation or any action that changes the view, call `screenshot`
+       to re-orient before acting.
+    6. When the goal is fully achieved, call the `done` tool exactly once with
+       a concise summary. Do not emit further tool calls after `done`.
+    7. If you hit a hard block (login wall, captcha, missing data), call `done`
+       with an honest summary explaining the block.
+
+    SAFETY
+    - Never run `evaluate` scripts that exfiltrate cookies, localStorage, or
+      tokens unless the user explicitly asks for that.
+    - Do not navigate to off-task destinations.
+    """
+
     /// Entry point to execute the CUA Agent loop.
-    func run(prompt: String) async {
+    /// - Parameters:
+    ///   - prompt: the new user goal for this turn.
+    ///   - priorTurns: prior user/assistant turns for conversational memory.
+    func run(prompt: String, priorTurns: [PriorTurn] = []) async {
         guard let model = browserModel else { return }
-        
+
+        cancelRequested = false
+        currentStep = 0
+
+        let hasAPIKey = !apiKey.isEmpty
         let useSDK = await MainActor.run {
             model.hasAgentSDK()
         }
-        
-        if useSDK {
-            await runWithAgentSDK(prompt: prompt)
+
+        // Prefer the direct HTTP path whenever an Anthropic API key is
+        // configured — it speaks real `tool_use` blocks and feeds screenshots
+        // back as `tool_result` images. The SDK fallback only re-parses JSON
+        // out of free-text and is much more fragile.
+        if !hasAPIKey && useSDK {
+            await runWithAgentSDK(prompt: prompt, priorTurns: priorTurns)
             return
         }
-        
+        if !hasAPIKey {
+            appendAgentMessage(text: "I need an Anthropic API key (or the Claude Agent SDK) to drive the browser. Add one in Settings and try again.")
+            return
+        }
+
         var messages: [[String: Any]] = []
-        
-        // Retrieve initial context
+
+        // Seed conversational memory. Each prior turn collapses to a short
+        // user/assistant pair so the model knows what was previously asked
+        // and accomplished without replaying every screenshot.
+        for turn in priorTurns {
+            messages.append([
+                "role": "user",
+                "content": [["type": "text", "text": "Earlier goal: \(turn.userPrompt)"]]
+            ])
+            messages.append([
+                "role": "assistant",
+                "content": [["type": "text", "text": "Earlier outcome: \(turn.assistantSummary)"]]
+            ])
+        }
+
+        // Build the initial user turn with current page metadata + a fresh
+        // screenshot so the model is grounded before planning.
         var userContentBlocks: [[String: Any]] = []
-        
         var pageMeta = "No active page loaded yet."
-        let tabContent = await getTabContentDetails()
-        if let tabDetails = tabContent {
+        if let tabDetails = await getTabContentDetails() {
             pageMeta = "Current Tab URL: \(tabDetails["url"] as? String ?? "none")\n" +
                        "Page Title: \(tabDetails["title"] as? String ?? "Untitled")"
             if let selection = tabDetails["selection"] as? String, !selection.isEmpty {
@@ -210,8 +323,6 @@ final class OpenClickyBrowserAgentRunner {
             }
         }
         userContentBlocks.append(["type": "text", "text": "Page metadata:\n\(pageMeta)"])
-        
-        // Capture initial screenshot to seed Claude's sight
         if let screenshotData = await captureTabScreenshot() {
             let mediaType = detectImageMediaType(for: screenshotData)
             userContentBlocks.append([
@@ -223,43 +334,50 @@ final class OpenClickyBrowserAgentRunner {
                 ]
             ])
         }
-        
         userContentBlocks.append(["type": "text", "text": "Goal: \(prompt)"])
         messages.append(["role": "user", "content": userContentBlocks])
-        
-        let systemPrompt = """
-        You are OpenClicky's Browser CUA (Computer Use Agent), specializing in browser automation and page analysis.
-        Your job is to interact with the active browser tab to achieve the user's goal.
-        You can view the page visual layout using screenshots, locate and act on elements, and read page text.
 
-        Guidelines:
-        1. Always analyze the page screenshot first before acting.
-        2. If you need to click, type, or interact, prefer using CSS, xpath, text, or contains selectors via the `click` or `type` tools.
-        3. If an element is hard to select via selectors, you can use `click_at` with coordinates (x, y) visible on the page.
-        4. If you navigate to a new page or perform an action that updates the view, you should call `screenshot` again to see the updated visual state.
-        5. Provide a summary of your actions and the final answer to the user once you've successfully completed the task.
-        """
-        
+        let maxLoops = Self.maxAutonomousSteps
         var loopCount = 0
-        let maxLoops = 15
-        
+        var lastAssistantText = ""
+        var explicitlyDone = false
+        var doneSummary: String?
+
         while loopCount < maxLoops {
             loopCount += 1
+            currentStep = loopCount
+
+            if cancelRequested {
+                postAgentStatus(text: "Stopped at step \(loopCount). The browser plan was cancelled.")
+                break
+            }
+
+            postAgentStatus(text: "Step \(loopCount)/\(maxLoops): thinking…")
+
+            // Inject a synthetic plan check-in periodically so the model
+            // stays anchored to its original plan on long runs.
+            if loopCount > 1 && (loopCount - 1) % Self.planReminderInterval == 0 {
+                messages.append([
+                    "role": "user",
+                    "content": [[
+                        "type": "text",
+                        "text": "Plan check-in: we are on step \(loopCount) of up to \(maxLoops). Restate the remaining plan items, then continue. If the goal is achieved, call `done`."
+                    ]]
+                ])
+            }
+
             do {
-                let response = try await callClaudeAPI(systemPrompt: systemPrompt, messages: messages)
-                
+                let response = try await callClaudeAPI(systemPrompt: Self.systemPrompt, messages: messages)
+
                 guard let content = response["content"] as? [[String: Any]] else {
                     appendAgentMessage(text: "I couldn't complete that in the browser because the model response was invalid.")
                     break
                 }
-                
-                // Keep track of assistant content for the next conversation turn
+
                 messages.append(["role": "assistant", "content": content])
-                
-                // Process assistant content blocks
+
                 var textResponse = ""
                 var toolCalls: [[String: Any]] = []
-                
                 for block in content {
                     let type = block["type"] as? String ?? ""
                     if type == "text" {
@@ -268,45 +386,65 @@ final class OpenClickyBrowserAgentRunner {
                         toolCalls.append(block)
                     }
                 }
-                
+
                 if !textResponse.isEmpty {
                     appendAgentMessage(text: textResponse)
+                    lastAssistantText = textResponse
                 }
-                
-                if toolCalls.isEmpty {
-                    // No tools called, agent is done!
+
+                // Handle `done` tool specially before executing anything else
+                // so the run terminates cleanly even if the model also emitted
+                // parallel tool calls in the same turn.
+                if let doneCall = toolCalls.first(where: { ($0["name"] as? String) == "done" }) {
+                    let input = doneCall["input"] as? [String: Any] ?? [:]
+                    doneSummary = (input["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    explicitlyDone = true
+
+                    // Acknowledge the done call with a tool_result so the
+                    // conversation history stays valid for follow-ups.
+                    if let doneID = doneCall["id"] as? String {
+                        let resultBlock: [String: Any] = [
+                            "type": "tool_result",
+                            "tool_use_id": doneID,
+                            "content": "Acknowledged. Task complete."
+                        ]
+                        messages.append(["role": "user", "content": [resultBlock]])
+                    }
                     break
                 }
-                
-                // Execute tool calls and collect results
+
+                if toolCalls.isEmpty {
+                    // No tool calls and no `done` — treat as a soft finish.
+                    break
+                }
+
+                if cancelRequested {
+                    postAgentStatus(text: "Stopped at step \(loopCount). The browser plan was cancelled.")
+                    break
+                }
+
                 var toolResultBlocks: [[String: Any]] = []
-                
                 for toolCall in toolCalls {
                     guard let toolUseID = toolCall["id"] as? String,
                           let toolName = toolCall["name"] as? String,
                           let input = toolCall["input"] as? [String: Any] else {
                         continue
                     }
-                    
+
+                    postAgentStatus(text: "Step \(loopCount)/\(maxLoops): \(toolName)")
                     let toolResult = await executeTool(name: toolName, input: input)
-                    
+
                     var resultBlock: [String: Any] = [
                         "type": "tool_result",
                         "tool_use_id": toolUseID
                     ]
-                    
                     if toolResult.isError {
                         resultBlock["is_error"] = true
                     }
-                    
                     if let image = toolResult.imageData {
-                        // Return the screenshot directly in the tool result
                         let mediaType = detectImageMediaType(for: image)
                         resultBlock["content"] = [
-                            [
-                                "type": "text",
-                                "text": toolResult.summary
-                            ],
+                            ["type": "text", "text": toolResult.summary],
                             [
                                 "type": "image",
                                 "source": [
@@ -319,22 +457,29 @@ final class OpenClickyBrowserAgentRunner {
                     } else {
                         resultBlock["content"] = toolResult.summary
                     }
-                    
                     toolResultBlocks.append(resultBlock)
                 }
-                
-                // Append tool results as a user turn
+
                 messages.append(["role": "user", "content": toolResultBlocks])
-                
             } catch {
-                appendAgentMessage(text: "I couldn't complete that in the browser. Check the selected browser model/API setup and try again.")
+                appendAgentMessage(text: "I couldn't complete that in the browser. Check the selected browser model/API setup and try again. (\(error.localizedDescription))")
                 break
             }
         }
-        
-        if loopCount >= maxLoops {
-            appendAgentMessage(text: "I couldn't finish that browser action within the step limit.")
+
+        if explicitlyDone, let summary = doneSummary, !summary.isEmpty {
+            appendAgentMessage(text: summary)
+            recordRunOutcome(prompt: prompt, summary: summary)
+        } else if cancelRequested {
+            recordRunOutcome(prompt: prompt, summary: "Cancelled by user at step \(loopCount).")
+        } else if loopCount >= maxLoops {
+            appendAgentMessage(text: "I hit the \(maxLoops)-step limit before finishing. Send a follow-up if you want me to keep going.")
+            recordRunOutcome(prompt: prompt, summary: "Stopped at the \(maxLoops)-step limit.")
+        } else if !lastAssistantText.isEmpty {
+            recordRunOutcome(prompt: prompt, summary: lastAssistantText)
         }
+
+        postAgentStatus(text: "")
     }
 
     private struct ToolResult {
@@ -563,20 +708,34 @@ final class OpenClickyBrowserAgentRunner {
     }
 
     // MARK: - UI Message Dispatchers
-    
+
     private func appendAgentMessage(text: String) {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        
+
         Task { @MainActor in
             self.browserModel?.appendAgentMessage(text: cleaned)
         }
     }
 
-    private func updateAgentStatusMessage(text: String) {
-        // Browser-agent progress is intentionally not surfaced as chat bubbles.
-        // The side chat should look like normal OpenClicky chat: user prompt in,
-        // final answer or concise failure out.
+    /// Posts a transient "what the agent is doing right now" line. The
+    /// workspace surfaces this as a small status row above the composer so
+    /// the user can see progress between text turns and can cancel.
+    private func postAgentStatus(text: String) {
+        Task { @MainActor in
+            self.browserModel?.setBrowserAgentStatus(text: text)
+        }
+    }
+
+    /// Stores the outcome of this run so subsequent prompts in the same
+    /// workspace conversation can be threaded together (the "talk like a
+    /// regular OpenClicky agent" path).
+    private func recordRunOutcome(prompt: String, summary: String) {
+        let cleanedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedSummary.isEmpty else { return }
+        Task { @MainActor in
+            self.browserModel?.recordBrowserAgentOutcome(prompt: prompt, summary: cleanedSummary)
+        }
     }
 
     // MARK: - Networking
@@ -637,14 +796,18 @@ final class OpenClickyBrowserAgentRunner {
         return json
     }
 
-    private func runWithAgentSDK(prompt: String) async {
+    private func runWithAgentSDK(prompt: String, priorTurns: [PriorTurn] = []) async {
         guard let model = browserModel else { return }
-        
-        var sdkHistory: [(userPlaceholder: String, assistantResponse: String)] = []
-        
+
+        // Seed the SDK conversation with prior workspace turns so the user can
+        // ask follow-ups even on this fallback path.
+        var sdkHistory: [(userPlaceholder: String, assistantResponse: String)] = priorTurns.map {
+            ("Earlier goal: \($0.userPrompt)", "Earlier outcome: \($0.assistantSummary)")
+        }
+
         var loopCount = 0
-        let maxLoops = 15
-        
+        let maxLoops = Self.maxAutonomousSteps
+
         var pageMeta = "No active page loaded yet."
         let tabContent = await getTabContentDetails()
         if let tabDetails = tabContent {
@@ -654,90 +817,98 @@ final class OpenClickyBrowserAgentRunner {
                 pageMeta += "\nSelected text: \(selection)"
             }
         }
-        
+
         let initialUserPrompt = "Goal: \(prompt)\n\nPage metadata:\n\(pageMeta)"
         var currentImages: [(data: Data, label: String)] = []
         if let screenshotData = await captureTabScreenshot() {
             currentImages.append((screenshotData, "current_screen"))
         }
-        
-        let sdkSystemPrompt = """
-        You are OpenClicky's Browser CUA (Computer Use Agent), specializing in browser automation.
-        Your job is to interact with the active browser tab to achieve the user's goal.
-        You can view the page visual layout using screenshots, locate and act on elements, and read page text.
 
-        To execute an action, you MUST reply with a JSON object of the form:
-        {
-          "tool": "tool_name",
-          "input": { ... }
-        }
+        // Reuse the shared plan-first system prompt, but augment it with the
+        // SDK's text-only tool-call protocol because this path can't return
+        // `tool_use` blocks natively.
+        let sdkSystemPrompt = Self.systemPrompt + """
 
-        Do not write any conversational text or explanations outside the JSON object when you want to execute a tool. Reply with ONLY the JSON object.
 
-        AVAILABLE TOOLS:
-        1. {"name": "navigate", "description": "Navigate to a URL.", "input_schema": {"properties": {"url": {"type": "string"}}, "required": ["url"]}}
-        2. {"name": "click", "description": "Click an element by CSS or text selector.", "input_schema": {"properties": {"selector": {"type": "string"}}, "required": ["selector"]}}
-        3. {"name": "click_at", "description": "Click at relative coordinate x, y.", "input_schema": {"properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"]}}
-        4. {"name": "type", "description": "Type text into selector.", "input_schema": {"properties": {"selector": {"type": "string"}, "text": {"type": "string"}}, "required": ["selector", "text"]}}
-        5. {"name": "press_key", "description": "Press a key (e.g. Enter).", "input_schema": {"properties": {"key": {"type": "string"}, "selector": {"type": "string"}}, "required": ["key"]}}
-        6. {"name": "scroll", "description": "Scroll the page.", "input_schema": {"properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "amount": {"type": "number"}, "selector": {"type": "string"}}, "required": ["direction"]}}
-        7. {"name": "wait_for", "description": "Wait for selector or text.", "input_schema": {"properties": {"selector": {"type": "string"}, "text": {"type": "string"}, "timeoutMs": {"type": "number"}}}}
-        8. {"name": "get_content", "description": "Get current page URL, title, and text content.", "input_schema": {}}
-
-        Example Response to click a button:
-        {
-          "tool": "click",
-          "input": {
-            "selector": "button#submit"
-          }
-        }
-
-        Once the user's goal has been achieved successfully, output a natural conversational response explaining that you are finished.
+        SDK CALL PROTOCOL
+        To execute a tool, reply with ONLY a JSON object of the form:
+        { "tool": "tool_name", "input": { ... } }
+        No prose, no markdown — JSON object only when you intend to call a tool.
+        When you finish, emit one final JSON object { "tool": "done", "input": { "summary": "..." } }.
         """
-        
+
         var nextUserPrompt = initialUserPrompt
-        
+        var lastAssistantText = ""
+        var explicitlyDone = false
+        var doneSummary: String?
+
         while loopCount < maxLoops {
             loopCount += 1
+            currentStep = loopCount
+
+            if cancelRequested {
+                postAgentStatus(text: "Stopped at step \(loopCount). The browser plan was cancelled.")
+                break
+            }
+
+            postAgentStatus(text: "Step \(loopCount)/\(maxLoops): thinking…")
+
+            // Periodic plan reminder on the SDK path too.
+            if loopCount > 1 && (loopCount - 1) % Self.planReminderInterval == 0 {
+                nextUserPrompt += "\n\nPlan check-in: we're on step \(loopCount) of \(maxLoops). Restate remaining steps, then continue. If done, emit the done tool."
+            }
+
             do {
                 let responseText = try await model.analyzeImageWithAgentSDK(
                     images: currentImages,
                     systemPrompt: sdkSystemPrompt,
                     conversationHistory: sdkHistory,
                     userPrompt: nextUserPrompt,
-                    onTextChunk: { chunk in
-                        // Can stream updates if needed
-                    }
+                    onTextChunk: { _ in }
                 )
-                
-                // Track this turn in sdkHistory
+
                 sdkHistory.append((nextUserPrompt, responseText))
-                
-                // Parse tool call from response
+                lastAssistantText = responseText
+
                 if let toolCall = parseJSONToolCall(from: responseText) {
-                    let toolName = toolCall.name
-                    let input = toolCall.input
-                    
-                    let toolResult = await executeTool(name: toolName, input: input)
-                    
-                    // Capture a new screenshot for the next step
+                    if toolCall.name == "done" {
+                        explicitlyDone = true
+                        doneSummary = (toolCall.input["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        break
+                    }
+
+                    postAgentStatus(text: "Step \(loopCount)/\(maxLoops): \(toolCall.name)")
+                    let toolResult = await executeTool(name: toolCall.name, input: toolCall.input)
+
                     currentImages.removeAll()
                     if let screenshotData = await captureTabScreenshot() {
                         currentImages.append((screenshotData, "current_screen"))
                     }
-                    
-                    nextUserPrompt = "Tool '\(toolName)' executed with result: \(toolResult.summary)"
+                    nextUserPrompt = "Tool '\(toolCall.name)' executed with result: \(toolResult.summary)"
                 } else {
-                    // No valid JSON tool call was parsed from responseText, so print response and stop
+                    // Plain text reply — treat as soft completion.
                     appendAgentMessage(text: responseText)
                     break
                 }
-                
             } catch {
-                appendAgentMessage(text: "I couldn't complete that in the browser. Check the selected browser model/API setup and try again.")
+                appendAgentMessage(text: "I couldn't complete that in the browser. Check the selected browser model/API setup and try again. (\(error.localizedDescription))")
                 break
             }
         }
+
+        if explicitlyDone, let summary = doneSummary, !summary.isEmpty {
+            appendAgentMessage(text: summary)
+            recordRunOutcome(prompt: prompt, summary: summary)
+        } else if cancelRequested {
+            recordRunOutcome(prompt: prompt, summary: "Cancelled by user at step \(loopCount).")
+        } else if loopCount >= maxLoops {
+            appendAgentMessage(text: "I hit the \(maxLoops)-step limit before finishing. Send a follow-up if you want me to keep going.")
+            recordRunOutcome(prompt: prompt, summary: "Stopped at the \(maxLoops)-step limit.")
+        } else if !lastAssistantText.isEmpty {
+            recordRunOutcome(prompt: prompt, summary: lastAssistantText)
+        }
+
+        postAgentStatus(text: "")
         
         if loopCount >= maxLoops {
             appendAgentMessage(text: "I couldn't finish that browser action within the step limit.")

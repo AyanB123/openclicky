@@ -538,6 +538,9 @@ private struct OpenClickyBrowserWorkspaceView: View {
             if !model.messages.isEmpty {
                 suggestionChips
             }
+            if model.isRunningBrowserPlan || !model.browserAgentStatus.isEmpty {
+                browserAgentStatusRow
+            }
             composer
         }
         .padding(14)
@@ -947,6 +950,37 @@ private struct OpenClickyBrowserWorkspaceView: View {
         .overlay(Capsule().stroke(glassBorder))
     }
 
+    private var browserAgentStatusRow: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.6)
+                .frame(width: 16, height: 16)
+            Text(model.browserAgentStatus.isEmpty ? "Browser agent is running…" : model.browserAgentStatus)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Button(action: { model.cancelBrowserAgent() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "stop.circle.fill")
+                    Text("Cancel")
+                }
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.red.opacity(0.78)))
+            }
+            .buttonStyle(.plain)
+            .help("Stop the running browser plan")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(glassInsetFill.opacity(0.7)))
+        .overlay(Capsule().stroke(glassBorder))
+    }
+
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
             VStack(alignment: .leading, spacing: 7) {
@@ -969,6 +1003,7 @@ private struct OpenClickyBrowserWorkspaceView: View {
                     composerIconButton("slash.forward", help: "Open slash commands") { composerText += "/" }
                     composerIconButton("cursorarrow.rays", help: model.isInspectorModeEnabled ? "Exit Inspector mode" : "Inspect page element") { model.toggleInspectorMode() }
                     composerIconButton("camera.viewfinder", help: "Attach page screenshot") { model.attachActiveTabScreenshot() }
+                    micButton
                 }
             }
             Button(action: sendPrototypeMessage) {
@@ -984,6 +1019,37 @@ private struct OpenClickyBrowserWorkspaceView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 15).fill(glassInsetFill.opacity(0.92)))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(accentBorder))
+    }
+
+    @ViewBuilder
+    private var micButton: some View {
+        let isActive = model.isVoiceDictationActive
+        Button(action: {
+            if isActive {
+                model.stopVoiceDictation()
+            } else {
+                let draft = composerText
+                model.startVoiceDictation(
+                    currentDraft: draft,
+                    updateDraft: { partial in
+                        composerText = partial
+                    },
+                    submitDraft: { finalText in
+                        composerText = finalText
+                        sendPrototypeMessage()
+                    }
+                )
+            }
+        }) {
+            Image(systemName: isActive ? "stop.circle.fill" : "mic.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(isActive ? Color.white : DS.Colors.textPrimary.opacity(0.82))
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(isActive ? Color.red.opacity(0.85) : glassSurfaceFill.opacity(0.78)))
+                .overlay(Circle().stroke(glassBorder))
+        }
+        .buttonStyle(.plain)
+        .help(isActive ? "Stop dictation" : "Push to talk — auto-submits when you stop")
     }
 
     private func composerIconButton(_ systemImage: String, help: String, action: @escaping () -> Void) -> some View {
@@ -1151,6 +1217,15 @@ protocol OpenClickyBrowserWorkspaceModelProtocol: AnyObject {
         userPrompt: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String
+
+    /// Posts a transient "what the browser agent is doing right now" line so
+    /// the workspace UI can show progress (and a Cancel button) between full
+    /// chat turns. Passing an empty string clears the status.
+    func setBrowserAgentStatus(text: String)
+
+    /// Records the outcome of an autonomous browser run so the workspace can
+    /// thread follow-up prompts (the conversational agent feel).
+    func recordBrowserAgentOutcome(prompt: String, summary: String)
 }
 
 @MainActor
@@ -1171,6 +1246,18 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
     @Published private(set) var attachments: [OpenClickyBrowserAttachment] = []
     @Published private(set) var inspectorSelections: [OpenClickyBrowserInspectorSelection] = []
     @Published private(set) var isInspectorModeEnabled = false
+
+    /// Transient one-liner shown above the composer while a CUA run is in
+    /// flight (e.g. "Step 4/40: click"). Empty when idle.
+    @Published private(set) var browserAgentStatus: String = ""
+
+    /// Conversational memory for the autonomous browser agent so users can
+    /// say follow-ups like "now try Amazon too" and have prior context.
+    private var browserAgentPriorTurns: [OpenClickyBrowserAgentRunner.PriorTurn] = []
+
+    /// Live reference to the running agent so `/stop` and the Cancel button
+    /// can request cooperative shutdown.
+    private var activeBrowserAgentRunner: OpenClickyBrowserAgentRunner?
 
     private var webViews: [UUID: WKWebView] = [:]
 
@@ -1869,6 +1956,28 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         return triggers.contains { lowercased.contains($0) }
     }
 
+    /// Returns true when the prompt looks like a single-intent, one-shot
+    /// instruction worth dispatching to the deterministic fast-paths
+    /// (research plan or direct page action). Multi-step prompts with
+    /// connectives or longer phrasing fall through to the CUA agent so it
+    /// can plan and act on its own.
+    private static func looksLikeSingleStepPrompt(_ prompt: String) -> Bool {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lower = trimmed.lowercased()
+        let connectives = [
+            " then ", " and then ", " after that ", " next, ", " next ",
+            " followed by ", "; ", " also "
+        ]
+        if connectives.contains(where: { lower.contains($0) }) {
+            return false
+        }
+
+        let wordCount = trimmed.split(whereSeparator: { $0.isWhitespace }).count
+        return wordCount <= 12
+    }
+
     func sendBrowserMessage(_ prompt: String, specialist: OpenClickyBrowserSpecialist) {
         refreshPageContext(for: activeTabID, trigger: "Message send")
         messages.append(OpenClickyBrowserChatMessage(role: "You", text: prompt, isUser: true))
@@ -1877,12 +1986,18 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
             return
         }
 
-        if let browserPlan = OpenClickyBrowserResearchPlan(prompt: prompt) {
+        // Only take the deterministic fast-paths for SHORT, SINGLE-INTENT
+        // prompts. Anything with multi-step connectives ("then", "and then",
+        // "after that", "next", ";") or more than ~12 words is sent to the
+        // CUA agent so it can plan and execute autonomously.
+        let isSingleStepPrompt = Self.looksLikeSingleStepPrompt(prompt)
+
+        if isSingleStepPrompt, let browserPlan = OpenClickyBrowserResearchPlan(prompt: prompt) {
             performBrowserResearchPlan(browserPlan)
             return
         }
 
-        if let directAction = OpenClickyBrowserDirectPageAction(prompt: prompt) {
+        if isSingleStepPrompt, let directAction = OpenClickyBrowserDirectPageAction(prompt: prompt) {
             performDirectPageAction(directAction)
             return
         }
@@ -1890,24 +2005,41 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         if !Self.needsBackgroundAgent(prompt) {
             let modelID = delegate?.getSelectedComputerUseModelID() ?? ""
             let usesAnthropicBrowserModel = delegate?.selectedComputerUseModelUsesAnthropic() ?? false
-            let hasSDK = usesAnthropicBrowserModel && self.hasAgentSDK()
             let apiKey = delegate?.getAnthropicAPIKey() ?? ""
-            if usesAnthropicBrowserModel && (hasSDK || !apiKey.isEmpty) {
+            let sdkAvailable = self.hasAgentSDK()
+
+            // The CUA agent can run whenever we have a usable provider — the
+            // direct Anthropic HTTP path (needs an Anthropic key) OR the
+            // Claude Agent SDK fallback (which the host configures with its
+            // own credentials). The "is the selected model tagged Anthropic"
+            // flag is informational — if the SDK is wired we can still drive
+            // the browser through it.
+            let canRunCUA = !apiKey.isEmpty || sdkAvailable
+
+            if canRunCUA {
+                // Always pass the user's selected computer-use model ID
+                // through. The runner's HTTP path needs an Anthropic-valid
+                // ID; the SDK fallback accepts whatever the host configured.
+                let effectiveModel = modelID
                 isRunningBrowserPlan = true
+                browserAgentStatus = "Starting browser agent…"
+                let history = browserAgentPriorTurns
                 Task {
-                    let agent = OpenClickyBrowserAgentRunner(apiKey: apiKey, modelName: modelID, browserModel: self)
-                    await agent.run(prompt: prompt)
+                    let agent = OpenClickyBrowserAgentRunner(apiKey: apiKey, modelName: effectiveModel, browserModel: self)
+                    await MainActor.run { self.activeBrowserAgentRunner = agent }
+                    await agent.run(prompt: prompt, priorTurns: history)
                     await MainActor.run {
+                        self.activeBrowserAgentRunner = nil
                         self.isRunningBrowserPlan = false
+                        self.browserAgentStatus = ""
                     }
                 }
             } else {
+                // No usable provider — be honest about why instead of
+                // dumping page text or claiming capability we don't have.
+                let diagnostic = "I can't run the autonomous browser agent because OpenClicky has no Anthropic API key and no Claude Agent SDK configured. Add an Anthropic API key in Settings (or sign into the Claude Agent SDK) and try again."
                 messages.append(
-                    OpenClickyBrowserChatMessage(
-                        role: "OpenClicky",
-                        text: inlineBrowserReply(for: prompt),
-                        isUser: false
-                    )
+                    OpenClickyBrowserChatMessage(role: "OpenClicky", text: diagnostic, isUser: false)
                 )
             }
             return
@@ -1955,8 +2087,64 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         case "/clear":
             clearChat()
             return true
+        case "/stop", "/cancel":
+            if isRunningBrowserPlan, activeBrowserAgentRunner != nil {
+                cancelBrowserAgent()
+            } else {
+                messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Nothing is running right now.", isUser: false))
+            }
+            return true
         default:
             return false
+        }
+    }
+
+    /// Cooperatively cancels the active browser agent run. The runner exits
+    /// at the next loop boundary and the workspace clears its status row.
+    func cancelBrowserAgent() {
+        guard let runner = activeBrowserAgentRunner else { return }
+        runner.cancel()
+        browserAgentStatus = "Cancelling browser agent…"
+        messages.append(OpenClickyBrowserChatMessage(role: "OpenClicky", text: "Cancelling the browser plan…", isUser: false))
+    }
+
+    // MARK: - OpenClickyBrowserWorkspaceModelProtocol (status + history)
+
+    func setBrowserAgentStatus(text: String) {
+        browserAgentStatus = text
+    }
+
+    // MARK: - Voice dictation passthrough
+
+    var isVoiceDictationActive: Bool {
+        delegate?.isBrowserWorkspaceDictationActive() ?? false
+    }
+
+    func startVoiceDictation(
+        currentDraft: String,
+        updateDraft: @escaping @MainActor (String) -> Void,
+        submitDraft: @escaping @MainActor (String) -> Void
+    ) {
+        delegate?.startBrowserWorkspaceDictation(
+            currentDraft: currentDraft,
+            updateDraft: updateDraft,
+            submitDraft: submitDraft
+        )
+    }
+
+    func stopVoiceDictation() {
+        delegate?.stopBrowserWorkspaceDictation()
+    }
+
+    func recordBrowserAgentOutcome(prompt: String, summary: String) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty, !trimmedSummary.isEmpty else { return }
+        browserAgentPriorTurns.append(.init(userPrompt: trimmedPrompt, assistantSummary: trimmedSummary))
+        // Cap conversational memory to the last 8 turns to keep token usage
+        // bounded on long sessions.
+        if browserAgentPriorTurns.count > 8 {
+            browserAgentPriorTurns.removeFirst(browserAgentPriorTurns.count - 8)
         }
     }
 

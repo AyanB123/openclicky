@@ -13994,10 +13994,23 @@ extension CompanionManager: BrowserWorkspaceAgentDelegate {
         return codexAgentSessions.contains(where: { $0.id == id })
     }
 
+    /// True when OpenClicky has SOME local provider wired for the Browser
+    /// Workspace CUA loop — either the Claude Agent SDK or the Codex bridge.
+    /// The browser workspace uses this to decide whether to start the
+    /// autonomous agent, regardless of which display model the user picked.
     public func hasAgentSDK() -> Bool {
-        return claudeAgentSDKAPI != nil
+        if claudeAgentSDKAPI != nil { return true }
+        // Codex is always available once a Codex model is selected — the
+        // session itself owns the bridge state.
+        let provider = OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModel).provider
+        if provider == .codex { return true }
+        return false
     }
 
+    /// Provider-aware dispatch used by the Browser Workspace CUA fallback
+    /// when no Anthropic API key is configured. Routes to:
+    /// - Codex bridge when the selected computer-use model is a Codex model.
+    /// - Claude Agent SDK otherwise (when available).
     public func analyzeImageWithAgentSDK(
         images: [(data: Data, label: String)],
         systemPrompt: String,
@@ -14005,18 +14018,41 @@ extension CompanionManager: BrowserWorkspaceAgentDelegate {
         userPrompt: String,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        guard let sdk = claudeAgentSDKAPI else {
-            throw NSError(domain: "CompanionManager", code: -404, userInfo: [NSLocalizedDescriptionKey: "Claude Agent SDK not available."])
+        let modelOption = OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModel)
+
+        switch modelOption.provider {
+        case .codex:
+            // Route through the existing Codex voice/vision bridge so the
+            // browser agent works on a pure Codex setup (no Anthropic key,
+            // no Claude SDK required).
+            codexVoiceSession.model = modelOption.id
+            let (text, _) = try await codexVoiceSession.analyzeImageStreaming(
+                images: images,
+                systemPrompt: systemPrompt,
+                conversationHistory: conversationHistory,
+                userPrompt: userPrompt,
+                onTextChunk: onTextChunk
+            )
+            return text
+
+        case .anthropic, .openAI, .deepgram:
+            guard let sdk = claudeAgentSDKAPI else {
+                throw NSError(
+                    domain: "CompanionManager",
+                    code: -404,
+                    userInfo: [NSLocalizedDescriptionKey: "No local provider is available for the Browser Workspace agent. Sign into the Claude Agent SDK or pick a Codex model."]
+                )
+            }
+            sdk.model = modelOption.id
+            let (text, _) = try await sdk.analyzeImageStreaming(
+                images: images,
+                systemPrompt: systemPrompt,
+                conversationHistory: conversationHistory,
+                userPrompt: userPrompt,
+                onTextChunk: onTextChunk
+            )
+            return text
         }
-        sdk.model = selectedComputerUseModel
-        let (text, _) = try await sdk.analyzeImageStreaming(
-            images: images,
-            systemPrompt: systemPrompt,
-            conversationHistory: conversationHistory,
-            userPrompt: userPrompt,
-            onTextChunk: onTextChunk
-        )
-        return text
     }
 
     public func getAnthropicAPIKey() -> String {
@@ -14029,6 +14065,36 @@ extension CompanionManager: BrowserWorkspaceAgentDelegate {
 
     public func selectedComputerUseModelUsesAnthropic() -> Bool {
         return OpenClickyModelCatalog.computerUseModel(withID: selectedComputerUseModel).provider == .anthropic
+    }
+
+    // MARK: - Voice dictation for the Browser Workspace
+
+    public func isBrowserWorkspaceDictationActive() -> Bool {
+        buddyDictationManager.isRecordingFromMicrophoneButton
+            || buddyDictationManager.isPreparingToRecord
+            || buddyDictationManager.isFinalizingTranscript
+    }
+
+    public func startBrowserWorkspaceDictation(
+        currentDraft: String,
+        updateDraft: @escaping @MainActor (String) -> Void,
+        submitDraft: @escaping @MainActor (String) -> Void
+    ) {
+        Task { @MainActor in
+            await self.buddyDictationManager.startAutoSubmittingDictationFromMicrophoneButton(
+                currentDraftText: currentDraft,
+                updateDraftText: { text in
+                    Task { @MainActor in updateDraft(text) }
+                },
+                submitDraftText: { text in
+                    Task { @MainActor in submitDraft(text) }
+                }
+            )
+        }
+    }
+
+    public func stopBrowserWorkspaceDictation() {
+        buddyDictationManager.stopPersistentDictationFromMicrophoneButton()
     }
 }
 
