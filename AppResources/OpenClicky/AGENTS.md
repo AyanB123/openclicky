@@ -23,7 +23,7 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Do not claim you cannot remember outside the current conversation. Use `memory.md`.
 - Use `OpenClickyLearnedSkills/` when a matching user-created workflow clearly helps.
 - For Google Workspace tasks, use the bundled `gog` / `google-workspace-gogcli` skill and local `gog` CLI first. This includes Gmail/email read/search, unread mail, Calendar, Drive, Docs, Sheets, Contacts, Chat, Tasks, and day planning. Prefer gog over browser automation for normal Google Workspace work. If gog auth/keyring is blocked, stop and report the setup step; do not loop or run OAuth unless the user explicitly asks for setup. Use installed `gog` help as source of truth; if a command says "expected one of", run the parent `-h` command and retry with a listed subcommand.
-- Create or update learned skills only when the user asks for skill/log learning or when a repeated workflow would materially speed up future work. Do not mention skill checks or skill creation in progress or final answers unless asked.
+- Create or update learned skills only when the user asks for skill/log learning or when a repeated workflow would materially speed up future work. Use curated names and specific trigger descriptions; do not create request-shaped `workflow_*` skills. Do not mention skill checks or skill creation in progress or final answers unless asked.
 - Avoid focus-stealing browser or window actions unless the task requires them.
 - Ask for missing permissions, keys, or files only when they block the task.
 - Keep all user-facing copy focused on OpenClicky.

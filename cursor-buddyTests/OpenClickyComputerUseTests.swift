@@ -76,9 +76,42 @@ struct OpenClickyComputerUseTests {
         )
         #expect(
             CompanionManager.testLocalAppOpenTarget(
+                from: "Can you open Spotify and can you play AC/DC Back to Black?"
+            ) == "Spotify"
+        )
+        #expect(
+            CompanionManager.testLocalAppOpenTarget(
                 from: "Open Chrome and go to amazon.co.uk"
             ) == nil
         )
+    }
+
+    @Test func spokenPlayButtonRequestsMapToARealKey() throws {
+        #expect(CompanionManager.testNativeKeyPress(from: "Press play in Spotify.")?.key == "space")
+        #expect(CompanionManager.testNativeKeyPress(from: "Press the play button in Spotify.")?.key == "space")
+        #expect(CompanionManager.testNativeKeyPress(from: "Press play in Spotify.")?.modifiers == [])
+        #expect(CompanionManager.testNativeKeyPress(from: "Press command k in Spotify.")?.key == "k")
+        #expect(CompanionManager.testNativeKeyPress(from: "Press command k in Spotify.")?.modifiers == ["command"])
+    }
+
+    @Test func compositeAppCommandsPreserveTheFollowUpAction() throws {
+        let spotifyAction = CompanionManager.testCompositeAppAction(
+            from: "Open Spotify and play AC/DC Back in Black."
+        )
+        #expect(spotifyAction?.appName == "Spotify")
+        #expect(spotifyAction?.actionText == "play AC/DC Back in Black")
+
+        let politeSpotifyAction = CompanionManager.testCompositeAppAction(
+            from: "Open Spotify and can you play AC/DC Back in Black?"
+        )
+        #expect(politeSpotifyAction?.appName == "Spotify")
+        #expect(politeSpotifyAction?.actionText == "play AC/DC Back in Black")
+
+        let mailAction = CompanionManager.testCompositeAppAction(
+            from: "Open Mail and search for invoices."
+        )
+        #expect(mailAction?.appName == "Mail")
+        #expect(mailAction?.actionText == "search for invoices")
     }
 
     @Test func realtimeTwoIsTheDefaultVoiceInteractionModel() throws {

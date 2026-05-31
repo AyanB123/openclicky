@@ -250,9 +250,7 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
     private static func isBenignStderrLine(_ line: String) -> Bool {
         let benignMarkers = [
             "http://127.0.0.1:7778/mcp",
-            "mcpServer/startupStatus/updated",
-            "failed to load skill",
-            "invalid description: exceeds maximum length"
+            "mcpServer/startupStatus/updated"
         ]
         let lower = line.lowercased()
         return benignMarkers.contains { lower.contains($0.lowercased()) }

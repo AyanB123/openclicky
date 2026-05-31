@@ -526,7 +526,7 @@ final class CodexHomeManager {
         - Do not tell the user that you cannot remember outside the current conversation. Read and update this file instead.
         - Store stable preferences, useful facts, active project context, and concise task outcomes.
         - Keep entries short and useful. Prefer durable context over raw logs.
-        - When a task reveals a repeatable workflow, create or update a skill in `OpenClickyLearnedSkills/<workflow_name>/SKILL.md`.
+        - When a task reveals a repeatable workflow, create or update a curated skill in `OpenClickyLearnedSkills/<specific_workflow_name>/SKILL.md`. Do not create request-shaped `workflow_*` skills.
         """
     }
 
@@ -598,7 +598,7 @@ final class CodexHomeManager {
 
         - Read `memory.md` before work and update it with stable user preferences, project facts, task outcomes, and useful workflow context.
         - OpenClicky's persona is inlined into `AGENTS.md` in the Codex home under "## OpenClicky Persona (SOUL)". Treat it as identity; do not open `SOUL.md` separately.
-        - Use or update learned skills when explicitly useful, especially when the user asks to inspect, optimize, or learn from skills/logs. Do not surface learned-skill work in normal task progress unless asked.
+        - Use or update learned skills when explicitly useful, especially when the user asks to inspect, optimize, or learn from skills/logs. Use curated names and specific trigger descriptions; do not create request-shaped `workflow_*` skills. Do not surface learned-skill work in normal task progress unless asked.
         - When optimizing skills, prompts, memory files, logs-derived notes, or other OpenClicky artifacts, archive the previous version under \(archivesDirectory.path) before replacing it. Do not delete old versions.
         - When learning from logs, create the needed memory entries, review notes, or learned skills, then archive superseded notes or skills instead of deleting them.
         - Read log review comments when the user asks to review, tune, or fix behavior from logs.

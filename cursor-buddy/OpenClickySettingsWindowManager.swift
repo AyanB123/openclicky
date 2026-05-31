@@ -624,24 +624,7 @@ struct OpenClickySettingsView: View {
 
                 if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .openAI,
                    OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
-                    Picker("Realtime voice", selection: Binding(
-                        get: {
-                            userOpenAIRealtimeVoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? "marin"
-                                : userOpenAIRealtimeVoiceID
-                        },
-                        set: {
-                            userOpenAIRealtimeVoiceID = $0
-                            companionManager.setOpenAIRealtimeVoiceID($0)
-                        }
-                    )) {
-                        ForEach(Self.openAIRealtimeVoiceIDs, id: \.self) { voiceID in
-                            Text(voiceID.capitalized).tag(voiceID)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
+                    openAIRealtimeVoicePicker
                 }
 
                 if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .deepgram {
@@ -956,6 +939,31 @@ struct OpenClickySettingsView: View {
             ?? companionManager.selectedModel
     }
 
+    private var openAIRealtimeVoiceSelection: Binding<String> {
+        Binding(
+            get: {
+                userOpenAIRealtimeVoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "marin"
+                    : userOpenAIRealtimeVoiceID
+            },
+            set: {
+                userOpenAIRealtimeVoiceID = $0
+                companionManager.setOpenAIRealtimeVoiceID($0)
+            }
+        )
+    }
+
+    private var openAIRealtimeVoicePicker: some View {
+        Picker("Realtime voice", selection: openAIRealtimeVoiceSelection) {
+            ForEach(Self.openAIRealtimeVoiceIDs, id: \.self) { voiceID in
+                Text(voiceID.capitalized).tag(voiceID)
+            }
+        }
+        .pickerStyle(.menu)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
     private var apiKeysPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             settingsGroup("OpenAI and Claude") {
@@ -980,6 +988,17 @@ struct OpenClickySettingsView: View {
                         set: { userAnthropicAPIKey = $0; companionManager.setAnthropicAPIKey($0) }
                     )
                 )
+
+                Divider()
+                    .opacity(0.45)
+
+                Text("When GPT Realtime is selected in Voice, OpenClicky uses this OpenAI voice for live spoken replies.")
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+
+                openAIRealtimeVoicePicker
             }
 
             settingsGroup("Listening providers") {

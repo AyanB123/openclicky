@@ -386,6 +386,8 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
     private var pendingAssistantDeltaFlushTask: Task<Void, Never>?
     private var hasInitializedProcess = false
     private var lastSubmittedPrompt: String?
+    private var latestAssistantResponseForCompletedTurn: String?
+    private var hasPersistedCompletedTurnMemory = false
     var lastSubmittedPromptText: String? {
         lastSubmittedPrompt
     }
@@ -534,6 +536,8 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         }
 
         lastSubmittedPrompt = prompt
+        latestAssistantResponseForCompletedTurn = nil
+        hasPersistedCompletedTurnMemory = false
         entries.append(CodexTranscriptEntry(role: .user, text: prompt))
         OpenClickyMessageLogStore.shared.appendConversationTurn(
             lane: "agent",
@@ -682,7 +686,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         - If the user asks about widgets or desktop task/status display, read the widget snapshot file to understand the current widget state.
         - Do not say you cannot remember outside the current conversation. Use the persistent memory file.
         - Update persistent memory only for stable preferences, useful project facts, task outcomes, or workflow context that will clearly help future sessions.
-        - Use or update learned skills only when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Do not mention skill creation in progress or final answers unless the user asked about skills.
+        - Use or update learned skills only when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Create curated skills directly with specific names; do not create request-shaped `workflow_*` skills. Do not mention skill creation in progress or final answers unless the user asked about skills.
         - When working on the OpenClicky app repo, do not run terminal `xcodebuild`. Use Xcode for app builds and permission testing, and use `swiftc -parse <relevant Swift source files>` for lightweight Swift syntax checks.
         - Proceed autonomously. Choose sensible defaults and keep working without asking the user unless critical information is truly missing or the action would be destructive, credential-related, or permission-sensitive.
         - Voice is the primary interaction path. Keep user-facing progress and final answers concise enough to be spoken aloud, and put detailed logs or code context in the transcript when needed.
@@ -758,7 +762,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
 
         Persistent memory is available. Read \(preparedLayout.persistentMemoryFile.path) before task work, then update it only when useful durable context is learned. Never tell the user you cannot remember outside the current conversation; use this memory file instead.
 
-        Learned skills live at \(preparedLayout.learnedSkillsDirectory.path). Use or update them when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Do not announce learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
+        Learned skills live at \(preparedLayout.learnedSkillsDirectory.path). Use or update them when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Create curated skills directly with specific names; do not create request-shaped `workflow_*` skills. Do not announce learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
 
         Message logs are stored in \(OpenClickyMessageLogStore.shared.logDirectory.path). The current JSONL log is \(OpenClickyMessageLogStore.shared.currentLogFile.path). Log review comments are available at \(OpenClickyMessageLogStore.shared.agentReviewCommentsFile.path), with JSONL comments at \(OpenClickyMessageLogStore.shared.reviewCommentsFile.path). When the user asks you to fix issues discovered from logs, read those files and treat each comment as actionable review context.
 
@@ -900,6 +904,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             status = .ready
             progressStage = .completed
             appendActivityStatusLine("Finished the agent loop")
+            persistCompletedTurnMemoryIfNeeded()
             Task { await OpenClickyAgentFileLeaseCoordinator.shared.releaseLeases(for: id) }
             currentLeasePaths = []
             if !queuedFollowUpPrompts.isEmpty {
@@ -1072,6 +1077,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                 }
                 let visibleText = parsed.visibleText
                 if !visibleText.isEmpty {
+                    latestAssistantResponseForCompletedTurn = visibleText
                     upsertEntry(id: id, role: .assistant, text: visibleText)
                     OpenClickyMessageLogStore.shared.appendConversationTurn(
                         lane: "agent",
@@ -1096,7 +1102,6 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                     if let fileURL = Self.firstOpenableFileURL(in: visibleText) {
                         onOpenableFileFound?(fileURL)
                     }
-                    persistCompletedTurnMemory(agentResponse: visibleText)
                 }
             }
             currentAssistantEntryID = nil
@@ -1252,8 +1257,12 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             guard let delta = pendingAssistantDeltas.removeValue(forKey: id), !delta.isEmpty else { continue }
             if let index = entries.firstIndex(where: { $0.id == id }) {
                 entries[index].text += delta
+                if entries[index].role == .assistant {
+                    latestAssistantResponseForCompletedTurn = entries[index].text
+                }
             } else {
                 entries.append(CodexTranscriptEntry(id: id, role: .assistant, text: delta))
+                latestAssistantResponseForCompletedTurn = delta
             }
         }
     }
@@ -1292,6 +1301,16 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedLine.isEmpty else { return }
         if Self.isNonFatalCodexRuntimeStderrLine(trimmedLine) {
+            if Self.isSkillLoadDiagnosticLine(trimmedLine) {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "agent",
+                    direction: "internal",
+                    event: "openclicky.skill_load.warning",
+                    fields: [
+                        "line": trimmedLine
+                    ]
+                )
+            }
             return
         }
 
@@ -1327,12 +1346,32 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         return false
     }
 
+    private static func isSkillLoadDiagnosticLine(_ line: String) -> Bool {
+        let normalized = line
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        return normalized.contains("failed to load skill")
+            || normalized.contains("invalid description")
+            || normalized.contains("exceeds maximum length")
+    }
+
     // Note: the agent-done chime is no longer played from this class.
     // `CompanionManager.playAgentDoneChimeAfterCurrentTTS()` owns it so
     // it can be sequenced behind any in-flight TTS playback.
 
-    private func persistCompletedTurnMemory(agentResponse: String) {
+    private func persistCompletedTurnMemoryIfNeeded() {
+        guard !hasPersistedCompletedTurnMemory else { return }
         guard let lastSubmittedPrompt else { return }
+        guard let rawAgentResponse = latestAssistantResponseForCompletedTurn?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return
+        }
+        let agentResponse = Self.strippingAgentResponseMetadata(from: rawAgentResponse)
+        guard !agentResponse.isEmpty else {
+            return
+        }
+
+        hasPersistedCompletedTurnMemory = true
 
         do {
             try homeManager.appendPersistentMemoryEvent(
@@ -1347,12 +1386,6 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
 
     private func createLearnedSkillIfApplicable(userRequest: String, agentResponse: String) throws {
         let normalizedRequest = userRequest
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-        let normalizedResponse = agentResponse
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-        let normalizedCombined = "\(userRequest) \(agentResponse)"
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
 
@@ -1390,19 +1423,9 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             return
         }
 
-        guard let workflow = reusableWorkflowTemplateIfRequested(
-            userRequest: userRequest,
-            agentResponse: agentResponse,
-            normalizedRequest: normalizedRequest,
-            normalizedResponse: normalizedResponse,
-            normalizedCombined: normalizedCombined
-        ) else { return }
-        try homeManager.createLearnedSkillIfNeeded(
-            name: workflow.name,
-            title: workflow.title,
-            description: workflow.description,
-            body: workflow.body
-        )
+        // Generic request-shaped workflow capture was intentionally removed:
+        // agents should create curated learned skills directly when the task
+        // warrants it, not archive every successful prompt as `workflow_*`.
     }
 
     private func isNoteWorkflow(requestText: String) -> Bool {
@@ -1423,341 +1446,6 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         ]
         return noteIntentPhrases.contains { requestText.contains($0) }
     }
-
-    private func reusableWorkflowTemplateIfRequested(
-        userRequest: String,
-        agentResponse: String,
-        normalizedRequest: String,
-        normalizedResponse: String,
-        normalizedCombined: String
-    ) -> (name: String, title: String, description: String, body: String)? {
-        let requestSummary = oneLineSnippet(from: userRequest, maxLength: 160)
-        let responseSummary = oneLineSnippet(from: agentResponse, maxLength: 180)
-
-        if isReusableWorkflowSignal(normalizedCombined) {
-            return workflowTemplate(
-                requestSummary: requestSummary,
-                responseSummary: responseSummary,
-                trigger: "explicit"
-            )
-        }
-
-        guard isLikelyReusableWorkflow(
-            requestText: normalizedRequest,
-            responseText: normalizedResponse,
-            combinedText: normalizedCombined
-        ) else {
-            return nil
-        }
-
-        return workflowTemplate(
-            requestSummary: requestSummary,
-            responseSummary: responseSummary,
-            trigger: "implicit"
-        )
-    }
-
-    private func workflowTemplate(
-        requestSummary: String,
-        responseSummary: String,
-        trigger: String
-    ) -> (name: String, title: String, description: String, body: String) {
-        let triggerHint = trigger == "explicit" ? "for explicit reuse request" : "for an inferred repeated workflow pattern"
-        let name = "workflow_\(skillSlug(from: requestSummary))"
-
-        return (
-            name: name,
-            title: "Workflow: \(requestSummary)",
-            description: "Captured workflow for a repeated task or process the user can reuse",
-            body: """
-            ## Goal
-
-            Capture a repeatable version of this task so future OpenClicky sessions can reuse it.
-
-            ## Source request
-
-            - User request: \(requestSummary)
-            - Observed response summary: \(responseSummary)
-
-            ## Trigger condition
-
-            The user workflow was recorded as reusable because OpenClicky detected \(triggerHint).
-
-            ## Workflow
-
-            1. Follow the exact intent from the source request above.
-            2. Preserve user preferences, project context, and durable constraints from memory.
-            3. If an environment step is risky or destructive, confirm with the user before proceeding.
-            4. Keep the completion note concise and mention what changed.
-            """
-        )
-    }
-
-    private func isLikelyReusableWorkflow(requestText: String, responseText: String, combinedText: String) -> Bool {
-        guard !isLikelyInformationalQuery(requestText) else { return false }
-
-        let actionSignals = [
-            "create",
-            "make",
-            "run",
-            "set up",
-            "setup",
-            "configure",
-            "update",
-            "generate",
-            "export",
-            "import",
-            "backup",
-            "restore",
-            "install",
-            "archive",
-            "cleanup",
-            "clean",
-            "build",
-            "deploy",
-            "send",
-            "apply",
-            "save",
-            "switch",
-            "open",
-            "close",
-            "launch",
-            "start",
-            "stop",
-            "restart",
-            "copy",
-            "move",
-            "rename"
-        ]
-
-        let targetSignals = [
-            "project",
-            "repo",
-            "repository",
-            "app",
-            "application",
-            "workflow",
-            "script",
-            "automation",
-            "notes",
-            "note",
-            "profile",
-            "setup",
-            "setting",
-            "settings",
-            "preference",
-            "config",
-            "configuration",
-            "environment",
-            "workspace",
-            "menu",
-            "window",
-            "file",
-            "folder",
-            "screen",
-            "task",
-            "pipeline",
-            "release",
-            "build",
-            "test",
-            "suite"
-        ]
-
-        let commandSignals = [
-            " cd ",
-            " npm ",
-            " node ",
-            " swift ",
-            " python ",
-            " pytest ",
-            " xcodebuild ",
-            " git ",
-            " docker ",
-            " make ",
-            " rg ",
-            " find ",
-            " ls ",
-            " grep ",
-            " chmod ",
-            " sudo "
-        ]
-
-        let workflowStructureSignals = [
-            " step",
-            " step:",
-            " then ",
-            " first,",
-            " next,",
-            " finally",
-            " after",
-            " before",
-            " once done"
-        ]
-
-        var score = 0
-        score += actionSignals.contains(where: { requestText.contains($0) }) ? 3 : 0
-        score += targetSignals.contains(where: { requestText.contains($0) }) ? 2 : 0
-        score += commandSignals.contains(where: { combinedText.contains($0) }) ? 2 : 0
-        score += workflowStructureSignals.contains(where: { requestText.contains($0) }) ? 1 : 0
-
-        if isLikelyProceduralPhrase(requestText) {
-            score += 2
-        }
-
-        // avoid capturing tiny single-line commands that are likely one-off answers
-        if requestText.count < 36 {
-            score -= 2
-        }
-
-        if responseText.contains("error") || responseText.contains("cannot") || responseText.contains("unable") {
-            score += 1
-        }
-
-        if responseText.contains("summary:") || responseText.contains("steps:") {
-            score += 1
-        }
-
-        return score >= 5
-    }
-
-    private func isLikelyInformationalQuery(_ text: String) -> Bool {
-        let informationalSignals = [
-            "what is",
-            "what are",
-            "how does",
-            "how do",
-            "how can",
-            "why did",
-            "explain",
-            "list ",
-            "show me",
-            "tell me",
-            "difference between",
-            "where is",
-            "where are",
-            "can you explain",
-            "i want to know",
-            "i need to know",
-            "what would",
-            "help me understand"
-        ]
-
-        return informationalSignals.contains(where: { text.contains($0) })
-    }
-
-    private func isLikelyProceduralPhrase(_ text: String) -> Bool {
-        let proceduralSignals = [
-            "if",
-            "once",
-            "after",
-            "before",
-            "when",
-            "until",
-            "while"
-        ]
-
-        var matches = 0
-        for signal in proceduralSignals {
-            if text.contains(signal) {
-                matches += 1
-            }
-        }
-        return matches >= 2
-    }
-
-
-
-    private func isReusableWorkflowSignal(_ text: String) -> Bool {
-        let explicitSignals = [
-            "save this as a skill",
-            "save this as a workflow",
-            "remember this",
-            "for next time",
-            "for the future",
-            "next time",
-            "repeat this",
-            "repeat these",
-            "repeatable",
-            "create a skill",
-            "make this a skill",
-            "capture this",
-            "capture this workflow",
-            "reusable workflow",
-            "workflow for the future",
-            "create a workflow",
-            "make it a skill",
-            "keep this as a skill",
-            "always do this",
-            "every time",
-            "standard procedure",
-            "standard process"
-        ]
-
-        guard explicitSignals.contains(where: { text.contains($0) }) else {
-            return false
-        }
-
-        let actionSignals = [
-            "create",
-            "make",
-            "run",
-            "set up",
-            "setup",
-            "configure",
-            "update",
-            "open",
-            "generate",
-            "export",
-            "import",
-            "backup",
-            "restore",
-            "install",
-            "archive",
-            "cleanup",
-            "clean",
-            "build",
-            "deploy",
-            "send",
-            "remember",
-            "reuse",
-            "repeat",
-            "use",
-            "apply",
-            "save"
-        ]
-
-        return actionSignals.contains(where: { text.contains($0) })
-    }
-
-    private func skillSlug(from title: String) -> String {
-        let folded = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-        let lowered = folded.lowercased()
-        let pieces = lowered
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !pieces.isEmpty else { return "workflow" }
-        return pieces.joined(separator: "_").trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-    }
-
-    private func oneLineSnippet(from text: String, maxLength: Int) -> String {
-        let flattened = text
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-
-        guard maxLength > 0 else { return "" }
-        guard flattened.count > maxLength else { return flattened }
-        let endIndex = flattened.index(flattened.startIndex, offsetBy: maxLength)
-        let prefix = String(flattened[..<endIndex])
-        if let lastSpace = prefix.lastIndex(of: " ") {
-            return "\(prefix[..<lastSpace])..."
-        }
-        return "\(prefix)..."
-    }
-
 
     private static func userFacingAgentMessage(from text: String) -> String {
         let visibleText = strippingAgentResponseMetadata(from: text)

@@ -61,7 +61,7 @@ nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
                 let header = """
                 # OpenClicky Log Review Comments
 
-                Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, user comment, and raw JSONL entry.
+                Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, status, user comment, and raw JSONL entry. Keep status current when a note is fixed or verified.
                 """
                 try Data(header.utf8).write(to: agentReviewCommentsFile, options: [.atomic])
             }
@@ -94,7 +94,7 @@ nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
                 let header = """
                 # OpenClicky Log Review Comments
 
-                Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, user comment, and raw JSONL entry.
+                Agents should read this file when the user asks to fix issues flagged from message logs. Each entry includes the source log file, source line, status, user comment, and raw JSONL entry. Keep status current when a note is fixed or verified.
                 """
                 try Data(header.utf8).write(to: agentReviewCommentsFile, options: [.atomic])
             }
@@ -114,6 +114,9 @@ nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
                 "lane": lane,
                 "direction": direction,
                 "event": event,
+                "status": "open",
+                "fixedBy": "",
+                "verifiedAt": "",
                 "comment": trimmedComment,
                 "rawEntry": Self.truncated(rawEntry, maxLength: 20_000)
             ]
@@ -131,6 +134,9 @@ nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
             - Entry timestamp: \(entryTimestamp)
             - Lane: \(lane)
             - Direction: \(direction)
+            - Status: open
+            - Fixed by:
+            - Verified at:
 
             Comment:
             \(trimmedComment)

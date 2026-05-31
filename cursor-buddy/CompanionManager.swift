@@ -134,6 +134,12 @@ private struct OpenClickyMessagesSearchRequest {
     let instruction: String
 }
 
+private struct OpenClickyCompositeAppActionRequest {
+    let appName: String
+    let actionText: String
+    let instruction: String
+}
+
 nonisolated private struct OpenClickyLocalAutomationResult: Sendable {
     let output: String
     let errorOutput: String
@@ -4193,6 +4199,13 @@ final class CompanionManager: ObservableObject {
             return
         }
 
+        if Self.compositeAppActionRequest(from: trimmedTranscript) != nil {
+            // Composite app commands need the final transcript so the
+            // action is complete. Do not let the live-partial open-app
+            // shortcut swallow the action as just "Open <app>."
+            return
+        }
+
         if let appOpenRequest = Self.localAppOpenRequest(from: trimmedTranscript) {
             let fingerprint = Self.directComputerUseFingerprint(kind: "app", value: appOpenRequest.appName)
             guard !liveHandledComputerUseFingerprints.contains(fingerprint) else { return }
@@ -4441,6 +4454,30 @@ final class CompanionManager: ObservableObject {
             } else {
                 openRequestedFolder(folderRequest)
             }
+            return true
+        }
+
+        if let compositeRequest = Self.compositeAppActionRequest(from: transcript) {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "agent",
+                direction: "incoming",
+                event: "openclicky.agent_task.composite_app_action_route",
+                fields: [
+                    "source": source,
+                    "transcript": transcript,
+                    "executor": "agent_mode",
+                    "route": "agent.composite_app_action",
+                    "appName": compositeRequest.appName,
+                    "actionText": compositeRequest.actionText,
+                    "requestID": activeRequestTiming?.requestID ?? "none"
+                ]
+            )
+            startVoiceAgentTask(
+                instruction: Self.compositeAppActionAgentInstruction(from: compositeRequest),
+                acknowledgement: "i’ll do the app action, not just open the app.",
+                route: "agent.composite_app_action",
+                voiceContextUserTranscript: transcript
+            )
             return true
         }
 
@@ -7390,6 +7427,16 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
+        if let compositeRequest = Self.compositeAppActionRequest(from: instruction) {
+            startVoiceAgentTask(
+                instruction: Self.compositeAppActionAgentInstruction(from: compositeRequest),
+                acknowledgement: "i’ll do the app action, not just open the app.",
+                route: "agent.composite_app_action",
+                voiceContextUserTranscript: instruction
+            )
+            return true
+        }
+
         if let appOpenRequest = Self.localAppOpenRequest(from: instruction) {
             _ = openRequestedApplication(appOpenRequest)
             return true
@@ -8643,6 +8690,68 @@ final class CompanionManager: ObservableObject {
         return url.host ?? url.absoluteString
     }
 
+    private static func compositeAppActionRequest(from transcript: String) -> OpenClickyCompositeAppActionRequest? {
+        let candidate = normalizedCommandCandidate(from: transcript)
+        guard !candidate.isEmpty else { return nil }
+        guard !isExplicitAgentRoutingCandidate(candidate) else { return nil }
+
+        let patterns = [
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+(?:and|then)\s+(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#,
+            #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)\s+to\s+(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+            guard let match = regex.firstMatch(in: candidate, range: range),
+                  let appRange = Range(match.range(at: 1), in: candidate),
+                  let actionRange = Range(match.range(at: 2), in: candidate) else {
+                continue
+            }
+
+            let rawAppName = String(candidate[appRange])
+            let actionText = cleanedCompositeAppActionText(String(candidate[actionRange]))
+            let appName = normalizedApplicationName(from: rawAppName)
+            guard !appName.isEmpty,
+                  !actionText.isEmpty,
+                  !isReservedAgentOpenTarget(rawAppName),
+                  !isLocalAppOpenPlaceholder(appName),
+                  !isLikelyFileOrFolderOpenTarget(rawAppName),
+                  !isLikelyWebOpenTarget(rawAppName),
+                  !isLikelyBrowserNavigationAction(actionText) else {
+                continue
+            }
+
+            return OpenClickyCompositeAppActionRequest(
+                appName: appName,
+                actionText: actionText,
+                instruction: candidate
+            )
+        }
+
+        return nil
+    }
+
+    private static func cleanedCompositeAppActionText(_ rawActionText: String) -> String {
+        var actionText = rawActionText.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
+        actionText = actionText.replacingOccurrences(
+            of: #"(?i)^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?"#,
+            with: "",
+            options: .regularExpression
+        )
+        return actionText.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
+    }
+
+    private static func isLikelyBrowserNavigationAction(_ actionText: String) -> Bool {
+        let normalized = normalizedSpokenCommandText(actionText)
+        let pattern = #"\b(?:go\s+to|navigate\s+to|browse\s+to|visit|open\s+(?:the\s+)?(?:website|web\s*site|webpage|web\s*page|url|site))\b"#
+        return normalized.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func compositeAppActionAgentInstruction(from request: OpenClickyCompositeAppActionRequest) -> String {
+        "Use OpenClicky's available app automation, installed skills/connectors, or selected computer-use path to complete this full app action. Open \(request.appName) if needed, then perform this action in \(request.appName): \(request.actionText). Do not report success after only opening the app. Original request: \(request.instruction)"
+    }
+
     private static func localAppOpenRequest(from transcript: String) -> OpenClickyAppOpenRequest? {
         let trimmedTranscript = normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
@@ -9632,8 +9741,8 @@ final class CompanionManager: ObservableObject {
     private static func cleanedApplicationOpenTarget(_ rawTarget: String) -> String {
         var target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
         let trailingActionPatterns = [
-            #"(?i)\s+(?:and|then)\s+(?:play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose|go\s+to|navigate\s+to|browse\s+to|visit)\b.*$"#,
-            #"(?i)\s+to\s+(?:play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose)\b.*$"#
+            #"(?i)\s+(?:and|then)\s+(?:(?:can|could|would|will)\s+you\s+)?(?:play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose|go\s+to|navigate\s+to|browse\s+to|visit)\b.*$"#,
+            #"(?i)\s+to\s+(?:(?:can|could|would|will)\s+you\s+)?(?:play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose)\b.*$"#
         ]
         for pattern in trailingActionPatterns {
             target = target.replacingOccurrences(
@@ -10016,7 +10125,7 @@ final class CompanionManager: ObservableObject {
             guard let match = regex.firstMatch(in: candidate, range: range),
                   let keyRange = Range(match.range(at: 1), in: candidate) else { continue }
 
-            let rawKeySpec = String(candidate[keyRange])
+            let rawKeySpec = cleanedNativeKeySpecTargetContext(String(candidate[keyRange]))
                 .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
             guard let parsed = parsedNativeKeySpec(from: rawKeySpec) else { return nil }
 
@@ -10028,6 +10137,16 @@ final class CompanionManager: ObservableObject {
         }
 
         return nil
+    }
+
+    private static func cleanedNativeKeySpecTargetContext(_ rawKeySpec: String) -> String {
+        rawKeySpec
+            .replacingOccurrences(
+                of: #"(?i)\s+(?:in|inside|within|to)\s+(?:the\s+)?[a-z0-9][a-z0-9\s&'’.-]*(?:\s+(?:app|application|window))?\s*$"#,
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func parsedNativeKeySpec(from rawKeySpec: String) -> (key: String, modifiers: [String])? {
@@ -10054,7 +10173,7 @@ final class CompanionManager: ObservableObject {
                 modifiers.append("option")
             case "shift":
                 modifiers.append("shift")
-            case "the", "key":
+            case "the", "key", "button":
                 break
             default:
                 keyTokens.append(token)
@@ -10063,11 +10182,15 @@ final class CompanionManager: ObservableObject {
 
         let key = keyTokens.joined()
         guard !key.isEmpty, !["key", "button"].contains(key) else { return nil }
-        return (key: normalizedNativeKeyName(key), modifiers: modifiers)
+        let normalizedKey = normalizedNativeKeyName(key)
+        guard isSupportedNativeKeyName(normalizedKey) else { return nil }
+        return (key: normalizedKey, modifiers: modifiers)
     }
 
     private static func normalizedNativeKeyName(_ key: String) -> String {
         switch key {
+        case "play", "pause", "playpause", "playorpause":
+            return "space"
         case "return":
             return "enter"
         case "spacebar":
@@ -10085,6 +10208,33 @@ final class CompanionManager: ObservableObject {
         default:
             return key
         }
+    }
+
+    private static func isSupportedNativeKeyName(_ key: String) -> Bool {
+        if key.count == 1,
+           let scalar = key.unicodeScalars.first,
+           CharacterSet.alphanumerics.contains(scalar) {
+            return true
+        }
+
+        let supportedNames: Set<String> = [
+            "return", "enter",
+            "tab",
+            "space",
+            "delete", "backspace",
+            "forwarddelete", "del",
+            "escape", "esc",
+            "left", "leftarrow",
+            "right", "rightarrow",
+            "down", "downarrow",
+            "up", "uparrow",
+            "home", "end",
+            "pageup", "pagedown",
+            "f1", "f2", "f3", "f4",
+            "f5", "f6", "f7", "f8",
+            "f9", "f10", "f11", "f12"
+        ]
+        return supportedNames.contains(key)
     }
 
     private static func applicationBundleIdentifiers(for appName: String) -> [String] {
@@ -14854,6 +15004,16 @@ extension CompanionManager {
 
     static func testLocalAppOpenTarget(from transcript: String) -> String? {
         localAppOpenRequest(from: transcript)?.appName
+    }
+
+    static func testNativeKeyPress(from transcript: String) -> (key: String, modifiers: [String])? {
+        guard let request = nativeKeyPressRequest(from: transcript) else { return nil }
+        return (request.key, request.modifiers)
+    }
+
+    static func testCompositeAppAction(from transcript: String) -> (appName: String, actionText: String)? {
+        guard let request = compositeAppActionRequest(from: transcript) else { return nil }
+        return (request.appName, request.actionText)
     }
 }
 #endif

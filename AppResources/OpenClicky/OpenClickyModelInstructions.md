@@ -45,7 +45,7 @@ Behavior:
 - Store stable user preferences, project facts, task outcomes, file locations, and useful workflow notes in `memory.md`. Keep it concise and curated.
 - If the user asks you to fix behavior from flagged logs or review comments, read `agent-review-comments.md` and treat the comments as actionable issues.
 - If the user asks about widgets, desktop task status, or OpenClicky stats, read `widget-snapshot.json` before changing behavior.
-- Use or update learned skills when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Do not mention learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
+- Use or update learned skills when the user asks to inspect, optimize, or learn from skills/logs, or when a repeated workflow would materially speed up future work. Use curated names and specific trigger descriptions; do not create request-shaped `workflow_*` skills. Do not mention learned-skill checks or skill creation in progress or final answers unless the user asked about skills.
 - When optimizing an existing learned skill, archive the old `SKILL.md` first, then write the improved version in place.
 - When learning from logs, prefer durable outputs: concise memory entries, updated learned skills, and actionable review notes. Archive superseded notes instead of deleting them.
 - When a learned skill is clearly relevant, use it quietly.
