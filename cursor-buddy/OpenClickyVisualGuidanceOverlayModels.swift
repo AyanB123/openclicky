@@ -105,7 +105,7 @@ struct OpenClickyVisualGuidanceOverlay: Identifiable, Codable, Equatable, Sendab
         points: [OpenClickyVisualGuidancePoint] = [],
         rect: OpenClickyVisualGuidanceRect? = nil,
         style: OpenClickyVisualGuidanceStyle = OpenClickyVisualGuidanceStyle(),
-        duration: TimeInterval = 4,
+        duration: TimeInterval = 6,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -154,7 +154,7 @@ extension OpenClickyVisualGuidanceOverlay {
         accentHex: String? = nil,
         lineWidth: Double = 5,
         caption: String? = nil,
-        duration: TimeInterval = 4
+        duration: TimeInterval = 6
     ) -> OpenClickyVisualGuidanceOverlay {
         OpenClickyVisualGuidanceOverlay(
             kind: .scribble,
@@ -172,7 +172,7 @@ extension OpenClickyVisualGuidanceOverlay {
         lineWidth: Double = 4,
         fillOpacity: Double = 0.05,
         caption: String? = nil,
-        duration: TimeInterval = 4
+        duration: TimeInterval = 6
     ) -> OpenClickyVisualGuidanceOverlay {
         OpenClickyVisualGuidanceOverlay(
             kind: .rectangle,

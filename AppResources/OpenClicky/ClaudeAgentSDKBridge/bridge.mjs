@@ -232,6 +232,12 @@ try {
     cwd: process.env.OPENCLICKY_CLAUDE_CWD || process.cwd(),
     systemPrompt: process.env.OPENCLICKY_CLAUDE_SYSTEM_PROMPT || "You are OpenClicky.",
     pathToClaudeCodeExecutable: process.env.OPENCLICKY_CLAUDE_EXECUTABLE,
+    // Auto-approve the read-only web tools so the voice lane can answer
+    // live/current questions inline (weather, prices, news) instead of
+    // handing every factual turn to a background agent. allowedTools only
+    // auto-approves these; all other tools (Bash/Read/Write/Edit/...) still
+    // fall through to permissionMode and stay blocked on a voice turn.
+    allowedTools: ["WebSearch", "WebFetch"],
     permissionMode: allowDangerousPermissions ? "bypassPermissions" : "default",
     allowDangerouslySkipPermissions: allowDangerousPermissions,
     dangerouslyDisableSandbox: allowDangerousPermissions,

@@ -113,7 +113,7 @@ nonisolated enum AppBundleConfiguration {
     }
 
     static func mcpComposioConnectEnabled() -> Bool {
-        userDefaultsBool(forKey: userMCPComposioConnectEnabledDefaultsKey, defaultValue: true)
+        userDefaultsBool(forKey: userMCPComposioConnectEnabledDefaultsKey, defaultValue: false)
     }
 
     static func mcpComputerUseEnabled() -> Bool {

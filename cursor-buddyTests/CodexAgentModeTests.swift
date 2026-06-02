@@ -23,8 +23,10 @@ struct CodexAgentModeTests {
         #expect(rendered.contains("bundled_skills_dir = \"OpenClickyBundledSkills\""))
         #expect(rendered.contains("enabled = true"))
         #expect(rendered.contains("https://developers.openai.com/mcp"))
-        #expect(rendered.contains("[mcp_servers.composio]"))
-        #expect(rendered.contains("https://connect.composio.dev/mcp"))
+        #expect(!rendered.contains("[mcp_servers.composio]"))
+        #expect(!rendered.contains("https://connect.composio.dev/mcp"))
+        #expect(!rendered.contains("[mcp_servers.openClickyControl]"))
+        #expect(!rendered.contains("http://127.0.0.1:32123/mcp"))
     }
 
     @Test func codexConfigCanPreferAPIKeyForDefaultOpenAIWhenConfigured() throws {
@@ -116,6 +118,36 @@ struct CodexAgentModeTests {
 
         #expect(!rendered.contains("[mcp_servers.composio]"))
         #expect(!rendered.contains("https://connect.composio.dev/mcp"))
+    }
+
+    @Test func codexConfigCanEnableComposioConnectMCPServer() throws {
+        let template = ClickyCodexConfigTemplate(
+            model: "gpt-5.5",
+            reasoningEffort: "medium",
+            workerBaseURL: URL(string: "https://api.openai.com/v1")!,
+            includeOpenAIDeveloperDocsMCP: false,
+            includeComposioConnectMCP: true
+        )
+
+        let rendered = template.render()
+
+        #expect(rendered.contains("[mcp_servers.composio]"))
+        #expect(rendered.contains("https://connect.composio.dev/mcp"))
+    }
+
+    @Test func codexConfigCanEnableOpenClickyControlMCPServer() throws {
+        let template = ClickyCodexConfigTemplate(
+            model: "gpt-5.5",
+            reasoningEffort: "medium",
+            workerBaseURL: URL(string: "https://api.openai.com/v1")!,
+            includeOpenAIDeveloperDocsMCP: false,
+            includeOpenClickyControlMCP: true
+        )
+
+        let rendered = template.render()
+
+        #expect(rendered.contains("[mcp_servers.openClickyControl]"))
+        #expect(rendered.contains("http://127.0.0.1:32123/mcp"))
     }
 
     @Test func cuaDriverMCPConfigurationPrefersExplicitOpenClickyOverride() throws {

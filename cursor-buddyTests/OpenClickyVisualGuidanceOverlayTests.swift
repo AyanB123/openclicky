@@ -132,6 +132,7 @@ struct OpenClickyVisualGuidanceOverlayTests {
         #expect(rectangle.elementLabel == "error block")
         #expect(rectangle.screenNumber == 2)
         #expect(rectangle.visualOverlay?.kind == .rectangle)
+        #expect(rectangle.visualOverlay?.duration == 6)
         #expect(rectangle.visualOverlay?.rect == OpenClickyVisualGuidanceRect(x: 10, y: 20, width: 300, height: 140))
 
         let scribble = CompanionManager.parsePointingCoordinates(
@@ -141,6 +142,7 @@ struct OpenClickyVisualGuidanceOverlayTests {
         #expect(scribble.coordinate == nil)
         #expect(scribble.elementLabel == "flight path")
         #expect(scribble.visualOverlay?.kind == .scribble)
+        #expect(scribble.visualOverlay?.duration == 6)
         #expect(scribble.visualOverlay?.points.map(\.cgPoint) == [
             CGPoint(x: 1, y: 2),
             CGPoint(x: 30, y: 40),
@@ -148,13 +150,45 @@ struct OpenClickyVisualGuidanceOverlayTests {
         ])
     }
 
+    @Test func voiceLaneStripsPartialVisualGuidanceTagsFromSpeech() throws {
+        #expect(CompanionManager.stripTrailingVisualGuidanceTagFragment("that area there. [RECT:10,20") == "that area there.")
+        #expect(CompanionManager.stripTrailingVisualGuidanceTagFragment("trace here. [SCRIBBLE:1,2;") == "trace here.")
+        #expect(CompanionManager.stripTrailingVisualGuidanceTagFragment("look there. [POINT:12") == "look there.")
+        #expect(CompanionManager.stripTrailingVisualGuidanceTagFragment("literal bracket [note") == "literal bracket [note")
+    }
+
     @Test func voiceLaneRoutesShapeDrawingRequestsToScreenContext() throws {
         #expect(CompanionManager.testShouldAttachScreenContext(to: "draw a circle around that button"))
         #expect(CompanionManager.testShouldAttachScreenContext(to: "can you put a rectangle around the error"))
         #expect(CompanionManager.testShouldAttachScreenContext(to: "box around the login panel"))
         #expect(CompanionManager.testShouldAttachScreenContext(to: "trace around that shape"))
+        #expect(CompanionManager.testShouldAttachScreenContext(to: "let's calibrate the screen"))
+        #expect(CompanionManager.testShouldAttachScreenContext(to: "can we calibrate our screens"))
 
         #expect(!CompanionManager.testShouldAttachScreenContext(to: "draw me a cheerful mascot idea"))
         #expect(!CompanionManager.testShouldAttachScreenContext(to: "mark this task as done later"))
+    }
+
+    @Test func calibrationAnchorsAveragePerScreenCoordinateOffset() throws {
+        let displayFrame = CGRect(x: 10, y: 20, width: 1440, height: 900)
+        CompanionManager.testResetVisualGuidanceCalibration(for: displayFrame)
+        defer { CompanionManager.testResetVisualGuidanceCalibration(for: displayFrame) }
+
+        #expect(CompanionManager.testIsVisualGuidanceCalibrationCaption("calibration anchor"))
+        #expect(CompanionManager.testIsVisualGuidanceCalibrationCaption("window anchor"))
+        #expect(!CompanionManager.testIsVisualGuidanceCalibrationCaption("normal highlight"))
+
+        let firstOffset = CompanionManager.testUpdateVisualGuidanceCalibrationOffset(
+            delta: CGSize(width: 12, height: -6),
+            for: displayFrame
+        )
+        #expect(firstOffset == CGSize(width: 12, height: -6))
+
+        let secondOffset = CompanionManager.testUpdateVisualGuidanceCalibrationOffset(
+            delta: CGSize(width: 4, height: 2),
+            for: displayFrame
+        )
+        #expect(secondOffset == CGSize(width: 8, height: -2))
+        #expect(CompanionManager.testVisualGuidanceCalibrationOffset(for: displayFrame) == CGSize(width: 8, height: -2))
     }
 }

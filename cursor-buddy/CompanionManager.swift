@@ -53,6 +53,10 @@ final class CursorOverlayState: ObservableObject {
     @Published var externalPrimaryCaptionAccentHex: String?
     @Published var externalSecondaryCursors: [OpenClickyExternalProxyCursor] = []
     @Published var visualGuidanceOverlays: [OpenClickyVisualGuidanceOverlay] = []
+    @Published var visualGuidanceInteractionFrames: [UUID: [CGRect]] = [:]
+    @Published var activeVisualGuidanceDragOverlayID: UUID?
+    @Published var activeControlGlowRect: CGRect?
+    @Published var activeControlGlowLabel: String?
 }
 
 enum ClickyAgentDockStatus: Equatable {
@@ -963,7 +967,7 @@ final class CompanionManager: ObservableObject {
         guard !trimmedText.isEmpty else { return }
         if let last = homeChatEntries.last,
            last.role == role,
-           Self.normalizedSpokenCommandText(last.text) == Self.normalizedSpokenCommandText(trimmedText),
+           SpokenText.normalizedSpokenCommandText(last.text) == SpokenText.normalizedSpokenCommandText(trimmedText),
            Date().timeIntervalSince(last.createdAt) < 4 {
             return
         }
@@ -1073,7 +1077,7 @@ final class CompanionManager: ObservableObject {
         now: Date = Date()
     ) -> [(userPlaceholder: String, assistantResponse: String)] {
         var history = baseHistory
-        var seenPrompts = Set(history.map { normalizedSpokenCommandText($0.userPlaceholder) })
+        var seenPrompts = Set(history.map { SpokenText.normalizedSpokenCommandText($0.userPlaceholder) })
         let candidates: [(String?, Date?)] = [
             (previousPrompt, previousPromptAt),
             (lastPrompt, lastPromptAt)
@@ -1086,7 +1090,7 @@ final class CompanionManager: ObservableObject {
                 continue
             }
             let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            let normalizedCandidate = normalizedSpokenCommandText(trimmedCandidate)
+            let normalizedCandidate = SpokenText.normalizedSpokenCommandText(trimmedCandidate)
             guard !trimmedCandidate.isEmpty,
                   !seenPrompts.contains(normalizedCandidate),
                   !isReferentialAgentInstruction(trimmedCandidate) else {
@@ -1195,7 +1199,7 @@ final class CompanionManager: ObservableObject {
         if let lastVoiceUserTranscript,
            let lastVoiceUserTranscriptAt,
            Date().timeIntervalSince(lastVoiceUserTranscriptAt) < 2,
-           Self.normalizedSpokenCommandText(lastVoiceUserTranscript) == Self.normalizedSpokenCommandText(trimmedTranscript) {
+           SpokenText.normalizedSpokenCommandText(lastVoiceUserTranscript) == SpokenText.normalizedSpokenCommandText(trimmedTranscript) {
             return
         }
 
@@ -1339,6 +1343,9 @@ final class CompanionManager: ObservableObject {
     private var externalPrimaryCursorMoveTask: Task<Void, Never>?
     private var externalSecondaryCursorClearTasks: [UUID: Task<Void, Never>] = [:]
     private var visualGuidanceOverlayClearTasks: [UUID: Task<Void, Never>] = [:]
+    private var visualGuidanceKeyboardCorrectionStartRects: [UUID: CGRect] = [:]
+    private var visualGuidanceKeyboardCorrectionCommitTasks: [UUID: Task<Void, Never>] = [:]
+    private var activeControlGlowClearTask: Task<Void, Never>?
     private var agentStatusCancellables: [UUID: AnyCancellable] = [:]
     private var agentActivityCancellables: [UUID: AnyCancellable] = [:]
     private var agentLoopActivityCancellables: [UUID: AnyCancellable] = [:]
@@ -2434,7 +2441,12 @@ final class CompanionManager: ObservableObject {
         let desktopBounds = NSScreen.screens.reduce(CGRect.null) { partial, screen in
             partial.union(screen.frame)
         }
-        let clampedOverlay = overlay.clamped(to: desktopBounds)
+        var clampedOverlay = overlay.clamped(to: desktopBounds)
+        if clampedOverlay.kind == .rectangle {
+            clampedOverlay.duration = max(clampedOverlay.duration, 30)
+        } else {
+            clampedOverlay.duration = max(clampedOverlay.duration, 20)
+        }
         guard clampedOverlay.isRenderable else { return }
         cursorOverlayState.visualGuidanceOverlays.removeAll { $0.id == clampedOverlay.id }
         cursorOverlayState.visualGuidanceOverlays.append(clampedOverlay)
@@ -2453,7 +2465,318 @@ final class CompanionManager: ObservableObject {
     private func removeVisualGuidanceOverlay(_ id: UUID) {
         visualGuidanceOverlayClearTasks[id]?.cancel()
         visualGuidanceOverlayClearTasks[id] = nil
+        visualGuidanceKeyboardCorrectionCommitTasks[id]?.cancel()
+        visualGuidanceKeyboardCorrectionCommitTasks[id] = nil
+        visualGuidanceKeyboardCorrectionStartRects[id] = nil
         cursorOverlayState.visualGuidanceOverlays.removeAll { $0.id == id }
+        cursorOverlayState.visualGuidanceInteractionFrames[id] = nil
+        if cursorOverlayState.activeVisualGuidanceDragOverlayID == id {
+            cursorOverlayState.activeVisualGuidanceDragOverlayID = nil
+        }
+    }
+
+    private func showActiveControlGlow(
+        around rect: CGRect?,
+        label: String? = nil,
+        duration: TimeInterval = 2.4
+    ) {
+        let desktopBounds = NSScreen.screens.reduce(CGRect.null) { partial, screen in
+            partial.union(screen.frame)
+        }
+        let fallbackRect = NSScreen.screen(containingOrNearestTo: NSEvent.mouseLocation)?.frame
+            ?? NSScreen.main?.frame
+        let candidateRect = (rect?.isNull == false ? rect : fallbackRect) ?? .null
+        let clampedRect = candidateRect.intersection(desktopBounds)
+        guard !clampedRect.isNull,
+              clampedRect.width > 8,
+              clampedRect.height > 8 else {
+            return
+        }
+
+        cursorOverlayState.activeControlGlowRect = clampedRect
+        let trimmedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        cursorOverlayState.activeControlGlowLabel = trimmedLabel.isEmpty ? nil : trimmedLabel
+        showCursorOverlayIfAvailable()
+
+        activeControlGlowClearTask?.cancel()
+        activeControlGlowClearTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(0.4, min(duration, 12)) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await MainActor.run {
+                self?.clearActiveControlGlow()
+            }
+        }
+    }
+
+    private func showActiveControlGlowForFocusedWindowOrScreen(
+        label: String? = nil,
+        duration: TimeInterval = 2.4
+    ) {
+        let focusedWindow = OpenClickyComputerUseWindowEnumerator.frontmostTargetWindow()
+        showActiveControlGlow(
+            around: focusedWindow.flatMap { Self.appKitScreenRect(fromComputerUseWindowBounds: $0.bounds) },
+            label: label ?? focusedWindow?.displayTitle,
+            duration: duration
+        )
+    }
+
+    private func clearActiveControlGlow() {
+        activeControlGlowClearTask?.cancel()
+        activeControlGlowClearTask = nil
+        cursorOverlayState.activeControlGlowRect = nil
+        cursorOverlayState.activeControlGlowLabel = nil
+    }
+
+    private static func appKitScreenRect(fromComputerUseWindowBounds bounds: OpenClickyComputerUseWindowBounds) -> CGRect? {
+        let quartzRect = CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height)
+        guard !quartzRect.isNull,
+              quartzRect.width > 1,
+              quartzRect.height > 1 else {
+            return nil
+        }
+
+        let matchedScreen = NSScreen.screens.first { screen in
+            guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+                return false
+            }
+            return CGDisplayBounds(displayID).intersects(quartzRect)
+        } ?? NSScreen.screens.first { screen in
+            screen.frame.intersects(quartzRect)
+        }
+
+        guard let screen = matchedScreen else {
+            return quartzRect
+        }
+
+        guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return quartzRect
+        }
+
+        let quartzFrame = CGDisplayBounds(displayID)
+        let localX = quartzRect.minX - quartzFrame.minX
+        let localYFromTop = quartzRect.minY - quartzFrame.minY
+        return CGRect(
+            x: screen.frame.minX + localX,
+            y: screen.frame.maxY - localYFromTop - quartzRect.height,
+            width: quartzRect.width,
+            height: quartzRect.height
+        )
+    }
+
+    private static func controlTargetGlowRect(centeredOn point: CGPoint, within displayFrame: CGRect?) -> CGRect {
+        let sidePaddingRect = CGRect(
+            x: point.x - 70,
+            y: point.y - 45,
+            width: 140,
+            height: 90
+        )
+        guard let displayFrame,
+              !displayFrame.isNull else {
+            return sidePaddingRect
+        }
+
+        return sidePaddingRect.intersection(displayFrame)
+    }
+
+    func setVisualGuidanceInteractionFrames(_ frames: [CGRect], for overlayID: UUID) {
+        cursorOverlayState.visualGuidanceInteractionFrames[overlayID] = frames
+    }
+
+    func setVisualGuidanceDragActive(_ overlayID: UUID?) {
+        cursorOverlayState.activeVisualGuidanceDragOverlayID = overlayID
+    }
+
+
+    func nudgeVisualGuidanceCalibrationRectangle(keyCode: CGKeyCode, shiftHeld: Bool) -> Bool {
+        let step: CGFloat = shiftHeld ? 10 : 1
+        let delta: CGSize
+        switch keyCode {
+        case 123: // Left arrow
+            delta = CGSize(width: -step, height: 0)
+        case 124: // Right arrow
+            delta = CGSize(width: step, height: 0)
+        case 125: // Down arrow
+            delta = CGSize(width: 0, height: -step)
+        case 126: // Up arrow
+            delta = CGSize(width: 0, height: step)
+        default:
+            return false
+        }
+
+        guard let overlay = cursorOverlayState.visualGuidanceOverlays.first(where: { overlay in
+            overlay.kind == .rectangle && Self.isVisualGuidanceCalibrationCaption(overlay.style.caption)
+        }),
+        let currentRect = overlay.rect?.normalized.cgRect else {
+            return false
+        }
+
+        let nudgedRect = currentRect.offsetBy(dx: delta.width, dy: delta.height)
+        let correctionStartRect = visualGuidanceKeyboardCorrectionStartRects[overlay.id] ?? currentRect
+        visualGuidanceKeyboardCorrectionStartRects[overlay.id] = correctionStartRect
+        updateVisualGuidanceRectangle(
+            id: overlay.id,
+            to: nudgedRect,
+            commitsCorrection: false
+        )
+        scheduleVisualGuidanceKeyboardCorrectionCommit(
+            overlayID: overlay.id,
+            correctionStartRect: correctionStartRect
+        )
+        return true
+    }
+
+    private func scheduleVisualGuidanceKeyboardCorrectionCommit(overlayID: UUID, correctionStartRect: CGRect) {
+        visualGuidanceKeyboardCorrectionCommitTasks[overlayID]?.cancel()
+        visualGuidanceKeyboardCorrectionCommitTasks[overlayID] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 850_000_000)
+            await MainActor.run {
+                guard let self,
+                      let index = self.cursorOverlayState.visualGuidanceOverlays.firstIndex(where: { $0.id == overlayID }),
+                      let currentRect = self.cursorOverlayState.visualGuidanceOverlays[index].rect?.normalized.cgRect else {
+                    return
+                }
+                self.visualGuidanceKeyboardCorrectionCommitTasks[overlayID] = nil
+                self.visualGuidanceKeyboardCorrectionStartRects[overlayID] = nil
+                self.recordVisualGuidanceRectangleCorrection(
+                    overlayID: overlayID,
+                    previousRect: correctionStartRect,
+                    correctedRect: currentRect,
+                    caption: self.cursorOverlayState.visualGuidanceOverlays[index].style.caption
+                )
+            }
+        }
+    }
+
+    func updateVisualGuidanceRectangle(
+        id: UUID,
+        to screenRect: CGRect,
+        commitsCorrection: Bool,
+        correctionStartRect: CGRect? = nil
+    ) {
+        let desktopBounds = NSScreen.screens.reduce(CGRect.null) { partial, screen in
+            partial.union(screen.frame)
+        }
+        guard let index = cursorOverlayState.visualGuidanceOverlays.firstIndex(where: { $0.id == id }),
+              let previousRect = cursorOverlayState.visualGuidanceOverlays[index].rect?.normalized.cgRect else {
+            return
+        }
+
+        let correctedRect = OpenClickyVisualGuidanceRect(screenRect)
+            .normalized
+            .clamped(to: desktopBounds)
+            .cgRect
+        guard correctedRect.width > 1, correctedRect.height > 1 else { return }
+
+        cursorOverlayState.visualGuidanceOverlays[index].rect = OpenClickyVisualGuidanceRect(correctedRect)
+        if commitsCorrection {
+            recordVisualGuidanceRectangleCorrection(
+                overlayID: id,
+                previousRect: correctionStartRect ?? previousRect,
+                correctedRect: correctedRect,
+                caption: cursorOverlayState.visualGuidanceOverlays[index].style.caption
+            )
+        }
+
+        // Give the user time to finish the adjustment after the first touch.
+        let overlay = cursorOverlayState.visualGuidanceOverlays[index]
+        visualGuidanceOverlayClearTasks[id]?.cancel()
+        visualGuidanceOverlayClearTasks[id] = Task { [weak self] in
+            let nanoseconds = UInt64(max(30, overlay.duration) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            await MainActor.run {
+                self?.removeVisualGuidanceOverlay(id)
+            }
+        }
+    }
+
+    private func recordVisualGuidanceRectangleCorrection(
+        overlayID: UUID,
+        previousRect: CGRect,
+        correctedRect: CGRect,
+        caption: String?
+    ) {
+        let centerDelta = hypot(correctedRect.midX - previousRect.midX, correctedRect.midY - previousRect.midY)
+        let sizeDelta = hypot(correctedRect.width - previousRect.width, correctedRect.height - previousRect.height)
+        let correctionMagnitude = max(centerDelta, sizeDelta * 0.5)
+
+        let defaults = UserDefaults.standard
+        let countKey = "openclicky.visualGuidance.rectangleCorrection.count"
+        let toleranceKey = "openclicky.visualGuidance.rectangleCorrection.tolerancePoints"
+        let averageKey = "openclicky.visualGuidance.rectangleCorrection.averageMagnitude"
+
+        let oldCount = defaults.integer(forKey: countKey)
+        let newCount = oldCount + 1
+        let previousAverage = oldCount > 0 ? defaults.double(forKey: averageKey) : correctionMagnitude
+        let newAverage = ((previousAverage * Double(oldCount)) + correctionMagnitude) / Double(max(newCount, 1))
+        let previousTolerance = defaults.object(forKey: toleranceKey) == nil ? 18.0 : defaults.double(forKey: toleranceKey)
+        let newTolerance = min(96, max(6, previousTolerance * 0.70 + correctionMagnitude * 0.30))
+
+        defaults.set(newCount, forKey: countKey)
+        defaults.set(newAverage, forKey: averageKey)
+        defaults.set(newTolerance, forKey: toleranceKey)
+        recordVisualGuidanceCalibrationIfNeeded(
+            overlayID: overlayID,
+            previousRect: previousRect,
+            correctedRect: correctedRect,
+            caption: caption
+        )
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "visual_guidance",
+            direction: "incoming",
+            event: "openclicky.visual_guidance.rectangle_corrected",
+            fields: [
+                "overlayID": overlayID.uuidString,
+                "label": caption ?? "",
+                "previousX": Int(previousRect.minX.rounded()),
+                "previousY": Int(previousRect.minY.rounded()),
+                "previousWidth": Int(previousRect.width.rounded()),
+                "previousHeight": Int(previousRect.height.rounded()),
+                "correctedX": Int(correctedRect.minX.rounded()),
+                "correctedY": Int(correctedRect.minY.rounded()),
+                "correctedWidth": Int(correctedRect.width.rounded()),
+                "correctedHeight": Int(correctedRect.height.rounded()),
+                "centerDeltaPoints": Int(centerDelta.rounded()),
+                "sizeDeltaPoints": Int(sizeDelta.rounded()),
+                "learnedTolerancePoints": Int(newTolerance.rounded()),
+                "correctionCount": newCount
+            ]
+        )
+    }
+
+    private func recordVisualGuidanceCalibrationIfNeeded(
+        overlayID: UUID,
+        previousRect: CGRect,
+        correctedRect: CGRect,
+        caption: String?
+    ) {
+        guard Self.isVisualGuidanceCalibrationCaption(caption) else { return }
+
+        let predictedCenter = CGPoint(x: previousRect.midX, y: previousRect.midY)
+        let correctedCenter = CGPoint(x: correctedRect.midX, y: correctedRect.midY)
+        let delta = CGSize(
+            width: correctedCenter.x - predictedCenter.x,
+            height: correctedCenter.y - predictedCenter.y
+        )
+        let screenFrame = NSScreen.screen(containingOrNearestTo: correctedCenter)?.frame
+            ?? NSScreen.screen(containingOrNearestTo: predictedCenter)?.frame
+            ?? correctedRect
+        let calibration = Self.updatedVisualGuidanceCalibrationOffset(delta: delta, for: screenFrame)
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "visual_guidance",
+            direction: "incoming",
+            event: "openclicky.visual_guidance.calibration_updated",
+            fields: [
+                "overlayID": overlayID.uuidString,
+                "screenKey": calibration.screenKey,
+                "sampleDeltaX": Int(delta.width.rounded()),
+                "sampleDeltaY": Int(delta.height.rounded()),
+                "offsetX": Int(calibration.offset.width.rounded()),
+                "offsetY": Int(calibration.offset.height.rounded()),
+                "sampleCount": calibration.count
+            ]
+        )
     }
 
     private func clearExternalProxyOverlay() {
@@ -2463,7 +2786,12 @@ final class CompanionManager: ObservableObject {
         cursorOverlayState.externalSecondaryCursors.removeAll()
         visualGuidanceOverlayClearTasks.values.forEach { $0.cancel() }
         visualGuidanceOverlayClearTasks.removeAll()
+        visualGuidanceKeyboardCorrectionCommitTasks.values.forEach { $0.cancel() }
+        visualGuidanceKeyboardCorrectionCommitTasks.removeAll()
+        visualGuidanceKeyboardCorrectionStartRects.removeAll()
         cursorOverlayState.visualGuidanceOverlays.removeAll()
+        cursorOverlayState.visualGuidanceInteractionFrames.removeAll()
+        clearActiveControlGlow()
     }
 
     private func captureExternalControlScreenshots(focused: Bool) async -> OpenClickyExternalControlResponse {
@@ -3116,13 +3444,13 @@ final class CompanionManager: ObservableObject {
             ?? Self.clickyAgentInstruction(from: prompt)
         guard let explicitInstruction else { return prompt }
 
-        var instruction = Self.normalizedAgentTaskInstruction(from: explicitInstruction)
+        var instruction = SpokenText.normalizedAgentTaskInstruction(from: explicitInstruction)
         if Self.isReferentialAgentInstruction(instruction),
            let resolvedInstruction = referentialAgentInstructionContext(excluding: prompt) {
             instruction = resolvedInstruction
         }
 
-        instruction = Self.cleanedAgentTaskInstruction(instruction)
+        instruction = SpokenText.cleanedAgentTaskInstruction(instruction)
         guard !instruction.isEmpty,
               !Self.isAgentTaskPlaceholderInstruction(instruction) else {
             return prompt
@@ -4072,7 +4400,40 @@ final class CompanionManager: ObservableObject {
                             "backgroundAgentModel": self.codexAgentSession.model
                         ]
                     )
-                    return self.routeCompletedRealtimeVoiceTranscriptIfNeeded(transcript)
+                    // Honor the realtime model's own IT-vs-agent decision. The
+                    // model already classified this turn by picking a tool, so
+                    // try the deterministic cascade first; but when the model
+                    // explicitly chose background Agent Mode and no heuristic
+                    // route claims the turn, force the agent dispatch instead of
+                    // dropping the decision and letting the model just talk
+                    // (previously the tool name was logged here and discarded).
+                    if self.routeCompletedRealtimeVoiceTranscriptIfNeeded(transcript) {
+                        return true
+                    }
+                    guard toolName == "openclicky_start_background_agent" else {
+                        return false
+                    }
+                    let instruction = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !instruction.isEmpty else { return false }
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "agent",
+                        direction: "incoming",
+                        event: "openclicky.agent_task.realtime_tool_route",
+                        fields: [
+                            "transcript": transcript,
+                            "instruction": instruction,
+                            "toolName": toolName,
+                            "executor": "agent_mode",
+                            "route": "agent.realtime_tool",
+                            "requestID": self.activeRequestTiming?.requestID ?? "none"
+                        ]
+                    )
+                    self.startVoiceAgentTaskPlan(
+                        instruction: instruction,
+                        acknowledgement: "i’ll take care of that in the background.",
+                        voiceContextUserTranscript: transcript
+                    )
+                    return true
                 }
                 let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: self.selectedModel)
                 let result: BidirectionalRealtimeVoiceResult
@@ -4983,7 +5344,7 @@ final class CompanionManager: ObservableObject {
                     "requestID": activeRequestTiming?.requestID ?? "none"
                 ]
             )
-            clickUsingNativeComputerUse(clickRequest)
+            clickUsingSelectedComputerUse(clickRequest)
             return true
         }
 
@@ -6344,6 +6705,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func typeTextUsingSelectedComputerUse(_ request: OpenClickyNativeTypeRequest) {
+        showActiveControlGlowForFocusedWindowOrScreen(label: "Typing", duration: 3.0)
         switch selectedComputerUseBackend {
         case .backgroundComputerUse:
             typeTextUsingBackgroundComputerUse(request)
@@ -6353,11 +6715,119 @@ final class CompanionManager: ObservableObject {
     }
 
     private func pressKeyUsingSelectedComputerUse(_ request: OpenClickyNativeKeyPressRequest, shouldSpeak: Bool = true) {
+        showActiveControlGlowForFocusedWindowOrScreen(label: "Key press", duration: 1.8)
         switch selectedComputerUseBackend {
         case .backgroundComputerUse:
             pressKeyUsingBackgroundComputerUse(request, shouldSpeak: shouldSpeak)
         case .nativeSwift:
             pressKeyUsingNativeComputerUse(request, shouldSpeak: shouldSpeak)
+        }
+    }
+
+    private func clickUsingSelectedComputerUse(_ request: OpenClickyNativeClickRequest) {
+        showActiveControlGlowForFocusedWindowOrScreen(label: request.targetPhrase ?? "Click target", duration: 2.2)
+        switch selectedComputerUseBackend {
+        case .backgroundComputerUse:
+            clickUsingBackgroundComputerUse(request)
+        case .nativeSwift:
+            clickUsingNativeComputerUse(request)
+        }
+    }
+
+    private func clickUsingBackgroundComputerUse(_ request: OpenClickyNativeClickRequest) {
+        interruptCurrentVoiceResponse()
+        let timing = activeRequestTiming
+        let executionStartedAt = markRequestExecutionStarted(
+            route: "background_computer_use.click",
+            timing: timing,
+            extra: [
+                "executor": "background_computer_use",
+                "executionMethod": "OpenClickyBackgroundComputerUseController.click",
+                "controller": "OpenClickyBackgroundComputerUseController",
+                "targetPhrase": request.targetPhrase ?? ""
+            ]
+        )
+
+        Task { @MainActor in
+            do {
+                // Background Computer Use clicks in WINDOW-SCREENSHOT pixel
+                // space, not global display points. Capture the BCU window,
+                // point against THAT screenshot, then send the raw screenshot
+                // coordinate straight to /v1/click.
+                let capture = try await backgroundComputerUseController.captureFrontmostWindowAsJPEG()
+                let pointingCapture = CompanionScreenCapture(
+                    imageData: capture.imageData,
+                    label: capture.displayTitle,
+                    appName: request.targetPhrase,
+                    bundleIdentifier: capture.bundleID,
+                    isCursorScreen: false,
+                    displayWidthInPoints: capture.screenshotWidthInPixels,
+                    displayHeightInPoints: capture.screenshotHeightInPixels,
+                    displayFrame: .zero,
+                    screenshotWidthInPixels: capture.screenshotWidthInPixels,
+                    screenshotHeightInPixels: capture.screenshotHeightInPixels
+                )
+                let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                let response = try await analyzeComputerUsePointingResponse(
+                    image: (data: capture.imageData, label: pointingCapture.label + dimensionInfo),
+                    capture: pointingCapture,
+                    systemPrompt: Self.nativeClickPointingSystemPrompt,
+                    userPrompt: request.targetDescription,
+                    onTextChunk: { _ in }
+                )
+                let parseResult = Self.parsePointingCoordinates(from: response)
+                guard let pointCoordinate = parseResult.coordinate else {
+                    speakShortSystemResponse("i couldn't find that to click.")
+                    markRequestCompleted(
+                        route: "background_computer_use.click",
+                        executionStartedAt: executionStartedAt,
+                        timing: timing,
+                        status: "failed",
+                        extra: [
+                            "executor": "background_computer_use",
+                            "executionMethod": "analyzeComputerUsePointingResponse",
+                            "targetPhrase": request.targetPhrase ?? "",
+                            "error": "No click coordinate"
+                        ]
+                    )
+                    return
+                }
+
+                let result = try await backgroundComputerUseController.click(
+                    at: pointCoordinate,
+                    window: capture.windowID,
+                    targetAppName: request.targetPhrase
+                )
+                let spokenLabel = parseResult.elementLabel ?? request.targetPhrase
+                speakShortSystemResponse(spokenLabel.map { "clicked \($0)." } ?? "clicked that.")
+                markRequestCompleted(
+                    route: "background_computer_use.click",
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    extra: [
+                        "executor": "background_computer_use",
+                        "executionMethod": "OpenClickyBackgroundComputerUseController.click",
+                        "controller": "OpenClickyBackgroundComputerUseController",
+                        "window": capture.windowID,
+                        "x": Int(pointCoordinate.x),
+                        "y": Int(pointCoordinate.y),
+                        "summary": result.summary
+                    ]
+                )
+            } catch {
+                speakShortSystemResponse("i couldn't click that through background computer use.")
+                markRequestCompleted(
+                    route: "background_computer_use.click",
+                    executionStartedAt: executionStartedAt,
+                    timing: timing,
+                    status: "failed",
+                    extra: [
+                        "executor": "background_computer_use",
+                        "executionMethod": "OpenClickyBackgroundComputerUseController.click",
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
         }
     }
 
@@ -6497,6 +6967,11 @@ final class CompanionManager: ObservableObject {
             detectedElementScreenLocation = point
             detectedElementDisplayFrame = displayFrame
             detectedElementBubbleText = Self.pointingBubbleText(for: label)
+            showActiveControlGlow(
+                around: Self.controlTargetGlowRect(centeredOn: point, within: displayFrame),
+                label: label ?? request.targetPhrase,
+                duration: 2.4
+            )
             rememberPointedElement(at: point, displayFrame: displayFrame, label: label)
             latestVoiceResponseCard = ClickyResponseCard(
                 source: .voice,
@@ -7544,7 +8019,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func shouldStartNewAgentInsteadOfPendingFollowUp(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         guard normalized.contains("agent") || normalized.contains("agents") else { return false }
         if explicitNewTaskInstruction(from: transcript) != nil { return true }
         if agentTaskCreationInstruction(from: transcript) != nil { return true }
@@ -7858,7 +8333,7 @@ final class CompanionManager: ObservableObject {
         // by enough words to be a different question).
         if let active = activeSpeculativeFire,
            partialTranscript.hasPrefix(active.partialTranscript),
-           Self.wordCount(in: partialTranscript) - Self.wordCount(in: active.partialTranscript) < 4 {
+           SpokenText.wordCount(in: partialTranscript) - SpokenText.wordCount(in: active.partialTranscript) < 4 {
             lastObservedPartial = partialTranscript
             lastObservedPartialAt = Date()
             return
@@ -7898,7 +8373,7 @@ final class CompanionManager: ObservableObject {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
 
-        guard wordCount(in: normalized) >= speculativeMinWordCount else { return false }
+        guard SpokenText.wordCount(in: normalized) >= speculativeMinWordCount else { return false }
         if quickLocalVoiceResponseText(for: partialTranscript) != nil { return false }
 
         // Reject anything that already routes elsewhere.
@@ -7940,9 +8415,6 @@ final class CompanionManager: ObservableObject {
         return false
     }
 
-    private static func wordCount(in text: String) -> Int {
-        text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
-    }
 
     /// Fires the speculative Claude call. Tokens stream into the
     /// active fire's buffer but are NOT pushed through TTS yet — the
@@ -8080,7 +8552,7 @@ final class CompanionManager: ObservableObject {
         // (Deepgram often delivers a slightly longer final after the
         // last interim — punctuation, smart-format additions).
         let isExactMatch = normalized == firedNormalized
-        let extensionWords = Self.wordCount(in: normalized) - Self.wordCount(in: firedNormalized)
+        let extensionWords = SpokenText.wordCount(in: normalized) - SpokenText.wordCount(in: firedNormalized)
         let isCleanExtension = normalized.hasPrefix(firedNormalized) && extensionWords >= 0 && extensionWords <= 4
         guard isExactMatch || isCleanExtension else {
             discardActiveSpeculativeFire(reason: "final_diverged")
@@ -8178,7 +8650,7 @@ final class CompanionManager: ObservableObject {
                 // arrives.
                 var emittedSpokenSoFar = ""
                 let pushDelta: (String) -> Void = { parsedSpoken in
-                    let safeSpoken = Self.stripTrailingPointTagFragment(parsedSpoken)
+                    let safeSpoken = Self.stripTrailingVisualGuidanceTagFragment(parsedSpoken)
                     guard safeSpoken.hasPrefix(emittedSpokenSoFar),
                           safeSpoken.count > emittedSpokenSoFar.count else { return }
                     let delta = String(safeSpoken.dropFirst(emittedSpokenSoFar.count))
@@ -8556,7 +9028,7 @@ final class CompanionManager: ObservableObject {
             }
 
             if let clickRequest = Self.nativeClickRequest(from: taskCreationInstruction) {
-                clickUsingNativeComputerUse(clickRequest)
+                clickUsingSelectedComputerUse(clickRequest)
                 return true
             }
 
@@ -8596,7 +9068,7 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
-        var instruction = Self.normalizedAgentTaskInstruction(from: explicitInstruction)
+        var instruction = SpokenText.normalizedAgentTaskInstruction(from: explicitInstruction)
         if Self.isReferentialAgentInstruction(instruction) {
             guard let resolvedInstruction = referentialAgentInstructionContext(excluding: transcript) else {
                 OpenClickyMessageLogStore.shared.append(
@@ -8637,7 +9109,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if let clickRequest = Self.nativeClickRequest(from: instruction) {
-            clickUsingNativeComputerUse(clickRequest)
+            clickUsingSelectedComputerUse(clickRequest)
             return true
         }
 
@@ -8704,7 +9176,7 @@ final class CompanionManager: ObservableObject {
             }
             let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedCandidate.isEmpty,
-                  Self.normalizedSpokenCommandText(trimmedCandidate) != Self.normalizedSpokenCommandText(transcript),
+                  SpokenText.normalizedSpokenCommandText(trimmedCandidate) != SpokenText.normalizedSpokenCommandText(transcript),
                   !Self.isReferentialAgentInstruction(trimmedCandidate) else {
                 continue
             }
@@ -8715,7 +9187,7 @@ final class CompanionManager: ObservableObject {
     }
 
     static func isCancelAllAgentTasksRequest(_ transcript: String) -> Bool {
-        let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        let normalizedTranscript = SpokenText.normalizedSpokenCommandText(transcript)
         if isAgentDelegationRequest(normalizedTranscript) {
             return false
         }
@@ -8741,7 +9213,7 @@ final class CompanionManager: ObservableObject {
     }
 
     static func isCancelCurrentAgentTaskRequest(_ transcript: String) -> Bool {
-        let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        let normalizedTranscript = SpokenText.normalizedSpokenCommandText(transcript)
         if isAgentDelegationRequest(normalizedTranscript) {
             return false
         }
@@ -8803,7 +9275,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func explicitNewTaskInstruction(from transcript: String) -> String? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
         let patterns = [
@@ -8820,7 +9292,7 @@ final class CompanionManager: ObservableObject {
                   let instructionRange = Range(match.range(at: 1), in: candidate) else {
                 continue
             }
-            let instruction = cleanedAgentTaskInstruction(String(candidate[instructionRange]))
+            let instruction = SpokenText.cleanedAgentTaskInstruction(String(candidate[instructionRange]))
             return isAgentTaskPlaceholderInstruction(instruction) ? nil : instruction
         }
 
@@ -8832,7 +9304,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isIncompleteExplicitNewTaskRequest(from transcript: String) -> Bool {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return false }
 
         let patterns = [
@@ -8853,15 +9325,6 @@ final class CompanionManager: ObservableObject {
         return false
     }
 
-    private static func normalizedSpokenCommandText(_ transcript: String) -> String {
-        transcript
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-            .replacingOccurrences(of: #"[^\p{L}\p{N}\s]+"#, with: " ", options: .regularExpression)
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-    }
 
     static func quickLocalVoiceResponseText(for transcript: String) -> String? {
         let candidate = normalizedQuickLocalVoiceResponseCandidate(from: transcript)
@@ -8972,7 +9435,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func normalizedQuickLocalVoiceResponseCandidate(from transcript: String) -> String {
-        var candidate = normalizedSpokenCommandText(transcript)
+        var candidate = SpokenText.normalizedSpokenCommandText(transcript)
         let fillerPrefixes = ["hey", "ok", "okay", "right", "so"]
         let invocationPrefixes = [
             "learning buddy",
@@ -9220,7 +9683,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isAgentStatusQuestion(_ transcript: String) -> Bool {
-        let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        let normalizedTranscript = SpokenText.normalizedSpokenCommandText(transcript)
 
         let mentionsAgent = normalizedTranscript.contains("agent") || normalizedTranscript.contains("agents") || normalizedTranscript.contains("codex")
         guard mentionsAgent else { return false }
@@ -9425,8 +9888,8 @@ final class CompanionManager: ObservableObject {
 
         guard !instruction.isEmpty else { return nil }
         let beforeAgent = String(folded[..<agentTokenRange.lowerBound])
-        let normalizedBeforeAgent = normalizedSpokenCommandText(beforeAgent)
-        let normalizedInstruction = normalizedSpokenCommandText(instruction)
+        let normalizedBeforeAgent = SpokenText.normalizedSpokenCommandText(beforeAgent)
+        let normalizedInstruction = SpokenText.normalizedSpokenCommandText(instruction)
 
         let delegationCuePattern = #"\b(?:ask|tell|have|get|task|use|start|create|spin\s+up|spawn|run|launch|kick\s+off|set\s+up|send|route|hand|pass)\b"#
         let hasDelegationCueBefore = normalizedBeforeAgent.range(
@@ -9457,7 +9920,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func shouldInlineDirectFolderOpenFromAgentInstruction(_ instruction: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(instruction)
+        let normalized = SpokenText.normalizedSpokenCommandText(instruction)
         guard !normalized.isEmpty else { return false }
 
         let agentWorkSignals = [
@@ -9498,26 +9961,9 @@ final class CompanionManager: ObservableObject {
         return directFolderPrefixes.contains { normalized.hasPrefix($0) }
     }
 
-    private static func normalizedAgentTaskInstruction(from instruction: String) -> String {
-        let trimmedInstruction = normalizedCommandCandidate(from: instruction)
-        guard !trimmedInstruction.isEmpty else { return trimmedInstruction }
-
-        let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+|please\s+|(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)(.+?)[\.\!\?]*\s*$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(
-                in: trimmedInstruction,
-                range: NSRange(trimmedInstruction.startIndex..<trimmedInstruction.endIndex, in: trimmedInstruction)
-              ),
-              let taskRange = Range(match.range(at: 1), in: trimmedInstruction) else {
-            return trimmedInstruction
-        }
-
-        return String(trimmedInstruction[taskRange])
-            .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-"))
-    }
 
     private static func isReferentialAgentInstruction(_ instruction: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(instruction)
+        let normalized = SpokenText.normalizedSpokenCommandText(instruction)
         guard !normalized.isEmpty else { return false }
 
         let referentialInstructions: Set<String> = [
@@ -9540,7 +9986,7 @@ final class CompanionManager: ObservableObject {
     }
 
     static func agentTaskCreationInstruction(from transcript: String) -> String? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
         if let diagnosticInstruction = diagnosticPasteAgentInstruction(from: candidate) {
@@ -9561,7 +10007,7 @@ final class CompanionManager: ObservableObject {
             let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
             guard let match = regex.firstMatch(in: candidate, range: range),
                   let instructionRange = Range(match.range(at: 1), in: candidate) else { continue }
-            let instruction = cleanedAgentTaskInstruction(String(candidate[instructionRange]))
+            let instruction = SpokenText.cleanedAgentTaskInstruction(String(candidate[instructionRange]))
             return isAgentTaskPlaceholderInstruction(instruction) ? nil : instruction
         }
 
@@ -9573,7 +10019,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func diagnosticPasteAgentInstruction(from candidate: String) -> String? {
-        let normalized = normalizedSpokenCommandText(candidate)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
         guard normalized.hasPrefix("see issue here")
             || normalized.hasPrefix("see the issue here")
             || normalized.hasPrefix("look at this")
@@ -9624,8 +10070,8 @@ final class CompanionManager: ObservableObject {
             return nil
         }
 
-        let instruction = normalizedAgentTaskInstruction(
-            from: cleanedAgentTaskInstruction(String(candidate[instructionRange]))
+        let instruction = SpokenText.normalizedAgentTaskInstruction(
+            from: SpokenText.cleanedAgentTaskInstruction(String(candidate[instructionRange]))
         )
         guard !instruction.isEmpty,
               !isAgentTaskPlaceholderInstruction(instruction),
@@ -9636,7 +10082,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isLikelyAgentToolWorkInstruction(_ instruction: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(instruction)
+        let normalized = SpokenText.normalizedSpokenCommandText(instruction)
         let toolWorkSignals = [
             "github",
             "issue",
@@ -9702,7 +10148,7 @@ final class CompanionManager: ObservableObject {
             let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
             guard let match = regex.firstMatch(in: candidate, range: range),
                   let instructionRange = Range(match.range(at: 1), in: candidate) else { continue }
-            let instruction = cleanedAgentTaskInstruction(String(candidate[instructionRange]))
+            let instruction = SpokenText.cleanedAgentTaskInstruction(String(candidate[instructionRange]))
             return isAgentTaskPlaceholderInstruction(instruction) ? nil : instruction
         }
 
@@ -9710,7 +10156,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isMetaAgentRoutingQuestion(_ candidate: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(candidate)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
         let prefixes = [
             "how do i ask",
             "how can i ask",
@@ -9731,7 +10177,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isIncompleteAgentTaskCreationRequest(from transcript: String) -> Bool {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return false }
 
         let patterns = [
@@ -9752,11 +10198,6 @@ final class CompanionManager: ObservableObject {
         return false
     }
 
-    private static func cleanedAgentTaskInstruction(_ instruction: String) -> String {
-        instruction
-            .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-"))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     private static func isAgentTaskPlaceholderInstruction(_ instruction: String) -> Bool {
         let normalized = instruction
@@ -9767,7 +10208,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func agentSelectionRequest(from transcript: String) -> OpenClickyAgentSelectionRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
         let typedFollowUpPatterns = [
@@ -9843,7 +10284,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func normalizedAgentLookupText(_ value: String) -> String {
-        normalizedSpokenCommandText(value)
+        SpokenText.normalizedSpokenCommandText(value)
             .replacingOccurrences(of: #"\b(?:agent|task|session)\b"#, with: " ", options: .regularExpression)
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
@@ -9851,7 +10292,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func webOpenRequest(from transcript: String) -> OpenClickyWebOpenRequest? {
-        let trimmedTranscript = normalizedCommandCandidate(from: transcript)
+        let trimmedTranscript = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
 
         let browserNavigationPatterns: [(pattern: String, browserGroup: Int, targetGroup: Int)] = [
@@ -9945,7 +10386,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func compositeAppActionRequest(from transcript: String) -> OpenClickyCompositeAppActionRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
         guard !isExplicitAgentRoutingCandidate(candidate) else { return nil }
 
@@ -10014,19 +10455,19 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isLikelyBrowserNavigationAction(_ actionText: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(actionText)
+        let normalized = SpokenText.normalizedSpokenCommandText(actionText)
         let pattern = #"\b(?:go\s+to|navigate\s+to|browse\s+to|visit|open\s+(?:the\s+)?(?:website|web\s*site|webpage|web\s*page|url|site))\b"#
         return normalized.range(of: pattern, options: .regularExpression) != nil
     }
 
     private static func isContaminatedCompositeAppName(_ rawAppName: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(rawAppName)
+        let normalized = SpokenText.normalizedSpokenCommandText(rawAppName)
         let pattern = #"\b(?:and|then)\s+(?:go|navigate|browse|visit|open|play|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose)\b"#
         return normalized.range(of: pattern, options: .regularExpression) != nil
     }
 
     private static func hasDirectCompositeActionVerb(_ actionText: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(actionText)
+        let normalized = SpokenText.normalizedSpokenCommandText(actionText)
         let pattern = #"^(?:play|pause|resume|skip|next|previous|search|find|look\s+up|type|write|enter|press|hit|click|tap|select|choose|go\s+to|navigate\s+to|browse\s+to|visit)\b"#
         return normalized.range(of: pattern, options: .regularExpression) != nil
     }
@@ -10066,7 +10507,7 @@ final class CompanionManager: ObservableObject {
                 continue
             }
             let query = cleanedCompositeActionPayload(String(candidate[queryRange]))
-            let normalized = normalizedSpokenCommandText(query)
+            let normalized = SpokenText.normalizedSpokenCommandText(query)
             guard !query.isEmpty,
                   !["something", "music", "a song", "the song", "anything", "spotify"].contains(normalized) else {
                 continue
@@ -10078,7 +10519,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func standaloneSpotifyPlaybackRequest(from transcript: String) -> OpenClickyCompositeAppActionRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty,
               !isExplicitAgentRoutingCandidate(candidate),
               compositeAppActionRequest(from: candidate) == nil else {
@@ -10108,7 +10549,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isAmbiguousStandaloneSpotifyPlaybackQuery(_ query: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(query)
+        let normalized = SpokenText.normalizedSpokenCommandText(query)
         let ambiguousTargets: Set<String> = [
             "it",
             "that",
@@ -10128,7 +10569,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func systemVolumeControlAction(from transcript: String) -> OpenClickySystemVolumeControlAction? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty,
               !isExplicitAgentRoutingCandidate(candidate),
               !hasSpotifyContext(candidate),
@@ -10136,7 +10577,7 @@ final class CompanionManager: ObservableObject {
             return nil
         }
 
-        let normalized = normalizedSpokenCommandText(cleanedCompositeAppActionText(candidate))
+        let normalized = SpokenText.normalizedSpokenCommandText(cleanedCompositeAppActionText(candidate))
         if let volumePercent = systemVolumePercent(fromNormalizedControlText: normalized) {
             return OpenClickySystemVolumeControlAction(.setVolume, volumePercent: volumePercent)
         }
@@ -10187,14 +10628,14 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func hasSpotifyContext(_ transcript: String) -> Bool {
-        normalizedSpokenCommandText(transcript).range(
+        SpokenText.normalizedSpokenCommandText(transcript).range(
             of: #"\bspotify\b"#,
             options: .regularExpression
         ) != nil
     }
 
     private static func spotifyPlaybackControlAction(from actionText: String) -> OpenClickySpotifyPlaybackControlAction? {
-        var normalized = normalizedSpokenCommandText(cleanedCompositeAppActionText(actionText))
+        var normalized = SpokenText.normalizedSpokenCommandText(cleanedCompositeAppActionText(actionText))
         normalized = normalized.replacingOccurrences(
             of: #"\s+(?:(?:in|on)\s+)?spotify$"#,
             with: "",
@@ -10286,7 +10727,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func localAppOpenRequest(from transcript: String) -> OpenClickyAppOpenRequest? {
-        let trimmedTranscript = normalizedCommandCandidate(from: transcript)
+        let trimmedTranscript = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
         guard !isExplicitAgentRoutingCandidate(trimmedTranscript) else { return nil }
         guard compositeAppActionRequest(from: trimmedTranscript) == nil else { return nil }
@@ -10319,7 +10760,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func bareLocalAppOpenRequest(from transcript: String) -> OpenClickyAppOpenRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         return bareLocalAppOpenRequest(fromNormalizedCandidate: candidate)
     }
 
@@ -10371,10 +10812,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func reminderAddRequest(from transcript: String) -> OpenClickyReminderAddRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
-        let normalizedCandidate = normalizedSpokenCommandText(candidate)
+        let normalizedCandidate = SpokenText.normalizedSpokenCommandText(candidate)
         let mentionsReminders = normalizedCandidate.contains("reminder")
             || normalizedCandidate.contains("reminders")
             || normalizedCandidate.contains("todo")
@@ -10413,10 +10854,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func reminderCountRequest(from transcript: String) -> OpenClickyReminderCountRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
-        let normalizedCandidate = normalizedSpokenCommandText(candidate)
+        let normalizedCandidate = SpokenText.normalizedSpokenCommandText(candidate)
         guard normalizedCandidate.contains("reminder")
             || normalizedCandidate.contains("reminders")
             || normalizedCandidate.contains("todo")
@@ -10440,10 +10881,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func messagesSearchRequest(from transcript: String) -> OpenClickyMessagesSearchRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
-        let normalizedCandidate = normalizedSpokenCommandText(candidate)
+        let normalizedCandidate = SpokenText.normalizedSpokenCommandText(candidate)
         guard normalizedCandidate.contains("message") || normalizedCandidate.contains("messages") else {
             return nil
         }
@@ -10475,7 +10916,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func localFolderOpenRequest(from transcript: String) -> OpenClickyFolderOpenRequest? {
-        let trimmedTranscript = normalizedCommandCandidate(from: transcript)
+        let trimmedTranscript = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
 
         let normalizedTranscript = trimmedTranscript
@@ -10547,7 +10988,7 @@ final class CompanionManager: ObservableObject {
         baseURL: URL,
         fileManager: FileManager = .default
     ) -> OpenClickyFolderOpenRequest? {
-        let trimmedTranscript = normalizedCommandCandidate(from: transcript)
+        let trimmedTranscript = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !trimmedTranscript.isEmpty else { return nil }
 
         let normalizedTranscript = normalizedFolderCommandText(trimmedTranscript)
@@ -10750,12 +11191,12 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func parallelAgentInstructions(from instruction: String) -> [String] {
-        let cleanedInstruction = cleanedAgentTaskInstruction(instruction)
+        let cleanedInstruction = SpokenText.cleanedAgentTaskInstruction(instruction)
         guard !cleanedInstruction.isEmpty else { return [] }
         guard shouldSplitAgentInstruction(cleanedInstruction) else { return [cleanedInstruction] }
 
         let pieces = splitAgentInstructionClauses(cleanedInstruction)
-            .map(cleanedAgentTaskInstruction)
+            .map(SpokenText.cleanedAgentTaskInstruction)
             .filter { !$0.isEmpty && !isAgentTaskPlaceholderInstruction($0) }
 
         guard pieces.count >= 2 else { return [cleanedInstruction] }
@@ -10767,7 +11208,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func shouldSplitAgentInstruction(_ instruction: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(instruction)
+        let normalized = SpokenText.normalizedSpokenCommandText(instruction)
         let explicitSplitPattern = #"\b(?:multiple|several|separate|parallel|independent)\s+(?:background\s+)?(?:agents?|tasks?|workstreams?)\b|\bsplit\b.{0,48}\b(?:agents?|tasks?|workstreams?)\b|\b(?:agents?|tasks?)\b.{0,48}\b(?:separately|in\s+parallel|side\s+by\s+side)\b"#
         if normalized.range(of: explicitSplitPattern, options: .regularExpression) != nil {
             return true
@@ -10823,9 +11264,9 @@ final class CompanionManager: ObservableObject {
     }
 
     static func implicitAgentTaskInstruction(from transcript: String) -> String? {
-        let candidate = normalizedAgentTaskInstruction(from: transcript)
-        let normalized = normalizedSpokenCommandText(candidate)
-        guard wordCount(in: normalized) >= 3 else { return nil }
+        let candidate = SpokenText.normalizedAgentTaskInstruction(from: transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return nil }
         guard !isRawTransportDiagnosticEvent(candidate) else { return nil }
         guard !isMetaAgentRoutingQuestion(candidate) else { return nil }
         guard !isVoiceRouteCapabilityQuestion(candidate) else { return nil }
@@ -10833,31 +11274,31 @@ final class CompanionManager: ObservableObject {
         guard !isConversationalPreferenceOrDesignReflection(candidate) else { return nil }
         guard !isLikelyPureConversation(candidate) else { return nil }
         guard !isInstantVoiceScreenContextRequest(candidate) else { return nil }
-        guard !isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
+        guard !VoiceRouter.isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
 
-        let hasAction = containsAgentWorkAction(normalized)
+        let hasAction = VoiceRouter.containsAgentWorkAction(normalized)
         let hasCodingImplementationCue = containsCodingImplementationCue(candidate)
         let hasToolContext = isLikelyAgentToolWorkInstruction(candidate)
             || hasAgentWorkVerbAndArtifact(candidate)
-            || containsDurableWorkTarget(normalized)
+            || VoiceRouter.containsDurableWorkTarget(normalized)
             || hasCodingImplementationCue
-        let asksForFreshInfo = containsFreshResearchRequest(normalized)
+        let asksForFreshInfo = VoiceRouter.containsFreshResearchRequest(normalized)
 
         guard (hasAction && hasToolContext) || hasCodingImplementationCue || asksForFreshInfo else { return nil }
         guard !isLikelyDirectLocalOnlyRequest(candidate) else { return nil }
 
-        return cleanedAgentTaskInstruction(candidate)
+        return SpokenText.cleanedAgentTaskInstruction(candidate)
     }
 
     private static func smartAgentRouteDecision(from transcript: String) -> SmartAgentRouteDecision? {
-        let candidate = normalizedAgentTaskInstruction(from: transcript)
-        let normalized = normalizedSpokenCommandText(candidate)
-        guard wordCount(in: normalized) >= 3 else { return nil }
+        let candidate = SpokenText.normalizedAgentTaskInstruction(from: transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return nil }
         guard !isRawTransportDiagnosticEvent(candidate) else { return nil }
         guard !isMetaAgentRoutingQuestion(candidate) else { return nil }
         guard !isVoiceRouteCapabilityQuestion(candidate) else { return nil }
         guard !isGenericWebSearchCapabilityQuestion(candidate) else { return nil }
-        guard !isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
+        guard !VoiceRouter.isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
         guard !isLikelyDirectLocalOnlyRequest(candidate) else { return nil }
 
         if let filesystemInstruction = implicitFilesystemTaskInstruction(from: candidate) {
@@ -10883,15 +11324,15 @@ final class CompanionManager: ObservableObject {
 
     private static func naturalBackgroundTaskInstruction(from transcript: String) -> String? {
         let candidate = cleanedNaturalBackgroundInstruction(from: transcript)
-        let normalized = normalizedSpokenCommandText(candidate)
-        guard wordCount(in: normalized) >= 3 else { return nil }
-        guard containsNaturalBackgroundWorkCue(normalized) else { return nil }
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return nil }
+        guard VoiceRouter.containsNaturalBackgroundWorkCue(normalized) else { return nil }
 
-        let hasWorkTarget = containsDurableWorkTarget(normalized)
-            || containsReferentialWorkTarget(normalized)
+        let hasWorkTarget = VoiceRouter.containsDurableWorkTarget(normalized)
+            || VoiceRouter.containsReferentialWorkTarget(normalized)
             || isLikelyAgentToolWorkInstruction(candidate)
             || hasAgentWorkVerbAndArtifact(candidate)
-            || containsFreshResearchRequest(normalized)
+            || VoiceRouter.containsFreshResearchRequest(normalized)
         guard hasWorkTarget else { return nil }
         guard !isAgentTaskPlaceholderInstruction(candidate) else { return nil }
 
@@ -10899,7 +11340,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func cleanedNaturalBackgroundInstruction(from transcript: String) -> String {
-        var instruction = cleanedAgentTaskInstruction(normalizedAgentTaskInstruction(from: transcript))
+        var instruction = SpokenText.cleanedAgentTaskInstruction(SpokenText.normalizedAgentTaskInstruction(from: transcript))
         let removablePrefixes = [
             #"(?i)^\s*(?:can|could|would|will)\s+we\s+"#,
             #"(?i)^\s*(?:i\s+)?(?:want|need)\s+(?:you\s+)?to\s+"#,
@@ -10912,57 +11353,32 @@ final class CompanionManager: ObservableObject {
                 options: .regularExpression
             )
         }
-        return cleanedAgentTaskInstruction(instruction)
-    }
-
-    private static func containsNaturalBackgroundWorkCue(_ normalized: String) -> Bool {
-        let cuePattern = #"\b(?:make\s+sure|ensure|verify|validate|confirm|look\s+into|figure\s+out|sort\s+out|deal\s+with|take\s+care\s+of|get\s+(?:this|that|it|.+?)\s+working|wire\s+(?:up|in)|hook\s+(?:up|in)|set\s+up|finish|polish|improve|repair|diagnose|investigate)\b"#
-        if normalized.range(of: cuePattern, options: .regularExpression) != nil {
-            return true
-        }
-
-        let makeUsePattern = #"\b(?:make|have)\b.{1,80}\b(?:use|using|route|routing|send|sending|call|calling)\b"#
-        return normalized.range(of: makeUsePattern, options: .regularExpression) != nil
-    }
-
-    private static func containsReferentialWorkTarget(_ normalized: String) -> Bool {
-        let referencePattern = #"\b(?:this|that|it|here|current\s+(?:file|screen|window|page|repo|repository|project|app)|visible\s+(?:file|code|screen|window|page)|selected\s+(?:text|file|code|region)|the\s+(?:current|visible|selected)\s+(?:thing|part|file|code|screen|window|page)|what\s+we\s+(?:just\s+)?(?:talked|discussed)\s+about|the\s+thing\s+from\s+before)\b"#
-        return normalized.range(of: referencePattern, options: .regularExpression) != nil
+        return SpokenText.cleanedAgentTaskInstruction(instruction)
     }
 
 
     static func hybridAgentTaskInstruction(from transcript: String) -> String? {
-        let candidate = normalizedCommandCandidate(from: transcript)
-        let normalized = normalizedSpokenCommandText(candidate)
-        guard wordCount(in: normalized) >= 5 else { return nil }
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
+        guard SpokenText.wordCount(in: normalized) >= 5 else { return nil }
         guard !isRawTransportDiagnosticEvent(candidate) else { return nil }
         guard !isMetaAgentRoutingQuestion(candidate) else { return nil }
-        guard !isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
+        guard !VoiceRouter.isSensitiveOrDestructiveAgentTaskRequest(normalized) else { return nil }
         guard !isLikelyDirectLocalOnlyRequest(candidate) else { return nil }
-        guard containsHybridForegroundCue(normalized) else { return nil }
-        guard containsHybridBackgroundCue(normalized) else { return nil }
+        guard VoiceRouter.containsHybridForegroundCue(normalized) else { return nil }
+        guard VoiceRouter.containsHybridBackgroundCue(normalized) else { return nil }
 
         let explicitInstruction = explicitAgentRouteInstruction(from: candidate)
-            .map { normalizedAgentTaskInstruction(from: $0) }
-            .map(cleanedAgentTaskInstruction)
+            .map { SpokenText.normalizedAgentTaskInstruction(from: $0) }
+            .map(SpokenText.cleanedAgentTaskInstruction)
         let implicitInstruction = implicitAgentTaskInstruction(from: candidate)
-        let instruction = explicitInstruction ?? implicitInstruction ?? cleanedAgentTaskInstruction(candidate)
+        let instruction = explicitInstruction ?? implicitInstruction ?? SpokenText.cleanedAgentTaskInstruction(candidate)
         guard !instruction.isEmpty,
               !isAgentTaskPlaceholderInstruction(instruction),
-              isLikelySpecificAgentInstruction(instruction) || containsFreshResearchRequest(normalized) else {
+              isLikelySpecificAgentInstruction(instruction) || VoiceRouter.containsFreshResearchRequest(normalized) else {
             return nil
         }
         return instruction
-    }
-
-    private static func containsHybridForegroundCue(_ normalized: String) -> Bool {
-        let foregroundPattern = #"\b(?:what|why|how|who|when|where|explain|tell\s+me|describe|summari[sz]e|answer|quick\s+(?:answer|thought|view)|what\s+do\s+you\s+think|do\s+you\s+think)\b"#
-        return normalized.range(of: foregroundPattern, options: .regularExpression) != nil
-    }
-
-    private static func containsHybridBackgroundCue(_ normalized: String) -> Bool {
-        let backgroundPattern = #"\b(?:background|agent|agents|agent\s+mode|codex|do\s+the\s+work|work\s+on\s+it|take\s+care\s+of\s+it|also\s+(?:fix|implement|patch|research|find|check|review|update|change|build|create)|while\s+you(?:'re|re)?\s+(?:at\s+it|doing\s+that)|combination\s+of\s+the\s+two)\b"#
-        return normalized.range(of: backgroundPattern, options: .regularExpression) != nil
     }
 
     private static func isRawTransportDiagnosticEvent(_ transcript: String) -> Bool {
@@ -10994,7 +11410,7 @@ final class CompanionManager: ObservableObject {
 
         guard hasRawTransportPrefix || hasRawCodexRPCSignal || hasRPCSummaryPayload else { return false }
 
-        let normalized = normalizedSpokenCommandText(trimmed)
+        let normalized = SpokenText.normalizedSpokenCommandText(trimmed)
         let userIntentSignals = [
             "check for errors",
             "check this error",
@@ -11017,20 +11433,20 @@ final class CompanionManager: ObservableObject {
     }
 
     static func shouldEscalateVoiceResponseToAgent(responseText: String, transcript: String) -> Bool {
-        let normalizedTranscript = normalizedSpokenCommandText(transcript)
+        let normalizedTranscript = SpokenText.normalizedSpokenCommandText(transcript)
         let isAgentSuitableTask = isLocalFilesystemInspectionRequest(normalizedTranscript)
             || implicitAgentTaskInstruction(from: transcript) != nil
         guard isAgentSuitableTask else { return false }
 
-        let normalizedResponse = normalizedSpokenCommandText(responseText)
+        let normalizedResponse = SpokenText.normalizedSpokenCommandText(responseText)
         let refusalPattern = #"\b(?:i\s+(?:do\s+not|don't|dont)\s+have\s+access|i\s+(?:can't|cannot)|unable\s+to|not\s+able\s+to)\b.{0,96}\b(?:file\s*system|files?|folders?|desktop|downloads?|documents?|browse|inspect|read)\b"#
         return normalizedResponse.range(of: refusalPattern, options: .regularExpression) != nil
     }
 
     static func implicitFilesystemTaskInstruction(from transcript: String) -> String? {
-        let candidate = normalizedCommandCandidate(from: transcript)
-        let normalized = normalizedSpokenCommandText(candidate)
-        guard wordCount(in: normalized) >= 3 else { return nil }
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return nil }
         guard isLocalFilesystemInspectionRequest(normalized) else { return nil }
         guard !isInstantVoiceScreenContextRequest(candidate) else { return nil }
 
@@ -11040,7 +11456,7 @@ final class CompanionManager: ObservableObject {
     }
 
     static func filesystemTaskAcknowledgement(from transcript: String) -> String {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         if normalized.range(of: #"\bdesktop\b"#, options: .regularExpression) != nil {
             return "i'm checking your desktop now."
         }
@@ -11061,7 +11477,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isVoiceRouteCapabilityQuestion(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         guard !normalized.isEmpty else { return false }
 
         let routePattern = #"\b(?:voice\s+(?:route|lane|path)|realtime\s+(?:route|voice|path)|without\s+(?:starting\s+)?an?\s+agent|without\s+agent\s+mode|instead\s+of\s+(?:starting\s+)?an?\s+agent)\b"#
@@ -11072,13 +11488,13 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isGenericWebSearchCapabilityQuestion(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         let pattern = #"^(?:can|could|would|will)\s+you\s+(?:search\s+(?:the\s+)?web|browse\s+(?:the\s+)?web|google|look\s+things?\s+up|look\s+up\s+things?)$"#
         return normalized.range(of: pattern, options: .regularExpression) != nil
     }
 
     private static func isConversationalPreferenceOrDesignReflection(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         guard !normalized.isEmpty else { return true }
 
         let conversationStarters = [
@@ -11115,7 +11531,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isLikelyPureConversation(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         guard !normalized.isEmpty else { return true }
 
         let conversationPrefixes = [
@@ -11126,14 +11542,14 @@ final class CompanionManager: ObservableObject {
         let hasConversationPrefix = conversationPrefixes.contains { normalized.hasPrefix($0) }
         guard hasConversationPrefix else { return false }
 
-        return !containsAgentWorkAction(normalized)
+        return !VoiceRouter.containsAgentWorkAction(normalized)
             && !isLikelyAgentToolWorkInstruction(transcript)
-            && !containsDurableWorkTarget(normalized)
-            && !containsFreshResearchRequest(normalized)
+            && !VoiceRouter.containsDurableWorkTarget(normalized)
+            && !VoiceRouter.containsFreshResearchRequest(normalized)
     }
 
     private static func isInstantVoiceScreenContextRequest(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         guard !normalized.isEmpty else { return false }
 
         let visualReferencePatterns = [
@@ -11149,19 +11565,9 @@ final class CompanionManager: ObservableObject {
         return normalized.range(of: longRunningSignals, options: .regularExpression) == nil
     }
 
-    private static func containsAgentWorkAction(_ normalized: String) -> Bool {
-        let actionPattern = #"\b(?:check|look\s+at|take\s+a\s+look|inspect|review|audit|fix|modify|change|update|edit|build|create|make|write|draft|research|search|find|summari[sz]e|organize|clean\s+up|cleanup|test|run|install|compare|read|move|rename|delete|prune|optimi[sz]e|wire|implement|add|remove|route|delegate|ensure|verify|validate|confirm|diagnose|investigate|repair|polish|improve|finish|sort\s+out|deal\s+with|take\s+care\s+of|make\s+sure|look\s+into|figure\s+out)\b"#
-        return normalized.range(of: actionPattern, options: .regularExpression) != nil
-    }
-
-    private static func containsDurableWorkTarget(_ normalized: String) -> Bool {
-        let targetPattern = #"\b(?:openclicky|clicky|github|repo|repository|codebase|project|app|settings|preference|preferences|log|logs|memory|skill|skills|desktop|download|downloads|document|documents|folder|folders|file|files|code|diff|git|branch|pull\s+request|pr|issue|issues|bug|test|tests|build|swift|xcode|email|gmail|calendar|spreadsheet|sheet|doc|slides|voice|realtime|computer\s+use|tool|tools|tooling|model|models|routing|route|background|agent\s+mode)\b"#
-        return normalized.range(of: targetPattern, options: .regularExpression) != nil
-    }
-
     private static func containsCodingImplementationCue(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
-        guard wordCount(in: normalized) >= 3 else { return false }
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return false }
 
         let conceptualQuestionPattern = #"^(?:what|why|how\s+(?:do|does|would|should)|can\s+you\s+explain|explain|tell\s+me\s+about)\b"#
         if normalized.range(of: conceptualQuestionPattern, options: .regularExpression) != nil,
@@ -11180,29 +11586,6 @@ final class CompanionManager: ObservableObject {
         return (hasImplementationVerb && hasCodeTarget) || hasChangeRequest
     }
 
-    private static func containsFreshResearchRequest(_ normalized: String) -> Bool {
-        let researchPattern = #"\b(?:latest|live|price|news|weather|schedule|standings|research|look\s+up|search\s+(?:the\s+)?web|google|browse)\b"#
-        return normalized.range(of: researchPattern, options: .regularExpression) != nil
-    }
-
-    private static func isSensitiveOrDestructiveAgentTaskRequest(_ normalized: String) -> Bool {
-        let destructivePattern = #"\b(?:delete|remove|erase|wipe|destroy|drop|revoke|reset|nuke|clear|purge|uninstall|terminate|kill)\b"#
-        let broadScopePattern = #"\b(?:all|everything|entire|whole)\b"#
-        let destructiveTargetPattern = #"\b(?:file|files|folder|folders|directory|directories|repo|repository|branch|branches|commit|commits|tag|tags|history|database|databases|keychain|account|accounts)\b"#
-        let sensitiveTargetsPattern = #"\b(?:account|accounts|credential|credentials|password|passwords|token|tokens|api\s*key|secret|secrets|permission|permissions|auth|ssh|private\s+key|keychain|database|databases|prod|production|system\s+settings)\b"#
-
-        let hasDestructiveVerb = normalized.range(of: destructivePattern, options: .regularExpression) != nil
-        let hasBroadScope = normalized.range(of: broadScopePattern, options: .regularExpression) != nil
-        let hasDestructiveTarget = normalized.range(of: destructiveTargetPattern, options: .regularExpression) != nil
-        let hasSensitiveTarget = normalized.range(of: sensitiveTargetsPattern, options: .regularExpression) != nil
-
-        // Safety policy:
-        // - credential/permission/auth targets are always confirmation-worthy.
-        // - destructive verbs are confirmation-worthy when aimed at a destructive target
-        //   or broad-scope operation.
-        return hasSensitiveTarget || (hasDestructiveVerb && (hasBroadScope || hasDestructiveTarget))
-    }
-
     private static func isLikelyDirectLocalOnlyRequest(_ transcript: String) -> Bool {
         nativeTypeRequest(from: transcript) != nil
             || nativeKeyPressRequest(from: transcript) != nil
@@ -11219,7 +11602,7 @@ final class CompanionManager: ObservableObject {
     ) -> String? {
         guard isAgentRoutingCandidate(partialTranscript) else { return nil }
 
-        let normalizedFinal = normalizedSpokenCommandText(finalTranscript)
+        let normalizedFinal = SpokenText.normalizedSpokenCommandText(finalTranscript)
         guard !normalizedFinal.isEmpty else { return nil }
 
         let cancellationSignals = [
@@ -11235,9 +11618,9 @@ final class CompanionManager: ObservableObject {
         }
 
         let partialInstruction = explicitAgentRouteInstruction(from: partialTranscript)
-            .map { normalizedAgentTaskInstruction(from: $0) }
-            .map(cleanedAgentTaskInstruction)
-        let finalInstruction = normalizedAgentTaskInstruction(from: finalTranscript)
+            .map { SpokenText.normalizedAgentTaskInstruction(from: $0) }
+            .map(SpokenText.cleanedAgentTaskInstruction)
+        let finalInstruction = SpokenText.normalizedAgentTaskInstruction(from: finalTranscript)
             .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-"))
 
         let finalLooksRecoverable = isLikelyAgentFollowUpPhrasing(finalTranscript)
@@ -11275,7 +11658,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func hasAgentWorkVerbAndArtifact(_ transcript: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(transcript)
+        let normalized = SpokenText.normalizedSpokenCommandText(transcript)
         let workVerbPattern = #"\b(?:create|make|build|update|change|edit|fix|design|redesign|open|show|preview|pull\s+up|find|save|export|write|review|test|run|stop|ensure|verify|validate|diagnose|investigate|repair|polish|improve|finish|wire|route)\b"#
         let artifactPattern = #"\b(?:form|page|site|website|app|file|document|report|code|repo|repository|github|issue|issues|pull\s+request|pr|folder|version|style|design|panel|overlay|status|progress|comments|logs?|tests?|thinking|calls|ui|volume|slider|control|voice|realtime|computer\s+use|tool|tools|tooling|model|models|routing|route|background|agent\s+mode)\b"#
         return normalized.range(of: workVerbPattern, options: .regularExpression) != nil
@@ -11283,8 +11666,8 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isLikelySpecificAgentInstruction(_ instruction: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(instruction)
-        guard wordCount(in: normalized) >= 3 else { return false }
+        let normalized = SpokenText.normalizedSpokenCommandText(instruction)
+        guard SpokenText.wordCount(in: normalized) >= 3 else { return false }
         return isLikelyAgentToolWorkInstruction(instruction)
             || isReferentialAgentWorkFollowUp(instruction)
             || hasAgentWorkVerbAndArtifact(instruction)
@@ -11325,39 +11708,13 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isIncompleteLocalAppOpenRequest(from transcript: String) -> Bool {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)?(?:open|launch|start|switch\s+to)(?:\s+up)?[\s\.\!\?]*$"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
         return regex.firstMatch(in: candidate, range: range) != nil
     }
 
-    private static func normalizedCommandCandidate(from transcript: String) -> String {
-        var candidate = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let prefixPatterns = [
-            #"(?i)^\s*(?:hey|ok|okay|right|so)[\s,]+"#,
-            #"(?i)^\s*(?:clicky|openclicky)[\s,]+"#,
-            #"(?i)^\s*i\s+(?:said|asked|told)\s+(?:for\s+you\s+to|you\s+to|to)\s+"#,
-            #"(?i)^\s*(?:let's|lets)\s+try\s+(?:that|this)\s+again[\s,]+"#
-        ]
-
-        var didStripPrefix = true
-        while didStripPrefix {
-            didStripPrefix = false
-            for pattern in prefixPatterns {
-                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-                let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
-                guard let match = regex.firstMatch(in: candidate, range: range),
-                      let matchRange = Range(match.range, in: candidate) else { continue }
-                candidate.removeSubrange(matchRange)
-                candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-                didStripPrefix = true
-            }
-        }
-
-        return candidate.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-–—…"))
-    }
 
     private static func cleanedApplicationOpenTarget(_ rawTarget: String) -> String {
         var target = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -11459,7 +11816,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isReminderTitlePlaceholder(_ value: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(value)
+        let normalized = SpokenText.normalizedSpokenCommandText(value)
         return [
             "",
             "it",
@@ -11485,7 +11842,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func isMessagesSearchPlaceholder(_ value: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(value)
+        let normalized = SpokenText.normalizedSpokenCommandText(value)
         return ["", "someone", "somebody", "anyone", "people", "them", "him", "her"].contains(normalized)
     }
 
@@ -11516,13 +11873,13 @@ final class CompanionManager: ObservableObject {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let spokenNormalized = normalizedSpokenCommandText(value)
+        let spokenNormalized = SpokenText.normalizedSpokenCommandText(value)
         return ["", "my", "the", "a", "an", "it", "that", "this"].contains(normalized)
             || ["", "my", "the", "a", "an", "it", "that", "this"].contains(spokenNormalized)
     }
 
     private static func isReservedAgentOpenTarget(_ value: String) -> Bool {
-        let normalized = normalizedSpokenCommandText(value)
+        let normalized = SpokenText.normalizedSpokenCommandText(value)
         let stripped = normalized.replacingOccurrences(
             of: #"^(?:my|the|a|an)\s+"#,
             with: "",
@@ -11572,7 +11929,7 @@ final class CompanionManager: ObservableObject {
             return true
         }
 
-        let normalized = normalizedSpokenCommandText(raw)
+        let normalized = SpokenText.normalizedSpokenCommandText(raw)
         let navigationSignals = [
             " go to ",
             " browse to ",
@@ -11587,7 +11944,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func nativeTypeRequest(from transcript: String) -> OpenClickyNativeTypeRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
         let patterns = [
@@ -11622,10 +11979,10 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func nativeClickRequest(from transcript: String) -> OpenClickyNativeClickRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
-        let normalized = normalizedSpokenCommandText(candidate)
+        let normalized = SpokenText.normalizedSpokenCommandText(candidate)
         let referentialTargets: Set<String> = [
             "it",
             "that",
@@ -11650,7 +12007,7 @@ final class CompanionManager: ObservableObject {
                   let targetRange = Range(match.range(at: 1), in: candidate) else { continue }
             let target = String(candidate[targetRange])
                 .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?"))
-            let targetNormalized = normalizedSpokenCommandText(target)
+            let targetNormalized = SpokenText.normalizedSpokenCommandText(target)
             let isTapKeyCommand = normalized.hasPrefix("tap ")
                 && [
                     "escape", "esc", "enter", "return", "tab", "space", "spacebar",
@@ -11732,7 +12089,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func nativeKeyPressRequest(from transcript: String) -> OpenClickyNativeKeyPressRequest? {
-        let candidate = normalizedCommandCandidate(from: transcript)
+        let candidate = SpokenText.normalizedCommandCandidate(from: transcript)
         guard !candidate.isEmpty else { return nil }
 
         let patterns = [
@@ -14097,7 +14454,7 @@ final class CompanionManager: ObservableObject {
     you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s), and when the user has enabled camera context you may also receive a camera image labeled as such. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     YOUR JOB IS NARROW. you only do these things:
-    1. POINT, HIGHLIGHT, and ANNOTATE things on the user's screen using [POINT:...], [RECT:...], and [SCRIBBLE:...] tags.
+    1. POINT, HIGHLIGHT, and ANNOTATE things on the user's screen using OpenClicky's private visual-guidance control output.
     2. GIVE ADVICE, EXPLAIN, and ANSWER QUESTIONS conversationally — including conceptual coding questions, walkthroughs, "what does this mean", "how would i", etc.
     3. SEARCH THE WEB conversationally when the user asks. answer from your own general knowledge; if the user explicitly wants live/current data (today's weather, latest price, breaking news), give a brief handoff-style acknowledgement; OpenClicky routes that kind of task to Agent Mode.
     4. ROUTE WORK NATURALLY — simple conversational help stays in voice, direct computer-control is handled by OpenClicky's computer-use path, and concrete file/code/research/settings/log work is handed to Agent Mode only when the user is asking for real tool work rather than talking through an idea.
@@ -14127,13 +14484,16 @@ final class CompanionManager: ObservableObject {
     - don't end with dead-end yes/no questions ("want me to explain more?"). when it fits, plant a seed — mention something bigger or related they could try.
 
     visual guidance:
-    you have a small blue triangle cursor that can fly to and point at things on screen, and temporary drawing overlays that can highlight rectangles or draw short freehand scribbles. use them only when the target is visibly present and directly relevant to the user's current question, instruction, or next step.
+    you have a small blue triangle cursor that can fly to and point at things on screen, and temporary drawing overlays that can highlight rectangles or draw short freehand scribbles. use them only when the user is asking for guidance on the current visible screen, the target is visibly present, and the target is directly relevant to the user's current question, instruction, or next step. if the user is merely discussing OpenClicky's behavior, routing, prompts, or how highlighting should work, answer conversationally and use [POINT:none].
+
+    screen calibration:
+    if the user says "calibrate the screen", "calibrate our screens", "let's calibrate", or similar, choose one clearly visible, sharp-edged anchor point on the relevant screen — for example a window corner, title-bar control, button, app icon, toolbar item, or other stable UI feature. draw a small adjustable rectangle around that anchor and use a label containing "calibration anchor". tell the user briefly to drag the handles until it lines up. when they adjust it, OpenClicky records the correction and applies the learned per-screen coordinate offset to future POINT, RECT, and SCRIBBLE overlays. use one anchor per response; the user can repeat calibration for more samples or another screen.
 
     your default should be: point at the exact visible target only when it clearly helps answer what the user is asking now, such as a named button, visible text, current file, prompt, setting, menu, error, or UI region they are referring to. do not point at generic, nearby, decorative, stale, or merely available UI.
 
     use [POINT:none] when the answer is conceptual, the user is brainstorming, no visible target helps, the requested item is not visible, or you are not confident the target is the right one. if you're unsure, do not guess; answer briefly in words or ask for the missing context.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward. when more than one screen image is attached, every POINT, RECT, and SCRIBBLE tag must include the exact :screenN suffix for the image you measured from, even if it is screen one or the primary focus screen. if you cannot tell which screen image contains the exact target, use [POINT:none] instead of guessing.
+    if visual guidance is needed, append exactly one private control tag at the very end of your response, AFTER the natural spoken sentence. this tag is not speech; OpenClicky strips it and emits the actual cursor or overlay as a separate visual-guidance action. never describe the tag, never say the coordinates aloud, and never include a visual tag in the middle of normal conversation. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward. when more than one screen image is attached, every POINT, RECT, and SCRIBBLE tag must include the exact :screenN suffix for the image you measured from, even if it is screen one or the primary focus screen. if you cannot tell which screen image contains the exact target, use [POINT:none] instead of guessing.
 
     point format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). with a single screen image, you may omit the screen number. with multiple screen images, always append :screenN where N is the screen number from the image label, for example [POINT:420,310:save button:screen2]. this is important — without the screen number, the cursor can point at the wrong display.
 
@@ -14141,14 +14501,15 @@ final class CompanionManager: ObservableObject {
 
     scribble format: [SCRIBBLE:x1,y1;x2,y2;x3,y3:label] to draw a short temporary freehand path over visible content. use this when the user asks you to draw, circle loosely, trace, or mark a non-rectangular path. use at least two points. with multiple screen images, always append :screenN.
 
-    append at most one visual tag at the very end of your response. choose POINT, RECT, or SCRIBBLE — never combine them in the same response.
+    append at most one private visual control tag at the very end of your response. choose POINT, RECT, or SCRIBBLE — never combine them in the same response. treat this as a separate tool/control output, not as wording for the user.
 
     if visual guidance wouldn't help, append [POINT:none].
 
     examples:
     - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
-    - user asks to highlight an error: "that's the error block you're looking for — it starts in the terminal output on the right. [RECT:760,115,420,190:error block]"
-    - user asks to draw over a path: "that flight path arcs across the top of the scene here. [SCRIBBLE:430,160;500,135;570,145;640,190:flight path]"
+    - user asks to highlight an error visible on screen: "that's the error block you're looking for — it starts in the terminal output on the right. [RECT:760,115,420,190:error block]"
+    - user asks to draw over a visible path: "that flight path arcs across the top of the scene here. [SCRIBBLE:430,160;500,135;570,145;640,190:flight path]"
+    - user discusses how OpenClicky should highlight things: "right — highlights should be emitted as a separate visual action, not spoken as rectangle instructions. [POINT:none]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
@@ -14220,8 +14581,9 @@ final class CompanionManager: ObservableObject {
         let memoryContext = codexHomeManager.persistentMemoryContext()
         return """
         \(Self.companionVoiceResponseSystemPrompt)
-
+        \(inlineWebSearchCapabilityPromptIfAvailable())
         \(currentAppSkillContextPrompt())
+        \(visualGuidanceCorrectionLearningPrompt())
 
         \(runtimeStorageContextForVoicePrompt())
 
@@ -14229,6 +14591,112 @@ final class CompanionManager: ObservableObject {
         read this as durable user/project context. do not say you cannot remember outside the conversation; use this memory.
 
         \(memoryContext)
+        """
+    }
+
+    private func visualGuidanceCorrectionLearningPrompt() -> String {
+        let defaults = UserDefaults.standard
+        let count = defaults.integer(forKey: "openclicky.visualGuidance.rectangleCorrection.count")
+        let calibrationSummary = Self.visualGuidanceCalibrationPromptSummary()
+        guard count > 0 || !calibrationSummary.isEmpty else { return "" }
+        let tolerance = defaults.double(forKey: "openclicky.visualGuidance.rectangleCorrection.tolerancePoints")
+        let correctionSummary = count > 0
+            ? "current learned rectangle correction tolerance is about \(Int(tolerance.rounded())) screen points; when placing rectangles, be a little more generous around uncertain targets and avoid overly tight boxes unless the visible target boundaries are unambiguous."
+            : "no ordinary rectangle correction tolerance has been learned yet."
+        return """
+
+        visual guidance correction learning:
+        the user can adjust rectangle overlays after OpenClicky draws them. treat these adjustments as correction feedback. \(correctionSummary)\(calibrationSummary)
+        """
+    }
+
+    private static let visualGuidanceCalibrationDefaultsPrefix = "openclicky.visualGuidance.coordinateCalibration"
+
+    private static func isVisualGuidanceCalibrationCaption(_ caption: String?) -> Bool {
+        guard let caption else { return false }
+        let normalized = caption
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        return normalized.contains("calibration")
+            || normalized.contains("calibrate")
+            || normalized.contains("anchor")
+    }
+
+    private static func visualGuidanceCalibrationScreenKey(for displayFrame: CGRect) -> String {
+        [
+            Int(displayFrame.minX.rounded()),
+            Int(displayFrame.minY.rounded()),
+            Int(displayFrame.width.rounded()),
+            Int(displayFrame.height.rounded())
+        ]
+        .map(String.init)
+        .joined(separator: "_")
+    }
+
+    private static func visualGuidanceCalibrationDefaultsKey(for displayFrame: CGRect, suffix: String) -> String {
+        "\(visualGuidanceCalibrationDefaultsPrefix).\(visualGuidanceCalibrationScreenKey(for: displayFrame)).\(suffix)"
+    }
+
+    private static func visualGuidanceCalibrationOffset(for displayFrame: CGRect) -> CGSize {
+        let defaults = UserDefaults.standard
+        let countKey = visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "count")
+        guard defaults.integer(forKey: countKey) > 0 else { return .zero }
+        return CGSize(
+            width: defaults.double(forKey: visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "offsetX")),
+            height: defaults.double(forKey: visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "offsetY"))
+        )
+    }
+
+    @discardableResult
+    private static func updatedVisualGuidanceCalibrationOffset(
+        delta: CGSize,
+        for displayFrame: CGRect
+    ) -> (screenKey: String, offset: CGSize, count: Int) {
+        let defaults = UserDefaults.standard
+        let countKey = visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "count")
+        let offsetXKey = visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "offsetX")
+        let offsetYKey = visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: "offsetY")
+        let oldCount = defaults.integer(forKey: countKey)
+        let newCount = oldCount + 1
+        let oldOffset = CGSize(
+            width: defaults.double(forKey: offsetXKey),
+            height: defaults.double(forKey: offsetYKey)
+        )
+        let newOffset = CGSize(
+            width: ((oldOffset.width * Double(oldCount)) + delta.width) / Double(newCount),
+            height: ((oldOffset.height * Double(oldCount)) + delta.height) / Double(newCount)
+        )
+        defaults.set(newCount, forKey: countKey)
+        defaults.set(newOffset.width, forKey: offsetXKey)
+        defaults.set(newOffset.height, forKey: offsetYKey)
+        return (visualGuidanceCalibrationScreenKey(for: displayFrame), newOffset, newCount)
+    }
+
+    private static func visualGuidanceCalibrationPromptSummary() -> String {
+        let defaults = UserDefaults.standard
+        let summaries = NSScreen.screens.compactMap { screen -> String? in
+            let count = defaults.integer(forKey: visualGuidanceCalibrationDefaultsKey(for: screen.frame, suffix: "count"))
+            guard count > 0 else { return nil }
+            let offset = visualGuidanceCalibrationOffset(for: screen.frame)
+            return " screen \(visualGuidanceCalibrationScreenKey(for: screen.frame)) has \(count) calibration sample\(count == 1 ? "" : "s") and applies an offset of x \(Int(offset.width.rounded())), y \(Int(offset.height.rounded())) points."
+        }
+        guard !summaries.isEmpty else { return "" }
+        return " coordinate calibration is active:\(summaries.joined())"
+    }
+
+    /// Lane-aware web-search capability note. Only the Claude Agent SDK voice
+    /// lane has the WebSearch/WebFetch tools enabled (see bridge.mjs), so only
+    /// that lane should be told it can search inline. Every other lane keeps
+    /// the shared prompt's hand-off-to-Agent-Mode behavior for live data.
+    private func inlineWebSearchCapabilityPromptIfAvailable() -> String {
+        let voiceModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        guard voiceModel.provider == .anthropic,
+              claudeAgentSDKAPI != nil else {
+            return ""
+        }
+        return """
+
+        web search is available to you on this turn. when the user needs live or current information (today's weather, latest price, recent news, scores, anything past your training), search the web yourself and answer inline in a sentence or two with what you found. do not hand this off to Agent Mode and do not say a background agent will do it — you can answer it now.
         """
     }
 
@@ -14677,9 +15145,9 @@ final class CompanionManager: ObservableObject {
                             }
                         }
 
-                        // Strip a trailing partial-tag fragment so we
-                        // never push "[POI" into the TTS pipeline.
-                        let safeSpoken = Self.stripTrailingPointTagFragment(parsedSpoken)
+                        // Strip a trailing partial visual-guidance tag so we
+                        // never push "[POI", "[RECT", or "[SCRIBBLE" into TTS.
+                        let safeSpoken = Self.stripTrailingVisualGuidanceTagFragment(parsedSpoken)
 
                         guard safeSpoken.hasPrefix(emittedSpokenSoFar),
                               safeSpoken.count > emittedSpokenSoFar.count else {
@@ -14796,9 +15264,15 @@ final class CompanionManager: ObservableObject {
                     let appKitY = displayHeight - displayLocalY
 
                     // Convert display-local coords to global screen coords
+                    let calibrationOffset = Self.visualGuidanceCalibrationOffset(for: displayFrame)
                     let globalLocation = CGPoint(
                         x: displayLocalX + displayFrame.origin.x,
                         y: appKitY + displayFrame.origin.y
+                    ).applying(
+                        CGAffineTransform(
+                            translationX: calibrationOffset.width,
+                            y: calibrationOffset.height
+                        )
                     )
 
                     detectedElementScreenLocation = globalLocation
@@ -15174,9 +15648,15 @@ final class CompanionManager: ObservableObject {
         let clampedY = max(0, min(point.y, screenshotHeight))
         let displayLocalX = clampedX * (displayWidth / screenshotWidth)
         let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+        let calibrationOffset = Self.visualGuidanceCalibrationOffset(for: capture.displayFrame)
         return CGPoint(
             x: displayLocalX + capture.displayFrame.origin.x,
             y: (displayHeight - displayLocalY) + capture.displayFrame.origin.y
+        ).applying(
+            CGAffineTransform(
+                translationX: calibrationOffset.width,
+                y: calibrationOffset.height
+            )
         )
     }
 
@@ -15463,7 +15943,7 @@ final class CompanionManager: ObservableObject {
         modelProvider: OpenClickyModelProvider,
         ttsProvider: OpenClickyTTSProvider
     ) -> Bool {
-        let commandText = normalizedSpokenCommandText(transcript)
+        let commandText = SpokenText.normalizedSpokenCommandText(transcript)
         let wordCount = commandText.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
 
         // Never prepend filler to acknowledgements, corrections, or very
@@ -15526,7 +16006,7 @@ final class CompanionManager: ObservableObject {
         let normalized = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
-        let commandText = normalizedSpokenCommandText(transcript)
+        let commandText = SpokenText.normalizedSpokenCommandText(transcript)
 
         if isVisualGuidanceDrawingRequest(normalized: normalized, commandText: commandText) {
             return true
@@ -15534,6 +16014,8 @@ final class CompanionManager: ObservableObject {
 
         let explicitVisualPhrases = [
             "my screen", "the screen", "on screen", "on the screen", "this screen",
+            "calibrate the screen", "calibrate screen", "calibrate our screens", "calibrate screens",
+            "screen calibration", "calibration anchor",
             "what am i looking", "what's on", "what is on", "what do you see",
             "look at", "take a look", "can you see", "do you see",
             "this window", "that window", "current window", "active window",
@@ -15558,7 +16040,7 @@ final class CompanionManager: ObservableObject {
             "layout", "spacing", "padding", "margin", "margins", "size", "sized",
             "highlight", "rectangle", "rectangles", "circle", "circles",
             "shape", "shapes", "box", "outline", "scribble", "scribbles", "trace",
-            "left", "right", "top", "bottom", "symbol", "green"
+            "left", "right", "top", "bottom", "symbol", "green", "calibrate", "calibration"
         ]
         let tokens = commandText.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         if tokens.contains(where: { visualTokens.contains($0) }) { return true }
@@ -15613,7 +16095,7 @@ final class CompanionManager: ObservableObject {
         let normalized = transcript
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
-        let commandText = normalizedSpokenCommandText(transcript)
+        let commandText = SpokenText.normalizedSpokenCommandText(transcript)
         let cameraPhrases = [
             "camera", "webcam", "cam", "through the camera", "from the camera",
             "what am i holding", "what is this object", "what's this object",
@@ -15838,7 +16320,7 @@ final class CompanionManager: ObservableObject {
     private static func shouldAttemptProactivePointing(for transcript: String) -> Bool {
         let normalizedTranscript = transcript.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
-        let normalizedCommandText = normalizedSpokenCommandText(transcript)
+        let normalizedCommandText = SpokenText.normalizedSpokenCommandText(transcript)
 
         let voiceStatusPhrases = [
             "can you hear",
@@ -16071,19 +16553,24 @@ final class CompanionManager: ObservableObject {
         let visualOverlay: OpenClickyVisualGuidanceOverlay?
     }
 
-    /// Strips a trailing partial `[POINT...` fragment from a parsed
-    /// spoken-text string. During streaming the `[POINT:` tag arrives one
-    /// token at a time; until the closing `]` lands, `parsePointingCoordinates`
-    /// can't match it and the half-formed tag would otherwise leak into
-    /// the TTS pipeline. This regex eats any partial tail fragment up to
-    /// (but not past) a complete `]`. Once the response finishes, the
-    /// canonical parser handles the closed tag and this is a no-op.
-    static func stripTrailingPointTagFragment(_ text: String) -> String {
-        // Matches a trailing `[`, `[P`, `[PO`, `[POI`, `[POIN`, `[POINT`,
-        // `[POINT:`, or `[POINT:` followed by anything that hasn't yet
-        // contained a closing `]`. Anchored to end-of-string.
-        let pattern = #"\s*\[(?:P(?:O(?:I(?:N(?:T(?::[^\]]*)?)?)?)?)?)?$"#
-        return text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+    /// Strips a trailing partial private visual-guidance control tag from a
+    /// parsed spoken-text string. During streaming the `[POINT:]`, `[RECT:]`,
+    /// or `[SCRIBBLE:]` tag arrives one token at a time; until the closing `]`
+    /// lands, `parsePointingCoordinates` can't match it and the half-formed tag
+    /// would otherwise leak into the TTS pipeline. This keeps overlays as a
+    /// separate control action instead of spoken instructions.
+    static func stripTrailingVisualGuidanceTagFragment(_ text: String) -> String {
+        guard let openBracket = text.lastIndex(of: "[") else { return text }
+        let fragment = text[openBracket...]
+        guard !fragment.contains("]") else { return text }
+
+        let upperFragment = fragment.uppercased()
+        let visualPrefixes = ["[POINT", "[RECT", "[SCRIBBLE"]
+        let isPartialVisualTag = visualPrefixes.contains { prefix in
+            prefix.hasPrefix(upperFragment) || upperFragment.hasPrefix(prefix + ":")
+        }
+        guard isPartialVisualTag else { return text }
+        return String(text[..<openBracket]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func combinedVoiceResponseText(prefill: String, continuation: String) -> String {
@@ -16727,8 +17214,8 @@ private final class UserActivityIdleDetector: ObservableObject {
 
 @MainActor
 final class TutorTargetClickTracker {
-    private static let pointOnlyHitToleranceInScreenPoints: CGFloat = 44
-    private static let rectInflationInScreenPoints: CGFloat = 8
+    nonisolated private static let pointOnlyHitToleranceInScreenPoints: CGFloat = 44
+    nonisolated private static let rectInflationInScreenPoints: CGFloat = 8
 
     private var targetPoint: CGPoint?
     private var targetRect: CGRect?
@@ -17183,6 +17670,25 @@ extension CompanionManager {
         shouldAttachScreenContext(to: transcript)
     }
 
+    static func testIsVisualGuidanceCalibrationCaption(_ caption: String?) -> Bool {
+        isVisualGuidanceCalibrationCaption(caption)
+    }
+
+    static func testResetVisualGuidanceCalibration(for displayFrame: CGRect) {
+        let defaults = UserDefaults.standard
+        ["count", "offsetX", "offsetY"].forEach { suffix in
+            defaults.removeObject(forKey: visualGuidanceCalibrationDefaultsKey(for: displayFrame, suffix: suffix))
+        }
+    }
+
+    static func testUpdateVisualGuidanceCalibrationOffset(delta: CGSize, for displayFrame: CGRect) -> CGSize {
+        updatedVisualGuidanceCalibrationOffset(delta: delta, for: displayFrame).offset
+    }
+
+    static func testVisualGuidanceCalibrationOffset(for displayFrame: CGRect) -> CGSize {
+        visualGuidanceCalibrationOffset(for: displayFrame)
+    }
+
     static func testParallelAgentInstructions(from instruction: String) -> [String] {
         parallelAgentInstructions(from: instruction)
     }
@@ -17192,3 +17698,160 @@ extension CompanionManager {
     }
 }
 #endif
+
+// MARK: - Extracted voice-routing types
+//
+// VoiceRouter and SpokenText are top-level `nonisolated` enums extracted out of
+// the CompanionManager class so the routing brain is decoupled from the view
+// model's @MainActor state and is unit-testable. They live here (rather than in
+// their own files) only because this project's Xcode file-system-synchronized
+// group does not ingest .swift files created outside Xcode; move them into
+// VoiceRouter.swift / SpokenText.swift once those files are added via Xcode's
+// New File dialog (which registers them with the target).
+
+/// Pure, side-effect-free classification vocabulary for the voice routing
+/// cascade. Everything here operates purely on its `String` arguments.
+nonisolated enum VoiceRouter {
+
+    // MARK: Agent-work vocabulary
+
+    static func containsAgentWorkAction(_ normalized: String) -> Bool {
+        let actionPattern = #"\b(?:check|look\s+at|take\s+a\s+look|inspect|review|audit|fix|modify|change|update|edit|build|create|make|write|draft|research|search|find|summari[sz]e|organize|clean\s+up|cleanup|test|run|install|compare|read|move|rename|delete|prune|optimi[sz]e|wire|implement|add|remove|route|delegate|ensure|verify|validate|confirm|diagnose|investigate|repair|polish|improve|finish|sort\s+out|deal\s+with|take\s+care\s+of|make\s+sure|look\s+into|figure\s+out)\b"#
+        return normalized.range(of: actionPattern, options: .regularExpression) != nil
+    }
+
+    static func containsDurableWorkTarget(_ normalized: String) -> Bool {
+        let targetPattern = #"\b(?:openclicky|clicky|github|repo|repository|codebase|project|app|settings|preference|preferences|log|logs|memory|skill|skills|desktop|download|downloads|document|documents|folder|folders|file|files|code|diff|git|branch|pull\s+request|pr|issue|issues|bug|test|tests|build|swift|xcode|email|gmail|calendar|spreadsheet|sheet|doc|slides|voice|realtime|computer\s+use|tool|tools|tooling|model|models|routing|route|background|agent\s+mode)\b"#
+        return normalized.range(of: targetPattern, options: .regularExpression) != nil
+    }
+
+    static func containsFreshResearchRequest(_ normalized: String) -> Bool {
+        let researchPattern = #"\b(?:latest|live|price|news|weather|schedule|standings|research|look\s+up|search\s+(?:the\s+)?web|google|browse)\b"#
+        return normalized.range(of: researchPattern, options: .regularExpression) != nil
+    }
+
+    static func isSensitiveOrDestructiveAgentTaskRequest(_ normalized: String) -> Bool {
+        let destructivePattern = #"\b(?:delete|remove|erase|wipe|destroy|drop|revoke|reset|nuke|clear|purge|uninstall|terminate|kill)\b"#
+        let broadScopePattern = #"\b(?:all|everything|entire|whole)\b"#
+        let destructiveTargetPattern = #"\b(?:file|files|folder|folders|directory|directories|repo|repository|branch|branches|commit|commits|tag|tags|history|database|databases|keychain|account|accounts)\b"#
+        let sensitiveTargetsPattern = #"\b(?:account|accounts|credential|credentials|password|passwords|token|tokens|api\s*key|secret|secrets|permission|permissions|auth|ssh|private\s+key|keychain|database|databases|prod|production|system\s+settings)\b"#
+
+        let hasDestructiveVerb = normalized.range(of: destructivePattern, options: .regularExpression) != nil
+        let hasBroadScope = normalized.range(of: broadScopePattern, options: .regularExpression) != nil
+        let hasDestructiveTarget = normalized.range(of: destructiveTargetPattern, options: .regularExpression) != nil
+        let hasSensitiveTarget = normalized.range(of: sensitiveTargetsPattern, options: .regularExpression) != nil
+
+        // Safety policy:
+        // - credential/permission/auth targets are always confirmation-worthy.
+        // - destructive verbs are confirmation-worthy when aimed at a destructive target
+        //   or broad-scope operation.
+        return hasSensitiveTarget || (hasDestructiveVerb && (hasBroadScope || hasDestructiveTarget))
+    }
+
+    // MARK: Hybrid (do-now + fix-in-background) cues
+
+    static func containsHybridForegroundCue(_ normalized: String) -> Bool {
+        let foregroundPattern = #"\b(?:what|why|how|who|when|where|explain|tell\s+me|describe|summari[sz]e|answer|quick\s+(?:answer|thought|view)|what\s+do\s+you\s+think|do\s+you\s+think)\b"#
+        return normalized.range(of: foregroundPattern, options: .regularExpression) != nil
+    }
+
+    static func containsHybridBackgroundCue(_ normalized: String) -> Bool {
+        let backgroundPattern = #"\b(?:background|agent|agents|agent\s+mode|codex|do\s+the\s+work|work\s+on\s+it|take\s+care\s+of\s+it|also\s+(?:fix|implement|patch|research|find|check|review|update|change|build|create)|while\s+you(?:'re|re)?\s+(?:at\s+it|doing\s+that)|combination\s+of\s+the\s+two)\b"#
+        return normalized.range(of: backgroundPattern, options: .regularExpression) != nil
+    }
+
+    // MARK: Natural / referential background-work cues
+
+    static func containsNaturalBackgroundWorkCue(_ normalized: String) -> Bool {
+        let cuePattern = #"\b(?:make\s+sure|ensure|verify|validate|confirm|look\s+into|figure\s+out|sort\s+out|deal\s+with|take\s+care\s+of|get\s+(?:this|that|it|.+?)\s+working|wire\s+(?:up|in)|hook\s+(?:up|in)|set\s+up|finish|polish|improve|repair|diagnose|investigate)\b"#
+        if normalized.range(of: cuePattern, options: .regularExpression) != nil {
+            return true
+        }
+
+        let makeUsePattern = #"\b(?:make|have)\b.{1,80}\b(?:use|using|route|routing|send|sending|call|calling)\b"#
+        return normalized.range(of: makeUsePattern, options: .regularExpression) != nil
+    }
+
+    static func containsReferentialWorkTarget(_ normalized: String) -> Bool {
+        let referencePattern = #"\b(?:this|that|it|here|current\s+(?:file|screen|window|page|repo|repository|project|app)|visible\s+(?:file|code|screen|window|page)|selected\s+(?:text|file|code|region)|the\s+(?:current|visible|selected)\s+(?:thing|part|file|code|screen|window|page)|what\s+we\s+(?:just\s+)?(?:talked|discussed)\s+about|the\s+thing\s+from\s+before)\b"#
+        return normalized.range(of: referencePattern, options: .regularExpression) != nil
+    }
+}
+
+/// Spoken-transcript normalization utilities shared by the routing brain and
+/// the rest of the app. Pure, `nonisolated`, side-effect-free. These form a
+/// closed cluster: the only functions they call are each other.
+nonisolated enum SpokenText {
+
+    /// Lowercased, diacritic-folded, punctuation-stripped, single-spaced form
+    /// of a transcript — the canonical surface the routing predicates match.
+    static func normalizedSpokenCommandText(_ transcript: String) -> String {
+        transcript
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"[^\p{L}\p{N}\s]+"#, with: " ", options: .regularExpression)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    static func wordCount(in text: String) -> Int {
+        text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
+    }
+
+    /// Strips leading filler ("hey", "ok clicky", "i said to", "let's try that
+    /// again") and trailing punctuation so a raw transcript becomes a clean
+    /// command candidate.
+    static func normalizedCommandCandidate(from transcript: String) -> String {
+        var candidate = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let prefixPatterns = [
+            #"(?i)^\s*(?:hey|ok|okay|right|so)[\s,]+"#,
+            #"(?i)^\s*(?:clicky|openclicky)[\s,]+"#,
+            #"(?i)^\s*i\s+(?:said|asked|told)\s+(?:for\s+you\s+to|you\s+to|to)\s+"#,
+            #"(?i)^\s*(?:let's|lets)\s+try\s+(?:that|this)\s+again[\s,]+"#
+        ]
+
+        var didStripPrefix = true
+        while didStripPrefix {
+            didStripPrefix = false
+            for pattern in prefixPatterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                let range = NSRange(candidate.startIndex..<candidate.endIndex, in: candidate)
+                guard let match = regex.firstMatch(in: candidate, range: range),
+                      let matchRange = Range(match.range, in: candidate) else { continue }
+                candidate.removeSubrange(matchRange)
+                candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                didStripPrefix = true
+            }
+        }
+
+        return candidate.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-–—…"))
+    }
+
+    /// Reduces a polite agent request ("can you...", "please...", "tell an
+    /// agent to...") down to the bare instruction.
+    static func normalizedAgentTaskInstruction(from instruction: String) -> String {
+        let trimmedInstruction = normalizedCommandCandidate(from: instruction)
+        guard !trimmedInstruction.isEmpty else { return trimmedInstruction }
+
+        let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+|please\s+|(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)(.+?)[\.\!\?]*\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: trimmedInstruction,
+                range: NSRange(trimmedInstruction.startIndex..<trimmedInstruction.endIndex, in: trimmedInstruction)
+              ),
+              let taskRange = Range(match.range(at: 1), in: trimmedInstruction) else {
+            return trimmedInstruction
+        }
+
+        return String(trimmedInstruction[taskRange])
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-"))
+    }
+
+    static func cleanedAgentTaskInstruction(_ instruction: String) -> String {
+        instruction
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.,:;!?-"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}

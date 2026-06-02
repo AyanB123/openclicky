@@ -415,6 +415,43 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
         )
     }
 
+    /// Clicks at a window-screenshot pixel coordinate via the background
+    /// runtime. BCU's /v1/click "x,y" form is in the same screenshot space
+    /// returned by get_window_state / captureFrontmostWindowAsJPEG — NOT
+    /// global display points — so callers must point against the BCU window
+    /// screenshot and pass the raw screenshot coordinate here.
+    func click(at point: CGPoint, window: String, targetAppName: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
+        try await ensureRuntimeReady()
+        OpenClickyApplicationUsageLogStore.shared.recordApplication(
+            name: targetAppName,
+            bundleIdentifier: nil,
+            source: "background_computer_use_click"
+        )
+        let request = OpenClickyBackgroundComputerUseClickRequest(
+            window: window,
+            x: Double(point.x),
+            y: Double(point.y),
+            clickCount: 1,
+            cursor: OpenClickyBackgroundComputerUseCursorRequest(
+                id: "openclicky-main",
+                name: "OpenClicky",
+                color: "#38BDF8"
+            ),
+            imageMode: "omit",
+            debug: true
+        )
+        let response: OpenClickyBackgroundComputerUseActionResponse = try await postJSON(
+            path: "/v1/click",
+            payload: request
+        )
+        try ensureActionSucceeded(response, route: "click")
+        return OpenClickyBackgroundComputerUseActionResult(
+            windowID: window,
+            summary: response.summary,
+            ok: response.ok
+        )
+    }
+
     private func ensureActionSucceeded(_ response: OpenClickyBackgroundComputerUseActionResponse, route: String) throws {
         guard response.ok else {
             throw OpenClickyBackgroundComputerUseError.actionFailed(route: route, summary: response.summary)
@@ -707,6 +744,16 @@ private nonisolated struct OpenClickyBackgroundComputerUseTypeTextRequest: Encod
         case imageMode
         case debug
     }
+}
+
+private nonisolated struct OpenClickyBackgroundComputerUseClickRequest: Encodable {
+    let window: String
+    let x: Double
+    let y: Double
+    let clickCount: Int
+    let cursor: OpenClickyBackgroundComputerUseCursorRequest
+    let imageMode: String
+    let debug: Bool
 }
 
 private nonisolated struct OpenClickyBackgroundComputerUseActionResponse: Decodable {

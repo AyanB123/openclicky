@@ -203,7 +203,7 @@ struct OpenClickySettingsView: View {
     @State private var userAssemblyAIAPIKey = ""
     @State private var userDeepgramAPIKey = ""
     @AppStorage(AppBundleConfiguration.userMCPDeveloperDocsEnabledDefaultsKey) private var mcpDeveloperDocsEnabled = false
-    @AppStorage(AppBundleConfiguration.userMCPComposioConnectEnabledDefaultsKey) private var mcpComposioConnectEnabled = true
+    @AppStorage(AppBundleConfiguration.userMCPComposioConnectEnabledDefaultsKey) private var mcpComposioConnectEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
     @AppStorage(AppBundleConfiguration.userDesktopNotificationsEnabledDefaultsKey) private var desktopNotificationsEnabled = true
