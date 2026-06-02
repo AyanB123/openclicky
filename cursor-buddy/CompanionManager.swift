@@ -5195,6 +5195,58 @@ final class CompanionManager: ObservableObject {
                 let verificationError = verification.errorOutput
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard verification.terminationStatus == 0, playerState == "playing" else {
+                    if verification.terminationStatus == 0, playerState != "playing" {
+                        let retry = await Task.detached(priority: .userInitiated) {
+                            OpenClickyLocalAutomationRunner.runAppleScript("""
+                            tell application "Spotify"
+                                activate
+                                play
+                                delay 0.2
+                                return player state as string
+                            end tell
+                            """)
+                        }.value
+                        let retryPlayerState = retry.output
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .lowercased()
+                        if retry.terminationStatus == 0, retryPlayerState == "playing" {
+                            latestVoiceResponseCard = ClickyResponseCard(
+                                source: .voice,
+                                rawText: "playing \(query) on Spotify.",
+                                contextTitle: request.instruction
+                            )
+                            speakShortSystemResponse("playing \(query) on Spotify.")
+                            OpenClickyMessageLogStore.shared.append(
+                                lane: "computer-use",
+                                direction: "outgoing",
+                                event: "\(backend.executorID).spotify_search_play_voice_retry",
+                                fields: [
+                                    "executor": backend.executorID,
+                                    "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                                    "appName": request.appName,
+                                    "query": query,
+                                    "initialPlayerState": playerState,
+                                    "playerState": retryPlayerState,
+                                    "instruction": request.instruction
+                                ]
+                            )
+                            markRequestCompleted(
+                                route: route,
+                                executionStartedAt: executionStartedAt,
+                                timing: timing,
+                                extra: [
+                                    "executor": backend.executorID,
+                                    "executionMethod": Self.spotifySearchPlayExecutionMethod(for: backend),
+                                    "appName": request.appName,
+                                    "query": query,
+                                    "initialPlayerState": playerState,
+                                    "playerState": retryPlayerState,
+                                    "voicePathRetry": true
+                                ]
+                            )
+                            return
+                        }
+                    }
                     let errorText = verification.terminationStatus == 0
                         ? "Spotify stayed \(playerState.isEmpty ? "unknown" : playerState) after search selection."
                         : (verificationError.isEmpty ? "Spotify playback verification failed." : verificationError)
@@ -9884,9 +9936,9 @@ final class CompanionManager: ObservableObject {
     private static func spotifySearchPlayExecutionMethod(for backend: OpenClickyComputerUseBackendID) -> String {
         switch backend {
         case .backgroundComputerUse:
-            return "NSWorkspace.open_spotify_uri + BackgroundComputerUse /v1/press_key + AppleScript playback verification"
+            return "NSWorkspace.open_spotify_uri + BackgroundComputerUse /v1/press_key + AppleScript play retry + playback verification"
         case .nativeSwift:
-            return "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey + AppleScript playback verification"
+            return "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey + AppleScript play retry + playback verification"
         }
     }
 
@@ -10616,8 +10668,17 @@ final class CompanionManager: ObservableObject {
 
         let normalized = normalizedSpokenCommandText(trimmed)
         let userIntentSignals = [
+            "check for errors",
+            "check this error",
+            "check these errors",
+            "fix this error",
+            "fix these errors",
             "fix this",
+            "fix that",
+            "fix it",
             "look at this",
+            "look into this",
+            "review this",
             "what is this",
             "whats this",
             "what's this",

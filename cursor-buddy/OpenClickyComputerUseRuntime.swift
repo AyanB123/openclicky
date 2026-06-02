@@ -739,6 +739,18 @@ enum OpenClickyMacPrivacyPermissionProbe {
     }
 
     static func hasAppleEventsAutomationPermission(targetBundleIdentifier: String, prompt: Bool = false) -> Bool {
+        // `AEDeterminePermissionToAutomateTarget` can emit noisy
+        // "procNotFound because no application found for address descriptor"
+        // console lines when asked to silently probe a bundle-id target that is
+        // not currently running. Background permission refreshes should not
+        // spam Xcode just to discover that a target such as System Events has
+        // not been launched yet; the explicit prompt path below is still
+        // allowed to ask macOS for Automation approval.
+        if !prompt,
+           NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleIdentifier).isEmpty {
+            return false
+        }
+
         let target = NSAppleEventDescriptor(bundleIdentifier: targetBundleIdentifier)
         guard let targetDescriptor = target.aeDesc else { return false }
         let status = AEDeterminePermissionToAutomateTarget(
