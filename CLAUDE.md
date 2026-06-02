@@ -51,6 +51,20 @@ OpenClicky should use local keys and user configuration. Do not add Google login
 
 Do not introduce a hard dependency on a Cloudflare Worker for the final app.
 
+## Inference Routing
+
+Two independent layers — keep them straight:
+
+1. **Provider selection (driven by Settings).** Every model in `OpenClickyModelCatalog` carries a `provider` (`.anthropic` / `.openAI` / `.codex` / `.deepgram`). `CompanionManager.analyzeVoiceResponse` and the element-pointing path switch on the selected model's provider to choose the backend family:
+   - `.anthropic` -> Claude (`ClaudeAgentSDKAPI` then `ClaudeAPI`)
+   - `.openAI` -> `OpenAIAPI`
+   - `.codex` -> `CodexVoiceSession` / `CodexPointDetector` (selecting e.g. `gpt-5.5` means Codex handles it)
+   - `.deepgram` -> Deepgram Voice Agent
+2. **Within-provider ordering (money rule).** For the Claude branch, the Claude Agent SDK is the PRIMARY path because it uses the local Claude Code sign-in already paid for. Direct `ClaudeAPI` HTTP is FALLBACK ONLY (SDK nil or throws). Never short-circuit to direct REST for latency or capability reasons — direct REST bills per token. The OpenAI/Codex branch follows the same shape: Codex app server first, OpenAI key fallback.
+
+Do not delete `ClaudeAPI.swift` or the HTTP path — it is the deliberate fallback. Before editing any Claude/OpenAI call site, confirm the order is SDK/app-server -> key fallback.
+
+
 ## Development Rules
 
 - Prefer existing design-system tokens and local view patterns.

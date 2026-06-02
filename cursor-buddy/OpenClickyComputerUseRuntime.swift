@@ -691,9 +691,9 @@ enum OpenClickyMacPrivacyPermissionProbe {
 
     static func hasAppleEventsAutomationPermission(targetBundleIdentifier: String, prompt: Bool = false) -> Bool {
         let target = NSAppleEventDescriptor(bundleIdentifier: targetBundleIdentifier)
-        var targetDescriptor = target.aeDesc
+        guard let targetDescriptor = target.aeDesc else { return false }
         let status = AEDeterminePermissionToAutomateTarget(
-            &targetDescriptor,
+            targetDescriptor,
             typeWildCard,
             typeWildCard,
             prompt

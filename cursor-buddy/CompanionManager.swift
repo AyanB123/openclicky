@@ -1598,9 +1598,8 @@ final class CompanionManager: ObservableObject {
         applyVoiceResponseModelSettings(selectedVoiceResponseModel)
         switch selectedVoiceResponseModel.provider {
         case .anthropic:
-            if AppBundleConfiguration.anthropicAPIKey() == nil {
-                claudeAgentSDKAPI?.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
-            }
+            // SDK is the primary Claude path — warm it whenever available.
+            claudeAgentSDKAPI?.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
         case .openAI, .codex:
             if selectedVoiceResponseModel.provider == .codex || AppBundleConfiguration.openAIAPIKey() == nil {
                 codexVoiceSession.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
@@ -2043,15 +2042,14 @@ final class CompanionManager: ObservableObject {
         let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
         switch selectedVoiceResponseModel.provider {
         case .anthropic:
-            if AppBundleConfiguration.anthropicAPIKey() == nil, let claudeAgentSDKAPI {
+            // SDK is the primary Claude path — warm it whenever available.
+            if let claudeAgentSDKAPI {
                 claudeAgentSDKAPI.warmUp(systemPrompt: currentVoiceResponseSystemPrompt())
             }
-            // Always force-init the HTTP ClaudeAPI client too. Its
-            // initializer kicks off a background HEAD to api.anthropic.com
-            // which caches the TLS session ticket. Without this, the
-            // first voice response pays a cold-handshake tax of ~150-300ms.
-            // The lazy `claudeAPI` previously only initialized on first
-            // request, which defeated the warm-up.
+            // Pre-init the HTTP ClaudeAPI client as fallback-only TLS warm-up
+            // when a key is present. Its initializer kicks off a background
+            // HEAD to api.anthropic.com which caches the TLS session ticket,
+            // so a fallback request avoids the ~150-300ms cold-handshake tax.
             if AppBundleConfiguration.anthropicAPIKey() != nil {
                 _ = claudeAPI
             }
@@ -14919,51 +14917,53 @@ final class CompanionManager: ObservableObject {
         assistantPrefill: String? = nil,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> String {
-        // Voice latency matters more than agentic session features here.
-        // Prefer direct Anthropic SSE when an API key is configured; keep
-        // the Claude Agent SDK bridge as local-account fallback.
+        // Inference routing rule: Claude Agent SDK FIRST (uses the local
+        // Claude Code sign-in the user already pays for), direct ClaudeAPI
+        // HTTP only as fallback when the SDK is unavailable or throws.
+        // Never short-circuit to HTTP for latency or capability reasons —
+        // direct REST bills per token on the user's card.
         print("🧠 analyzeClaudeResponse: model=\(model) sdkAvailable=\(claudeAgentSDKAPI != nil) httpKey=\(AppBundleConfiguration.anthropicAPIKey() != nil) prefill=\(assistantPrefill?.isEmpty == false)")
         let modelOption = OpenClickyModelCatalog.voiceResponseModel(withID: model)
 
-        if AppBundleConfiguration.anthropicAPIKey() != nil {
+        if let claudeAgentSDKAPI {
             do {
-                claudeAPI.model = modelOption.id
-                claudeAPI.maxOutputTokens = modelOption.maxOutputTokens
-                print("🧠 analyzeClaudeResponse: using direct HTTP streaming (ClaudeAPI)")
-                let (text, _) = try await claudeAPI.analyzeImageStreaming(
+                claudeAgentSDKAPI.model = modelOption.id
+                claudeAgentSDKAPI.maxOutputTokens = modelOption.maxOutputTokens
+                print("🧠 analyzeClaudeResponse: using Agent SDK bridge")
+                let (text, _) = try await claudeAgentSDKAPI.analyzeImageStreaming(
                     images: images,
                     systemPrompt: systemPrompt,
                     conversationHistory: conversationHistory,
                     userPrompt: userPrompt,
-                    assistantPrefill: assistantPrefill,
                     onTextChunk: onTextChunk
                 )
                 return text
             } catch {
-                guard claudeAgentSDKAPI != nil else { throw error }
+                guard AppBundleConfiguration.anthropicAPIKey() != nil else { throw error }
                 OpenClickyMessageLogStore.shared.append(
                     lane: "voice",
                     direction: "error",
                     event: "voice.response_fallback",
                     fields: [
-                        "from": "anthropic_api_key",
-                        "to": "claude_agent_sdk",
+                        "from": "claude_agent_sdk",
+                        "to": "anthropic_api_key",
                         "error": error.localizedDescription
                     ]
                 )
-                print("🔁 analyzeClaudeResponse: HTTP failed, falling back to Agent SDK: \(error.localizedDescription)")
+                print("🔁 analyzeClaudeResponse: Agent SDK failed, falling back to direct HTTP: \(error.localizedDescription)")
             }
         }
 
-        if let claudeAgentSDKAPI {
-            claudeAgentSDKAPI.model = modelOption.id
-            claudeAgentSDKAPI.maxOutputTokens = modelOption.maxOutputTokens
-            print("🧠 analyzeClaudeResponse: using Agent SDK bridge")
-            let (text, _) = try await claudeAgentSDKAPI.analyzeImageStreaming(
+        if AppBundleConfiguration.anthropicAPIKey() != nil {
+            claudeAPI.model = modelOption.id
+            claudeAPI.maxOutputTokens = modelOption.maxOutputTokens
+            print("🧠 analyzeClaudeResponse: using direct HTTP streaming (ClaudeAPI fallback)")
+            let (text, _) = try await claudeAPI.analyzeImageStreaming(
                 images: images,
                 systemPrompt: systemPrompt,
                 conversationHistory: conversationHistory,
                 userPrompt: userPrompt,
+                assistantPrefill: assistantPrefill,
                 onTextChunk: onTextChunk
             )
             return text
