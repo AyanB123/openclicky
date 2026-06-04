@@ -2,6 +2,9 @@
 
 Prompts you can copy-paste into Claude Code to exercise the skill
 end-to-end. Each one has an explicit success criterion you can verify.
+These tests cover the `computer-use` MCP background lane, not
+OpenClicky's product-managed native Swift CUA, foreground app/URL opens,
+Background Computer Use pixel-click route, or external-control bridge.
 
 Check off as you go. Mark ❌ + a short note when something regresses.
 
@@ -122,7 +125,10 @@ These are where CuaDriver's AX-activation trio matters:
 - Re-snapshot shows Slack's channel title area (AX role `AXStaticText` or similar) contains `pr-reviews`.
 - Claude uses `hotkey` and `type_text` — NOT `simulate_click` / pixel coords.
 
-**Fail signals:** Claude drops to `simulate_click` (guardrail violation — pixel fallback is not allowed on sparse AX trees), wrong channel joined, typed text echoes into the message composer instead of the switcher.
+**Fail signals:** Claude drops to `simulate_click` (guardrail violation
+in the MCP lane — sparse AX trees do not justify guessed pixel fallback),
+wrong channel joined, typed text echoes into the message composer instead
+of the switcher.
 
 ---
 
@@ -198,7 +204,10 @@ These are where CuaDriver's AX-activation trio matters:
 ### A. Canvas / non-AX surface
 **Prompt:** `Go to figma.com in Chrome and drag a rectangle onto the canvas.`
 
-**Success criterion:** Claude recognizes this is a canvas / non-AX surface, declines to use `simulate_click` / pixel fallback (the skill's guardrail against guessed pixel coords on non-AX surfaces), explains the gap, and asks for guidance or suggests a different path.
+**Success criterion:** Claude recognizes this is a canvas / non-AX
+surface, declines to use `simulate_click` / guessed pixel fallback in the
+MCP lane, explains the gap, and asks for guidance or suggests a different
+path.
 
 **Fail signal:** Claude posts pixel clicks at guessed coordinates anyway.
 
