@@ -35,8 +35,8 @@ menubar), **retry once** — Chromium occasionally needs a second call
 to finish populating.
 
 If it stays sparse after a retry, the target's AX tree genuinely
-doesn't expose the UI you want. Prefer these before reporting a
-pixel-mode blocker:
+doesn't expose the UI you want. Prefer these before reporting that an
+explicit pixel/foreground route is needed:
 
 1. Look for native entry points Chromium apps usually keep AX-visible:
    menu bar items (`AXMenuBarItem`) — expand them via the two-snapshot
@@ -87,7 +87,7 @@ Dock icon themselves. Do not activate, unhide, or raise the browser
 from the agent loop.
 
 **Last-resort path — omnibox via `⌘L`:** forbidden under the
-no-foreground contract (see SKILL.md) because `⌘L` activates
+MCP background contract (see SKILL.md) because `⌘L` activates
 Chrome even when delivered to a backgrounded pid. Keep this
 documented only as historical context:
 
@@ -243,10 +243,10 @@ toolbar items — anything that advertises `AXShowMenu`), use
 identical to `click({pid, window_id, element_index, action: "show_menu"})`.
 
 For a context menu on **web content itself** (right-clicking an image,
-a selection, the page background), OpenClicky's default runtime has no
+a selection, the page background), the `computer-use` MCP lane has no
 coordinate right-click path. Prefer `element_index` whenever the target
-is AX-addressable; otherwise stop and report that the interaction needs
-pixel/pointer mode.
+is AX-addressable; otherwise use an explicit OpenClicky pixel/foreground
+route only if the current tool surface documents one.
 
 ## Enable "Allow JavaScript from Apple Events" — browser support matrix
 

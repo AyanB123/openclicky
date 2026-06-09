@@ -4,8 +4,11 @@ OpenClicky's bundled Computer Use skill teaches Codex agents to drive
 native macOS apps through the local `computer-use` MCP server, backed
 by [`cua-driver`](https://github.com/trycua/cua/tree/main/libs/cua-driver).
 Agents snapshot an app's accessibility tree, act by `element_index`
-where possible, and verify via re-snapshot. Backgrounded-first: no
-focus steal, no cursor warp, no Space follow.
+where possible, and verify via re-snapshot. For the `computer-use` MCP
+lane, the default is backgrounded-first: no focus steal, no cursor warp,
+no Space follow. OpenClicky's app/router code remains the source of
+truth for native Swift CUA, foreground app/URL opens, Background
+Computer Use pixel clicks, and the external-control bridge.
 
 This copy is product-managed inside Clicky. Do not ask users to
 install `CuaDriver.app`, run the standalone `cua-driver` CLI, or
@@ -27,9 +30,11 @@ Recording grants, and exposes a curated MCP tool subset.
   this build. OpenClicky's default runtime does not expose recording or
   replay tools.
 - Canvas/viewport apps (Blender, Unity, GHOST, Qt, wxWidgets) —
-  diagnostic guidance only in this build. OpenClicky's default runtime blocks
-  coordinate clicks and does not expose pixel/recording/replay tools; stop and
-  explain the missing capability instead of guessing.
+  diagnostic guidance in the MCP lane. Prefer AX/page actions; use
+  coordinate clicks only through explicit OpenClicky routes that document
+  their coordinate space, such as BCU window-screenshot pixels or native
+  AppKit screen points. Recording/replay tools are still not exposed in
+  this build.
 
 See `SKILL.md` for the main body.
 

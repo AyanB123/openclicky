@@ -1,15 +1,19 @@
 ---
 name: cua-driver
-description: Drive native macOS apps and browser UI through OpenClicky's local computer-use MCP server, backed by Cua. Snapshot AX state, act by element_index, keep work backgrounded, prefer the user's default browser, and verify via re-snapshot. Use when the user asks you to operate, drive, automate, or perform a GUI task in a real macOS application on the host.
+description: Drive native macOS apps and browser UI through OpenClicky's local computer-use MCP background lane, backed by Cua. Snapshot state, prefer AX element_index actions, use explicit pixel/foreground paths only when the current OpenClicky tool surface exposes them, and verify via re-snapshot. Use when the user asks you to operate, drive, automate, or perform a GUI task in a real macOS application on the host.
 ---
 
 # cua-driver
 
 Orchestrates macOS app automation through Cua. In OpenClicky's managed
-runtime, this skill is the instruction surface, but the callable tool
-server is named `computer-use`. Call the local MCP tools by name
-(`launch_app`, `get_window_state`, `click`, `set_value`, etc.) instead
-of shelling out to `cua-driver`.
+runtime, this skill is the instruction surface for the Agent Mode
+`computer-use` MCP background lane. OpenClicky also has product routes
+for native Swift CUA, foreground app/URL opens, Background Computer Use
+pixel clicks, and the external-control bridge. Treat the app/router code
+as the source of truth for those lanes; this skill tells agents how to
+operate when the callable tool server is `computer-use`. Call the local
+MCP tools by name (`launch_app`, `get_window_state`, `click`,
+`set_value`, etc.) instead of shelling out to `cua-driver`.
 
 Whenever a user asks to drive a native macOS app or browser UI, follow
 the loop in this skill rather than calling tools ad-hoc. The
@@ -21,11 +25,18 @@ you skip it.
 OpenClicky ships Cua as a local `computer-use` MCP server backed by
 `ClickyComputerUseRuntime`. That helper is spawned by Codex inside
 Clicky.app, so macOS attributes Accessibility and Screen Recording use
-to OpenClicky itself. In this product runtime:
+to OpenClicky itself. In this MCP lane:
 
 - Use the `computer-use` MCP tools directly. Do not run the
   `cua-driver` CLI, `open`, AppleScript, `cliclick`, browser CLIs, or
   other GUI automation shims to operate apps.
+- Do not treat OpenClicky's own voice/router/native paths as violations
+  of this skill. The app may intentionally use `NSWorkspace` for
+  foreground app or URL opens, native Swift CUA for screen-coordinate
+  clicks/typing/keys, Background Computer Use `/v1/click` for
+  window-screenshot pixel clicks, or the external-control bridge for
+  visible guidance and explicit coordinate clicks. Agents should not
+  reimplement those paths with shell shims.
 - For external account-backed apps, prefer a connected structured MCP or
   Composio integration when one is exposed and suitable. Do not silently
   use Computer Use as a substitute for a missing/expired connector on
@@ -59,30 +70,34 @@ to OpenClicky itself. In this product runtime:
   element_index})`, `right_click({pid, window_id, element_index})`,
   `set_value`, `type_text`, `press_key`, `hotkey`, `scroll`, `page`,
   and `get_window_state`.
-- OpenClicky's default runtime does not expose `move_cursor`, `drag`, or
-  `double_click` (not exposed in this build); it also blocks coordinate-only `click` / `right_click`, recording,
-  replay, or zoom. If a target has no AX or page path, stop and say that
-  completing it would require moving the user's real pointer or using
-  pixel mode, then ask for explicit permission instead of pretending.
+- OpenClicky's `computer-use` MCP lane does not expose `move_cursor`,
+  `drag`, `double_click`, recording, replay, or zoom in this build.
+  Prefer AX/page actions in this skill. Coordinate clicks are valid only
+  through explicit OpenClicky pixel/foreground surfaces that document
+  their coordinate space; do not invent raw `CGEvent`, `cliclick`, or
+  shell-based pixel input.
 - Stop before purchases, sends, deletes, payments, account changes,
   submitting forms, or other irreversible actions unless the user
   explicitly approved that exact step.
 
-## The no-foreground contract — read this first
+## The MCP background contract — read this first
 
-**The user's frontmost app MUST NOT change.** This is the whole
-reason OpenClicky ships Computer Use. Users pay for the right to keep typing in
-their editor while an agent drives another app in the background.
-Violate this rule and every other nice property the driver gives
-you (no cursor warp, no Space switch, no window raise) stops
-mattering — you just shipped the Accessibility Inspector with extra
-steps.
+For this `computer-use` MCP skill, default to preserving the user's
+frontmost app. Users should be able to keep typing in their editor while
+an agent drives another app in the background. This is a lane-specific
+contract, not a statement that OpenClicky's app code must never
+foreground anything: explicit voice app-open requests, native CUA,
+Background Computer Use pixel actions, the visual-control bridge, and
+product-managed foreground flows are separate OpenClicky routes.
 
 Before running any shell command, ask: **"does this raise,
 activate, foreground, or make-key any app?"** If yes, don't run it.
-Every one of the commands below activates the target on macOS and
-is therefore forbidden unless the user **explicitly** asked for
-frontmost state:
+Every one of the commands below activates the target on macOS and is
+therefore forbidden inside this MCP lane. If the user explicitly asks
+for frontmost state and the current OpenClicky tool surface exposes a
+foreground/native route, use that documented route. If it does not,
+explain that this skill can keep working in the background but cannot
+foreground the app through `computer-use`.
 
 - **Every form of the `open` CLI — `open -a <App>`, `open -b
   <bundle-id>`, `open <file>`, `open <path-to-App.app>`, `open
@@ -95,9 +110,8 @@ frontmost state:
   a just-built .app from a local build dir (e.g. `open
   build/Build/Products/Debug/MyApp.app`) — resolve the
   `CFBundleIdentifier` from `Info.plist` and use `launch_app`
-  with that id. See "The narrow carve-out" below for why
-  `launch_app` is safe even when the app internally calls
-  `NSApp.activate`.
+  with that id. If foregrounding is genuinely needed, use a documented
+  OpenClicky foreground/native route rather than shelling out.
 - `osascript -e 'tell application "X" to activate'` —
   activates by design. Same for `... to open <file>`,
   `... to launch`, and anything with `activate` in the tell block.
@@ -175,19 +189,17 @@ routinely a silent no-op too, because action menu items go
 use menu-bar navigation when the target is already frontmost.** For
 backgrounded targets, read state via in-window AX (window title,
 toolbar `AXStaticText`) and dispatch via in-window `element_index`
-actions. Pixel clicks are blocked in OpenClicky's default runtime. Full
-rationale in "Navigating native menu bars" below.
+actions. Pixel clicks are not the default path in this MCP lane; use
+them only through explicit OpenClicky pixel/foreground surfaces that
+document their coordinate space. Full rationale in "Navigating native
+menu bars" below.
 
-**"Open \<app\>" in user speech means launch, not activate.**
-`launch_app` is the one correct path for process
-startup — it's idempotent (no-op on a running app), returns the
-pid, and has an internal `FocusRestoreGuard` that catches
-`NSApp.activate(ignoringOtherApps:)` calls the target makes during
-`application(_:open:)` and clobbers the frontmost back to what it
-was before the launch. That guard is why `launch_app` with `urls`
-(e.g. `{"bundle_id": "com.colliderli.iina", "urls": ["~/video.mp4"]}`)
-is safe even for apps that normally foreground on media-load
-(Chrome, Electron, media players).
+Inside this MCP lane, **"open \<app\>" means launch, not activate.**
+`launch_app` is the correct path for background process startup: it is
+idempotent, returns the pid, and is designed for background operation.
+If OpenClicky's voice/native router handled the same phrase as an
+explicit foreground app-open, that is app behavior outside this skill.
+Do not override it, and do not recreate it with `open` or AppleScript.
 
 ## Defaults — always prefer the local MCP tools over shell shims
 
@@ -197,8 +209,8 @@ MCP server. The standalone `cua-driver` CLI examples in upstream docs
 are for local development only; they are not the product runtime path.
 
 Intent → tool mapping. If you find yourself reaching for the right
-column, something has gone wrong — re-read "The no-foreground
-contract" above:
+column while operating through `computer-use`, something has gone wrong
+— re-read "The MCP background contract" above:
 
 | Intent | Use | Don't use |
 |---|---|---|
@@ -206,20 +218,20 @@ contract" above:
 | Find a pid | `list_apps` or `launch_app`'s return | `pgrep`, `ps`, `osascript frontmost` |
 | Enumerate an app's windows | `list_windows({pid})` — or read the `windows` array `launch_app` already returns | `osascript 'every window of app …'` |
 | Click / type / scroll / keys | `click`, `type_text`, `scroll`, `press_key`, `hotkey` | `osascript`, `cliclick`, raw `CGEvent`, `open <url>` |
-| Drag / drag-and-drop / marquee select | Not exposed in OpenClicky's default runtime; stop and explain that this build lacks a safe drag/pixel mode | `cliclick dd:`, `osascript drag` |
+| Drag / drag-and-drop / marquee select | Not exposed in the `computer-use` MCP lane; use only an explicit OpenClicky foreground/pixel route if the current tool surface documents one | `cliclick dd:`, `osascript drag` |
 | Screenshot | `screenshot` or the PNG in `get_window_state` | `screencapture` |
 | Quit an app | ask the user first, then `hotkey({pid, keys:["cmd","q"]})` | `kill`, `killall`, `pkill` |
 | Hand a file/URL to an app | `launch_app({bundle_id, urls:[<path>]})` | `open -a <App> <path>`, `open <url>` |
 
-### The narrow frontmost carve-out
+### The frontmost handoff
 
-OpenClicky's default runtime has no activation tool and does not allow
+The `computer-use` MCP lane has no activation tool and does not allow
 `osascript` activation. If the user explicitly asks for frontmost state
 ("bring Chrome to the front", "make it frontmost", "I want to see X"),
-say that this build can keep working in the background but cannot
-foreground the app through Computer Use. Reaching for activation because
-a tool call returned something confusing is wrong — that's the classic
-foot-in-the-door failure mode and it steals focus every time.
+use an explicit OpenClicky foreground/native tool only if the current
+tool surface exposes one. If only the `computer-use` MCP lane is
+available, say that this build can keep working in the background but
+cannot foreground the app through `computer-use`.
 
 When a Computer Use call surprises you, diagnose the local MCP state first:
 
@@ -242,9 +254,10 @@ When a Computer Use call surprises you, diagnose the local MCP state first:
 - **Sparse Chromium AX tree?** Retry `get_window_state` once — the
   tree populates on second call.
 
-Only after those are ruled out, and only if the user's action
-genuinely needs frontmost state, stop and explain the foreground
-requirement. OpenClicky's default runtime does not expose an activation
+Only after those are ruled out, and only if the user's action genuinely
+needs frontmost state, hand off to an explicit OpenClicky foreground
+route when one is available. Otherwise stop and explain the foreground
+requirement. The `computer-use` MCP lane does not expose an activation
 tool.
 
 ### Self-check pattern
@@ -254,11 +267,14 @@ Before every Computer Use tool call that touches any macOS app
 the self-check:
 
 1. **Does this command foreground the target?** If yes — stop and
-   translate to the Computer Use equivalent from the mapping table.
+   translate to the Computer Use equivalent from the mapping table, or
+   use an explicit OpenClicky foreground/native route if that is the
+   selected tool surface.
 2. **Does this command move the user's real cursor?** (`cliclick`,
    any `CGEventPost` at `cghidEventTap` over another app's window).
    If yes — stop; use an AX element action, keyboard shortcut, or
-   `page` action. OpenClicky's default runtime blocks coordinate clicks.
+   `page` action, or use a documented OpenClicky pixel route when the
+   tool surface explicitly exposes one.
 3. **Does this command bypass Computer Use entirely?** (`osascript`
    mutating GUI state, AppleScript files, external helpers.) If
    yes — stop; find the local MCP tool that does the intent.
@@ -373,10 +389,10 @@ JPEG-over-PNG finding.
 
 **Window state → what works**
 
-| state | `get_window_state` | `click`/`set_value` (AX) | `press_key` commit (Return/Space/Tab) | pixel click in OpenClicky |
+| state | `get_window_state` | `click`/`set_value` (AX) | `press_key` commit (Return/Space/Tab) | pixel click in explicit OpenClicky routes |
 |---|---|---|---|---|
-| frontmost | ✅ | ✅ | ✅ | blocked |
-| backgrounded / visible | ✅ | ✅ | ✅ | blocked |
+| frontmost | ✅ | ✅ | ✅ | native/bridge route when explicitly exposed |
+| backgrounded / visible | ✅ | ✅ | ✅ | BCU window-screenshot route when explicitly exposed |
 | **minimized** (Dock genie) | ✅ | ✅ (no deminiaturize — AX actions fire on the minimized window in place) | ❌ silent no-op / system beep — use `set_value` or click equivalent | ❌ no on-screen bounds |
 | hidden (`hides=true` / `NSApp.hide`) | ✅ | ✅ | depends | ❌ |
 | on another Space | ⚠️ AX tree often stripped to menu-bar-only on SwiftUI apps (System Settings) — AppKit apps usually fine. Response carries `off_space: true` + `window_space_ids` so you can detect it | ✅ | ✅ | ❌ window not in current-Space list |
@@ -412,9 +428,9 @@ side effects) and gives you the pid in one call — no `list_apps` hop.
 - `launch_app({bundle_id: "com.apple.finder"})` — preferred, unambiguous.
 - `launch_app({name: "Calculator"})` — when bundle_id isn't known.
 
-`launch_app` is the **background-safe launch primitive** — that's the
-entire point of OpenClicky Computer Use: agents drive apps in the background while
-the user keeps typing in their real foreground app. In Cua v0.1.6,
+`launch_app` is the **background-safe launch primitive** for this MCP
+lane: agents drive apps in the background while the user keeps typing in
+their real foreground app. In Cua v0.1.6,
 LaunchServices is called without activating the target, menu hotkey
 delivery restores the previous frontmost app immediately after posting
 the key, and the previous frontmost app is restored if the target
@@ -422,12 +438,11 @@ self-activates while opening URLs. The target window may become visible
 behind the user's current app, but it must not become frontmost.
 
 If the user explicitly wants the window foregrounded (usually for a
-demo or recording), they bring it forward themselves — Dock click,
+demo or recording), hand off to an explicit OpenClicky
+foreground/native route if the current tool surface exposes one.
+Otherwise, tell the user to bring it forward themselves — Dock click,
 Cmd-Tab, or Spotlight. Do not reach for `open` / `osascript activate`
-as a shortcut to make the window visible; those paths break the
-backgrounded invariant on every call, not just the call that "needed"
-the foreground. Say out loud what the user needs to do ("click the
-Todo app in your Dock to bring it forward") and let them do it.
+as a shortcut to make the window visible inside this MCP lane.
 
 Never shell out to **any** form of `open` (including `open
 <path-to-App.app>` for a just-built binary — resolve the bundle id
@@ -505,10 +520,14 @@ safe backgrounded-dispatch.
 
 Standalone Cua can support coordinate-based input for canvas, video,
 WebGL, or custom-drawn surfaces that are not reachable through AX.
-OpenClicky's default runtime blocks coordinate clicks to protect the user's
-pointer model. If AX, keyboard, and `page` cannot reach the target,
-stop and explain that this build lacks a safe pixel mode instead of
-guessing.
+OpenClicky's MCP background lane should still prefer AX/page actions,
+but app-managed routes may expose coordinate clicks with explicit
+coordinate spaces: native Swift CUA uses global AppKit screen points,
+and Background Computer Use `/v1/click` uses window-screenshot pixel
+coordinates. If AX, keyboard, and `page` cannot reach the target, use
+only those documented OpenClicky pixel routes when the current tool
+surface exposes them; otherwise stop and report the missing capability
+instead of guessing.
 
 The `actions=[...]` list on each element is **advisory**, not
 authoritative. cua-driver does not pre-flight check against it —
@@ -526,8 +545,8 @@ last `get_window_state`; `window_id` is required alongside
 |---|---|---|
 | List an app's windows | `list_windows({pid})` | returns `window_id`, `title`, `bounds`, `z_index`, `is_on_screen`, `on_current_space`. Already included in `launch_app`'s response — only call this for long-lived pids |
 | Snapshot a window | `get_window_state({pid, window_id})` | returns `tree_markdown` + `screenshot_*`; populates the `(pid, window_id)` element_index cache |
-| Left click | `click({pid, window_id, element_index})` | default `action: "press"`. Coordinate `x/y` clicks are blocked by OpenClicky's tool policy. |
-| Double-click / open | Use `click({pid, window_id, element_index, action: "open"})` when the element advertises an open action | `double_click` is not exposed in OpenClicky's default runtime because it can fall back to pixel stamping. |
+| Left click | `click({pid, window_id, element_index})` | default `action: "press"`. Prefer element_index in this MCP lane; use coordinate forms only when the current OpenClicky tool descriptor documents them. |
+| Double-click / open | Use `click({pid, window_id, element_index, action: "open"})` when the element advertises an open action | `double_click` is not exposed in the `computer-use` MCP lane because it can fall back to pixel stamping. |
 | Right click / context menu | `right_click({pid, window_id, element_index})` or `click({pid, window_id, element_index, action: "show_menu"})` | Chromium web-content coerces pixel right-click to left — see `WEB_APPS.md` |
 | Type at cursor | `type_text({pid, text, window_id, element_index})` | `AXSelectedText` write; focuses first |
 | Set whole field value | `set_value({pid, window_id, element_index, value})` | sliders, steppers, text fields; **use for keyboard-commit workarounds on minimized windows** |
@@ -545,22 +564,36 @@ user's foreground app.
 **Why `element_index` is the primary path:** works on hidden /
 occluded / off-Space windows, no focus steal, stable across
 rebuilds, labels tell you what you're clicking. If AX cannot reach the
-target, use keyboard shortcuts or `page` where possible; otherwise stop
-and explain that this build lacks a safe pixel mode.
+target, use keyboard shortcuts or `page` where possible; otherwise use
+an explicit OpenClicky pixel route only when the current tool surface
+documents it.
 
 ### Pixel-coordinate clicks
 
-OpenClicky's default `computer-use` MCP server rejects coordinate clicks.
-Screenshots are for visual disambiguation only: use them to choose the
-right AX element, then dispatch by `element_index`. Do not translate
-screenshot pixels into a click in this runtime.
+Pixel clicks are supported in OpenClicky only through explicit routes
+with explicit coordinate spaces. Do not infer that every `click` tool
+uses the same coordinates.
+
+- `computer-use` MCP element clicks use `(pid, window_id,
+  element_index)`.
+- Background Computer Use `/v1/click` uses the focused window screenshot
+  pixel coordinate returned by that BCU capture, not global display
+  points.
+- Native Swift CUA and the external-control bridge use global AppKit
+  screen points, matching screenshot `displayFrame` metadata.
+
+Screenshots in this MCP skill are primarily for visual disambiguation:
+use them to choose the right AX element, then dispatch by
+`element_index`. Translate pixels into clicks only when the current
+OpenClicky tool descriptor explicitly says that is the accepted input
+space.
 
 If the target is a canvas, video player, WebGL surface, game viewport,
 or custom-drawn control with no useful AX tree, try reachable
 alternatives first: keyboard shortcuts, command palettes, toolbar
 controls, or the `page` tool. If those cannot perform the task, stop
-and tell the user the action needs a future foreground/pixel-mode
-capability.
+and tell the user the action needs an OpenClicky pixel/foreground route
+that is not exposed in the current tool surface.
 
 For browser video playback, prefer page or keyboard controls where
 available, such as `press_key({pid, key: "k"})` for YouTube-style
@@ -576,9 +609,11 @@ paths (`SLEventPostToPid`, `CGEvent.postToPid`) are filtered by the
 viewport's own event-source check and silently dropped — the event
 loop wants "real HID origin".
 
-There is no safe backgrounded path that reaches these apps today in
-OpenClicky's default runtime. Stop and say the task requires a future
-foreground/pixel mode instead of silently escalating.
+There is no general AX/page backgrounded path that reaches these apps
+today in the `computer-use` MCP lane. Use an explicit OpenClicky
+pixel/foreground route only when the current tool surface exposes one;
+otherwise stop and say the task requires a pixel/foreground capability
+instead of silently escalating.
 
 ## Navigating native menu bars (AXMenuBar)
 
@@ -612,7 +647,9 @@ an in-window `AXStaticText`, title bar, or toolbar. For *dispatching*
 actions, use in-window `element_index` targets, toolbar controls,
 command palettes, keyboard shortcuts, or `page` where available. If
 the only workable path is a coordinate/pixel click, stop and say that
-this OpenClicky runtime does not expose pixel mode.
+the current `computer-use` MCP lane does not expose the needed pixel
+mode, unless another explicit OpenClicky foreground/pixel route is
+available.
 
 When the target IS frontmost, the menu-bar flow below is fine and
 the canonical path for menus.
@@ -655,11 +692,12 @@ the user requested genuinely requires frontmost (Preview rotate,
 View menu document manipulation, editor commands). If either
 check fails, don't activate.
 
-When both checks pass, OpenClicky's default runtime still does not expose
-an activation tool and does not allow `osascript` activation. Stop and
-tell the user the action requires the target app to be frontmost. If
-they bring it frontmost or explicitly approve a future foreground-mode
-capability, re-snapshot and continue.
+When both checks pass, the `computer-use` MCP lane still does not expose
+an activation tool and does not allow `osascript` activation. Hand off
+to an explicit OpenClicky foreground/native route if the current tool
+surface exposes one; otherwise tell the user the action requires the
+target app to be frontmost. If they bring it frontmost, re-snapshot and
+continue.
 
 ## Web-rendered apps (browsers, Electron, Tauri)
 
@@ -779,12 +817,13 @@ runtime that explicitly exposes those tools.
 ## Things to avoid
 
 - **Never** reuse an `element_index` across a re-snapshot of the same pid.
-- **Never** translate screenshot pixels into a click in OpenClicky's
-  default runtime — the screenshot is for visual disambiguation, not
-  coordinates. Use the `element_index`.
-- **Prefer AX over pixels.** OpenClicky's default runtime blocks coordinate
-  clicks; exhaust AX paths, command palettes, toolbar items, keyboard
-  shortcuts, and `page` before reporting a pixel-mode blocker.
+- **Never** translate screenshot pixels into a click unless the current
+  OpenClicky tool descriptor explicitly documents that coordinate space.
+  In the MCP lane, screenshots are for visual disambiguation and
+  `element_index` is the primary action handle.
+- **Prefer AX over pixels in the MCP lane.** Exhaust AX paths, command
+  palettes, toolbar items, keyboard shortcuts, and `page` before using
+  or reporting the need for an explicit pixel/foreground route.
 - **Never** drive destructive actions (delete files, close unsaved
   documents, send messages, submit forms) without explicit user
   intent for that specific destructive step.
