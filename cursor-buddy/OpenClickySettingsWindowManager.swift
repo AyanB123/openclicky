@@ -132,9 +132,11 @@ final class OpenClickySettingsWindowManager {
 }
 
 private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
+    case setup
     case general
     case voice
     case apiKeys
+    case runtimeLab
     case computerUse
     case permissions
     case agents
@@ -145,9 +147,11 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .setup: return "Basic Setup"
         case .general: return "General"
         case .voice: return "Voice"
-        case .apiKeys: return "AI Providers"
+        case .apiKeys: return "Advanced Providers"
+        case .runtimeLab: return "Runtime Lab"
         case .computerUse: return "Computer Use"
         case .permissions: return "Permissions"
         case .agents: return "Agents"
@@ -158,9 +162,11 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
 
     var systemImageName: String {
         switch self {
+        case .setup: return "checklist"
         case .general: return "gearshape"
         case .voice: return "waveform"
         case .apiKeys: return "key"
+        case .runtimeLab: return "speedometer"
         case .computerUse: return "macwindow.and.cursorarrow"
         case .permissions: return "hand.raised"
         case .agents: return "person.2"
@@ -202,6 +208,9 @@ struct OpenClickySettingsView: View {
     @State private var userCodexAgentAPIKey = ""
     @State private var userAssemblyAIAPIKey = ""
     @State private var userDeepgramAPIKey = ""
+    @AppStorage(AppBundleConfiguration.userLocalSpeechModelDefaultsKey) private var localSpeechModelID = OpenClickyLocalRuntimeCatalog.defaultSpeechModelID
+    @AppStorage(AppBundleConfiguration.userLocalBrainModelDefaultsKey) private var localBrainModelID = OpenClickyLocalRuntimeCatalog.defaultBrainModelID
+    @AppStorage(AppBundleConfiguration.userRuntimeLabVisibleDefaultsKey) private var runtimeLabVisible = false
     @AppStorage(AppBundleConfiguration.userMCPDeveloperDocsEnabledDefaultsKey) private var mcpDeveloperDocsEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPComposioConnectEnabledDefaultsKey) private var mcpComposioConnectEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
@@ -214,7 +223,7 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
     @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
     @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var clickyTheme = ClickyTheme.system.rawValue
-    @State private var selectedSection: OpenClickySettingsSection = .general
+    @State private var selectedSection: OpenClickySettingsSection = .setup
     @State private var gogCLIStatus = OpenClickyGogCLIStatus.unknown
     @State private var isRefreshingGogCLIStatus = false
     @State private var codexConfigSyncMessage = "MCP servers are written into Codex config.toml for new Agent Mode sessions."
@@ -381,12 +390,16 @@ struct OpenClickySettingsView: View {
 
     private var sectionSubtitle: String {
         switch selectedSection {
+        case .setup:
+            return "Local-first defaults, required permissions, and detected local agent accelerators."
         case .general:
             return "Core behavior, cursor appearance, and everyday companion controls."
         case .voice:
             return "Speech input, spoken response model, playback voice, and captions."
         case .apiKeys:
-            return "Provider credentials and default model settings for OpenAI, Anthropic, ElevenLabs, Cartesia, and Deepgram."
+            return "Provider keys, hosted services, local endpoints, and Agent Mode routing for users who want explicit control."
+        case .runtimeLab:
+            return "Inference, latency, speculation, cache, and diagnostics controls kept away from everyday settings."
         case .computerUse:
             return "In-app Native Computer Use, pointing models, and cuaDriver configuration."
         case .permissions:
@@ -449,12 +462,16 @@ struct OpenClickySettingsView: View {
     @ViewBuilder
     private var selectedPanel: some View {
         switch selectedSection {
+        case .setup:
+            setupPanel
         case .general:
             generalPanel
         case .voice:
             voicePanel
         case .apiKeys:
             apiKeysPanel
+        case .runtimeLab:
+            runtimeLabPanel
         case .computerUse:
             computerUsePanel
         case .permissions:
@@ -779,18 +796,6 @@ struct OpenClickySettingsView: View {
                 }
             }
 
-            settingsGroup("Speculative pre-fire") {
-                toggleRow(
-                    title: "Pre-fire on stable speech",
-                    subtitle: "Starts the AI response while you're still talking when a partial is stable, no screen reference, and looks like a question. Saves up to 1s of TTFT but costs ~1.5–2× input tokens per turn for cancelled fires. Off by default.",
-                    systemImageName: "bolt.horizontal",
-                    isOn: Binding(
-                        get: { companionManager.speculativePreFireEnabled },
-                        set: { companionManager.setSpeculativePreFireEnabled($0) }
-                    )
-                )
-            }
-
             settingsGroup("Playback") {
                 Text(OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
                     ? "GPT Realtime is selected as the response voice model, so it owns playback for voice replies."
@@ -940,6 +945,185 @@ struct OpenClickySettingsView: View {
             ?? companionManager.selectedModel
     }
 
+    private var selectedLocalSpeechModel: OpenClickyLocalSpeechModelOption {
+        OpenClickyLocalRuntimeCatalog.speechModel(withID: localSpeechModelID)
+    }
+
+    private var selectedLocalBrainModel: OpenClickyLocalBrainModelOption {
+        OpenClickyLocalRuntimeCatalog.brainModel(withID: localBrainModelID)
+    }
+
+    private var hasFluidAudioCache: Bool {
+        OpenClickyLocalRuntimeCatalog.hasFluidAudioModelCache()
+    }
+
+    private var fluidAudioCachePath: String {
+        OpenClickyLocalRuntimeCatalog.fluidAudioModelCacheDirectory().path
+    }
+
+    private var claudeCodeExecutableURL: URL? {
+        ClaudeAgentSDKAPI.findExecutable()
+    }
+
+    private var codexExecutableURL: URL? {
+        try? CodexRuntimeLocator.codexExecutableURL()
+    }
+
+    private var setupPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            settingsGroup("Default install") {
+                Text("OpenClicky starts with local permissions, detected local agent runtimes, and fast spoken replies before provider keys are added.")
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+
+                valueRow(
+                    title: "Voice default",
+                    subtitle: "\(OpenClickyModelCatalog.speechModel(withID: companionManager.selectedModel).label) for lowest spoken latency today.",
+                    systemImageName: "waveform.badge.mic"
+                )
+                valueRow(
+                    title: "Local speech target",
+                    subtitle: "\(selectedLocalSpeechModel.label), \(selectedLocalSpeechModel.sizeDescription). FluidAudio provider support is pending.",
+                    systemImageName: "internaldrive"
+                )
+                valueRow(
+                    title: "Local brain target",
+                    subtitle: selectedLocalBrainModel.detail,
+                    systemImageName: "brain.head.profile"
+                )
+                actionRow(title: "Apply local-first defaults", systemImageName: "checkmark.circle") {
+                    applyLocalFirstDefaults()
+                }
+            }
+
+            settingsGroup("Local voice") {
+                Text("Selected local speech models are stored as install targets. Current non-Realtime push-to-talk uses Apple on-device speech or the configured transcription provider until FluidAudio support is available.")
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+
+                localSpeechModelGrid
+
+                valueRow(
+                    title: hasFluidAudioCache ? "FluidAudio cache found" : "FluidAudio cache not found",
+                    subtitle: hasFluidAudioCache
+                        ? "OpenClicky found a local FluidAudio model cache at \(fluidAudioCachePath)."
+                        : "No local FluidAudio cache exists yet. Download wiring should populate \(fluidAudioCachePath).",
+                    systemImageName: hasFluidAudioCache ? "checkmark.circle" : "arrow.down.circle"
+                )
+                valueRow(
+                    title: "Current active listener",
+                    subtitle: OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
+                        ? "Realtime voice bypasses transcription and streams mic audio directly."
+                        : companionManager.buddyDictationManager.transcriptionProviderDisplayName,
+                    systemImageName: "mic"
+                )
+            }
+
+            settingsGroup("Local model") {
+                Text("Basic installs should choose a local brain through a curated OpenClicky catalog. The catalog must validate current model availability before it offers a one-click download.")
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+
+                localBrainModelGrid
+
+                valueRow(
+                    title: "Installer status",
+                    subtitle: "Pending local installer: storage check, progress, pause/resume, delete, and show in Finder.",
+                    systemImageName: "arrow.down.circle"
+                )
+            }
+
+            settingsGroup("Detected accelerators") {
+                detectionRow(
+                    title: claudeCodeExecutableURL == nil ? "Claude Code not detected" : "Detected Claude Code",
+                    subtitle: claudeCodeExecutableURL?.path ?? "Sign in to Claude Code locally to make the SDK path the primary Claude route.",
+                    isDetected: claudeCodeExecutableURL != nil,
+                    systemImageName: "terminal"
+                )
+                detectionRow(
+                    title: codexExecutableURL == nil ? "Codex not detected" : "Detected Codex",
+                    subtitle: codexExecutableURL?.path ?? "OpenClicky will use its bundled, installed, or PATH Codex runtime when available.",
+                    isDetected: codexExecutableURL != nil,
+                    systemImageName: "curlybraces.square"
+                )
+                valueRow(
+                    title: "Codex home",
+                    subtitle: companionManager.codexHomeManager.codexHomeDirectory.path,
+                    systemImageName: "folder",
+                    openPath: companionManager.codexHomeManager.codexHomeDirectory.path
+                )
+                actionRow(title: "Prepare local Codex home", systemImageName: "arrow.clockwise") {
+                    prepareCodexHomeFromSettings()
+                }
+                valueRow(
+                    title: "Prepare status",
+                    subtitle: codexConfigSyncMessage,
+                    systemImageName: "checkmark.circle"
+                )
+            }
+
+            settingsGroup("Required permissions") {
+                permissionRow(
+                    title: "Microphone",
+                    isGranted: companionManager.hasMicrophonePermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
+                )
+                permissionRow(
+                    title: "Screen Recording",
+                    isGranted: companionManager.hasScreenRecordingPermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                )
+                permissionRow(
+                    title: "Accessibility",
+                    isGranted: companionManager.hasAccessibilityPermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                )
+                actionRow(title: "Refresh permission status", systemImageName: "checklist") {
+                    companionManager.refreshAllPermissions()
+                }
+            }
+        }
+    }
+
+    private var localSpeechModelGrid: some View {
+        LazyVGrid(columns: settingsOptionColumns(2), spacing: 8) {
+            ForEach(OpenClickyLocalRuntimeCatalog.speechModels) { model in
+                optionButton(
+                    title: model.label,
+                    subtitle: model.isRecommended ? "Recommended, \(model.sizeDescription)" : model.sizeDescription,
+                    isSelected: selectedLocalSpeechModel.id == model.id,
+                    action: { localSpeechModelID = model.id }
+                )
+                .help(model.detail)
+            }
+        }
+        .padding(14)
+    }
+
+    private var localBrainModelGrid: some View {
+        LazyVGrid(columns: settingsOptionColumns(2), spacing: 8) {
+            ForEach(OpenClickyLocalRuntimeCatalog.brainModels) { model in
+                optionButton(
+                    title: model.label,
+                    subtitle: model.subtitle,
+                    isSelected: selectedLocalBrainModel.id == model.id,
+                    action: { localBrainModelID = model.id }
+                )
+                .help(model.detail)
+            }
+        }
+        .padding(14)
+    }
+
     private var openAIRealtimeVoiceSelection: Binding<String> {
         Binding(
             get: {
@@ -963,6 +1147,99 @@ struct OpenClickySettingsView: View {
         .pickerStyle(.menu)
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+    }
+
+    private var runtimeLabPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            settingsGroup("Runtime Lab access") {
+                toggleRow(
+                    title: "Show Runtime Lab controls",
+                    subtitle: "Keeps inference tuning separate from the basic install path. Turn this off to hide experimental controls from normal setup.",
+                    systemImageName: "slider.horizontal.3",
+                    isOn: $runtimeLabVisible
+                )
+            }
+
+            if runtimeLabVisible {
+                voiceRouteOverview
+
+                settingsGroup("Latency") {
+                    toggleRow(
+                        title: "Pre-fire on stable speech",
+                        subtitle: "Starts a likely answer while speech is still stable. This is a voice UX pre-fire, separate from model-level speculative decoding.",
+                        systemImageName: "bolt.horizontal",
+                        isOn: Binding(
+                            get: { companionManager.speculativePreFireEnabled },
+                            set: { companionManager.setSpeculativePreFireEnabled($0) }
+                        )
+                    )
+                    valueRow(
+                        title: "Realtime spoken path",
+                        subtitle: OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
+                            ? "Active. Microphone audio streams directly to \(selectedResponseVoiceModelLabel)."
+                            : "Inactive. Select GPT Realtime in Voice for the lowest first-audio latency.",
+                        systemImageName: "waveform.path.ecg"
+                    )
+                    valueRow(
+                        title: "Non-Realtime spoken path",
+                        subtitle: "\(companionManager.buddyDictationManager.transcriptionProviderDisplayName) -> \(selectedResponseVoiceModelLabel) -> \(companionManager.selectedTTSProvider.displayName)",
+                        systemImageName: "timer"
+                    )
+                }
+
+                settingsGroup("Local model install target") {
+                    Text("OpenClicky must validate current model IDs and hardware fit before presenting a one-click local brain install. This records the chosen policy without shipping unverified 2026 model IDs as defaults.")
+                        .font(appUIFont(size: subtextFontSize, weight: .regular))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+
+                    localBrainModelGrid
+                }
+
+                settingsGroup("Model-level speculation") {
+                    valueRow(
+                        title: "MTP / speculative decoding",
+                        subtitle: "Not exposed yet. OpenClicky should only enable this after the runtime proves target/draft acceptance, cache rollback, cancellation, and token/sec benefit.",
+                        systemImageName: "bolt.badge.clock"
+                    )
+                    valueRow(
+                        title: "KV cache and residency",
+                        subtitle: "Queued for local model runtime support. Basic Settings should not expose cache, memory, or batch knobs.",
+                        systemImageName: "memorychip"
+                    )
+                    valueRow(
+                        title: "Compiled decode",
+                        subtitle: "Queued behind runtime validation. Do not toggle MLX compile-style behavior from ordinary Voice settings.",
+                        systemImageName: "speedometer"
+                    )
+                }
+
+                settingsGroup("Diagnostics") {
+                    valueRow(
+                        title: "Message log",
+                        subtitle: OpenClickyMessageLogStore.shared.currentLogFile.path,
+                        systemImageName: "doc.text.magnifyingglass",
+                        openPath: OpenClickyMessageLogStore.shared.currentLogFile.path
+                    )
+                    actionRow(title: "Open log viewer", systemImageName: "list.bullet.rectangle") {
+                        companionManager.showLogViewerWindow()
+                    }
+                    actionRow(title: "Warm up Agent Mode", systemImageName: "bolt") {
+                        companionManager.warmUpCodexAgentMode()
+                    }
+                }
+            } else {
+                settingsGroup("Hidden controls") {
+                    valueRow(
+                        title: "Runtime controls hidden",
+                        subtitle: "Basic Setup and Voice stay focused on everyday configuration. Advanced inference tuning remains here when enabled.",
+                        systemImageName: "eye.slash"
+                    )
+                }
+            }
+        }
     }
 
     private var apiKeysPanel: some View {
@@ -1649,6 +1926,49 @@ struct OpenClickySettingsView: View {
         }
 
         return "Command will be written to config.toml, but the path was not found yet."
+    }
+
+    private func applyLocalFirstDefaults() {
+        localSpeechModelID = OpenClickyLocalRuntimeCatalog.defaultSpeechModelID
+        localBrainModelID = OpenClickyLocalRuntimeCatalog.defaultBrainModelID
+        runtimeLabVisible = false
+        companionManager.setVoiceActivationMode(.pushToTalk)
+        companionManager.setSelectedModel(OpenClickyModelCatalog.defaultSpeechModelID)
+        companionManager.setVoiceTranscriptionProvider(BuddyTranscriptionProviderID.appleSpeech.rawValue)
+        codexConfigSyncMessage = "Local-first defaults applied. Realtime remains the active low-latency spoken path until local voice runtime support is available."
+    }
+
+    private func prepareCodexHomeFromSettings() {
+        do {
+            let layout = try companionManager.codexHomeManager.prepare()
+            codexConfigSyncMessage = "Prepared local Codex home at \(layout.homeDirectory.path)."
+        } catch {
+            codexConfigSyncMessage = "Could not prepare local Codex home: \(error.localizedDescription)"
+        }
+    }
+
+    private func detectionRow(
+        title: String,
+        subtitle: String,
+        isDetected: Bool,
+        systemImageName: String
+    ) -> some View {
+        HStack(spacing: 12) {
+            rowIcon(isDetected ? "checkmark.circle" : systemImageName)
+                .foregroundColor(isDetected ? .green : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(appUIFont(size: bodyFontSize, weight: .medium))
+                Text(subtitle)
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private func syncCodexMCPSettings() {
