@@ -294,6 +294,7 @@ struct OpenClickySettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
+                        OpenClickyProfileSelectorView(companionManager: companionManager)
                         sectionHeader
                         selectedPanel
                     }
