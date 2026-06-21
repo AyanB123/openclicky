@@ -16,6 +16,7 @@ struct CompanionPanelView: View {
     @AppStorage(ClickyCursorAvatarStyle.userDefaultsKey) private var avatarStyleRawValue = ClickyCursorAvatarStyle.default.storageValue
     @AppStorage(ClickyCursorAvatarSizePreference.userDefaultsKey) private var cursorAvatarSizeScale = ClickyCursorAvatarSizePreference.defaultScale
     @ObservedObject private var petLibrary = ClickyBuddyPetLibrary.shared
+    @StateObject private var localSpeechModelManager = OpenClickyLocalSpeechModelManager.shared
     @State private var isPanelPinned: Bool
     @State private var isShowingHatchSheet: Bool = false
     @State private var hatchPetName: String = ""
@@ -146,6 +147,12 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 16)
 
+                firstRunLocalSetupSection
+                    .padding(.horizontal, 14)
+
+                Spacer()
+                    .frame(height: 12)
+
                 startButton
                     .padding(.horizontal, 14)
             }
@@ -264,7 +271,7 @@ struct CompanionPanelView: View {
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(DS.Colors.textPrimary)
 
-                Text("Turn your sound on and tap Meet OpenClicky.")
+                Text("Permissions are ready. Start OpenClicky now, then choose local voice or agent provider details in Settings when you want them.")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(DS.Colors.textTertiary)
             }
@@ -363,9 +370,9 @@ struct CompanionPanelView: View {
     private var startButton: some View {
         if isReadyForFirstOnboarding {
             Button(action: {
-                companionManager.triggerOnboarding()
+                startLocalFirstOnboarding()
             }) {
-                Text("Meet OpenClicky")
+                Text("Start OpenClicky")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(DS.Colors.textOnAccent)
                     .frame(maxWidth: .infinity)
@@ -378,6 +385,93 @@ struct CompanionPanelView: View {
             .buttonStyle(.plain)
             .pointerCursor()
         }
+    }
+
+    private var firstRunLocalSetupSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            firstRunSetupRow(
+                systemImageName: "waveform",
+                title: "Local voice",
+                detail: firstRunLocalSpeechDetail,
+                status: localSpeechModelManager.state(for: localSpeechModelManager.selectedVersion).label
+            )
+
+            firstRunSetupRow(
+                systemImageName: "terminal",
+                title: "Codex",
+                detail: isCodexRuntimeDetected ? "Detected and ready for Agent Mode config." : "Not detected yet. You can still add an endpoint or key in Settings.",
+                status: isCodexRuntimeDetected ? "Detected" : "Optional"
+            )
+
+            firstRunSetupRow(
+                systemImageName: "sparkle.magnifyingglass",
+                title: "Claude Code",
+                detail: isClaudeCodeDetected ? "Detected for local Claude Code sign-in reuse." : "Not detected. Anthropic key setup stays in Advanced Providers.",
+                status: isClaudeCodeDetected ? "Detected" : "Optional"
+            )
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+
+    private var firstRunLocalSpeechDetail: String {
+        guard localSpeechModelManager.isAppleSilicon else {
+            return "Parakeet requires Apple Silicon. Apple Speech remains available locally."
+        }
+        if localSpeechModelManager.state(for: localSpeechModelManager.selectedVersion).isReady {
+            return "\(localSpeechModelManager.selectedVersion.label) is installed and ready if you want local Parakeet listening."
+        }
+        return "\(localSpeechModelManager.selectedVersion.label) is not downloaded yet. Open Settings when you want to install local Parakeet."
+    }
+
+    private var isCodexRuntimeDetected: Bool {
+        !CodexRuntimeLocator.codexExecutableCandidates().isEmpty
+    }
+
+    private var isClaudeCodeDetected: Bool {
+        ClaudeAgentSDKAPI.findExecutable() != nil
+    }
+
+    private func firstRunSetupRow(
+        systemImageName: String,
+        title: String,
+        detail: String,
+        status: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: systemImageName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(DS.Colors.accentText)
+                .frame(width: 15, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text(status)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+                Text(detail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func startLocalFirstOnboarding() {
+        companionManager.triggerOnboarding()
     }
 
     // MARK: - Permissions

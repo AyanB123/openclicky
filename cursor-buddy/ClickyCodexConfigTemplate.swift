@@ -186,18 +186,31 @@ enum ClickyCodexBackend {
 
     static func configuredWorkerBaseURL() -> URL {
         if let raw = ProcessInfo.processInfo.environment["CLICKY_AGENT_BASE_URL"],
-           let url = URL(string: raw),
-           url.scheme != nil {
+           let url = validatedWorkerBaseURL(raw) {
             return url
         }
 
         if let raw = UserDefaults.standard.string(forKey: "clickyAgentBaseURL"),
-           let url = URL(string: raw),
-           url.scheme != nil {
+           let url = validatedWorkerBaseURL(raw) {
             return url
         }
 
         return defaultOpenAIBaseURL
+    }
+
+    static func validatedWorkerBaseURL(_ rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let url = components.url
+        else {
+            return nil
+        }
+        return url
     }
 
     static func isDefaultOpenAIBaseURL(_ url: URL) -> Bool {

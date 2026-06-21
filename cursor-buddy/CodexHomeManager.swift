@@ -28,7 +28,7 @@ final class CodexHomeManager {
 
     let fileManager: FileManager
     let applicationSupportDirectory: URL
-    let workerBaseURL: URL
+    var workerBaseURL: URL
     var model: String
     var reasoningEffort: String
 

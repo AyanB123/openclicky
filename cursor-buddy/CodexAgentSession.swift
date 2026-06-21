@@ -576,6 +576,18 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         }
     }
 
+    func setWorkerBaseURL(_ url: URL) {
+        homeManager.workerBaseURL = url
+    }
+
+    @discardableResult
+    func syncProviderConfigurationFromCurrentSettings() throws -> URL {
+        homeManager.workerBaseURL = ClickyCodexBackend.configuredWorkerBaseURL()
+        homeManager.model = model
+        homeManager.reasoningEffort = UserDefaults.standard.string(forKey: "clickyCodexReasoningEffort") ?? homeManager.reasoningEffort
+        return try homeManager.writeCodexConfigFromSettings()
+    }
+
     func stop(reason: String? = nil) {
         queuedFollowUpPrompts.removeAll()
         pendingAssistantDeltaFlushTask?.cancel()

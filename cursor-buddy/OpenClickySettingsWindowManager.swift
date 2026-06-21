@@ -132,9 +132,9 @@ final class OpenClickySettingsWindowManager {
 }
 
 private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
-    case general
-    case voice
-    case apiKeys
+    case basic
+    case advancedProviders
+    case superAdvanced
     case computerUse
     case permissions
     case agents
@@ -145,9 +145,9 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .general: return "General"
-        case .voice: return "Voice"
-        case .apiKeys: return "AI Providers"
+        case .basic: return "Basic"
+        case .advancedProviders: return "Advanced Providers"
+        case .superAdvanced: return "Super Advanced"
         case .computerUse: return "Computer Use"
         case .permissions: return "Permissions"
         case .agents: return "Agents"
@@ -158,9 +158,9 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
 
     var systemImageName: String {
         switch self {
-        case .general: return "gearshape"
-        case .voice: return "waveform"
-        case .apiKeys: return "key"
+        case .basic: return "gearshape"
+        case .advancedProviders: return "key"
+        case .superAdvanced: return "cpu"
         case .computerUse: return "macwindow.and.cursorarrow"
         case .permissions: return "hand.raised"
         case .agents: return "person.2"
@@ -170,17 +170,23 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
+private enum OpenClickySettingsValidationError: Error {
+    case invalidAgentBaseURL
+}
+
 struct OpenClickySettingsView: View {
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject private var wakeWordManager: OpenClickyWakeWordManager
     @ObservedObject private var session: CodexAgentSession
     @ObservedObject private var nativeComputerUseController: OpenClickyNativeComputerUseController
-    @ObservedObject private var backgroundComputerUseController: OpenClickyBackgroundComputerUseController
     @ObservedObject private var petLibrary = ClickyBuddyPetLibrary.shared
     @StateObject private var openPetsCatalog = OpenPetsCatalogStore()
+    @StateObject private var localSpeechModelManager = OpenClickyLocalSpeechModelManager.shared
+    @StateObject private var localModelDownloadService = OpenClickyLocalModelDownloadService.shared
     @AppStorage(ClickyAccentTheme.userDefaultsKey) private var selectedAccentThemeID = ClickyAccentTheme.blue.rawValue
     @AppStorage(ClickyCursorAvatarStyle.userDefaultsKey) private var avatarStyleRawValue = ClickyCursorAvatarStyle.default.storageValue
     @State private var userAnthropicAPIKey = ""
+    @State private var codexAgentBaseURL = ""
     @State private var userElevenLabsAPIKey = ""
     @AppStorage(AppBundleConfiguration.userElevenLabsVoiceIDDefaultsKey) private var userElevenLabsVoiceID = ""
     @State private var userCartesiaAPIKey = ""
@@ -214,7 +220,7 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
     @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
     @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var clickyTheme = ClickyTheme.system.rawValue
-    @State private var selectedSection: OpenClickySettingsSection = .general
+    @State private var selectedSection: OpenClickySettingsSection = .basic
     @State private var gogCLIStatus = OpenClickyGogCLIStatus.unknown
     @State private var isRefreshingGogCLIStatus = false
     @State private var codexConfigSyncMessage = "MCP servers are written into Codex config.toml for new Agent Mode sessions."
@@ -231,7 +237,6 @@ struct OpenClickySettingsView: View {
         self.wakeWordManager = companionManager.wakeWordManager
         self.session = companionManager.codexAgentSession
         self.nativeComputerUseController = companionManager.nativeComputerUseController
-        self.backgroundComputerUseController = companionManager.backgroundComputerUseController
     }
 
     private var appFont: OpenClickyResponseCaptionFont {
@@ -324,6 +329,7 @@ struct OpenClickySettingsView: View {
         userDeepgramAPIKey = AppBundleConfiguration.deepgramAPIKey() ?? ""
         userElevenLabsAPIKey = AppBundleConfiguration.elevenLabsAPIKey() ?? ""
         userCartesiaAPIKey = AppBundleConfiguration.cartesiaAPIKey() ?? ""
+        codexAgentBaseURL = UserDefaults.standard.string(forKey: "clickyAgentBaseURL") ?? ""
     }
 
     private var sidebar: some View {
@@ -381,12 +387,12 @@ struct OpenClickySettingsView: View {
 
     private var sectionSubtitle: String {
         switch selectedSection {
-        case .general:
-            return "Core behavior, cursor appearance, and everyday companion controls."
-        case .voice:
-            return "Speech input, spoken response model, playback voice, and captions."
-        case .apiKeys:
-            return "Provider credentials and default model settings for OpenAI, Anthropic, ElevenLabs, Cartesia, and Deepgram."
+        case .basic:
+            return "Working defaults, voice status, permission status, and everyday OpenClicky controls."
+        case .advancedProviders:
+            return "Provider credentials, voice services, Agent Mode defaults, and external service configuration."
+        case .superAdvanced:
+            return "Model cache installs and runtime plumbing for users managing their own local inference endpoints."
         case .computerUse:
             return "In-app Native Computer Use, pointing models, and cuaDriver configuration."
         case .permissions:
@@ -449,12 +455,12 @@ struct OpenClickySettingsView: View {
     @ViewBuilder
     private var selectedPanel: some View {
         switch selectedSection {
-        case .general:
-            generalPanel
-        case .voice:
-            voicePanel
-        case .apiKeys:
-            apiKeysPanel
+        case .basic:
+            basicPanel
+        case .advancedProviders:
+            advancedProvidersPanel
+        case .superAdvanced:
+            superAdvancedPanel
         case .computerUse:
             computerUsePanel
         case .permissions:
@@ -468,8 +474,131 @@ struct OpenClickySettingsView: View {
         }
     }
 
-    private var generalPanel: some View {
+    private var basicPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            voiceRouteOverview
+
+            settingsGroup("Voice controls") {
+                LazyVGrid(columns: settingsOptionColumns(3), spacing: 8) {
+                    ForEach(OpenClickyVoiceActivationMode.allCases) { mode in
+                        optionButton(
+                            title: mode.label,
+                            subtitle: mode.subtitle,
+                            isSelected: companionManager.voiceActivationMode == mode,
+                            action: { companionManager.setVoiceActivationMode(mode) }
+                        )
+                    }
+                }
+                .padding(14)
+
+                valueRow(
+                    title: wakeWordManager.isListening ? "Wake word armed" : "Wake word",
+                    subtitle: companionManager.voiceActivationMode.usesWakeWord
+                        ? (wakeWordManager.isListening
+                            ? "Say \"Hey Clicky\" to start a voice turn. Wake detection uses on-device Apple Speech."
+                            : "Activation keys toggle the local Hey Clicky listener; always-listening mode starts it automatically.")
+                        : "Disabled while Push to talk is selected.",
+                    systemImageName: wakeWordManager.isListening ? "ear.badge.waveform" : "ear"
+                )
+
+                if let wakeWordError = wakeWordManager.lastErrorMessage,
+                   !wakeWordError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    warningRow(
+                        title: "Wake-word listener",
+                        subtitle: wakeWordError
+                    )
+                }
+
+                valueRow(
+                    title: "Current transcription",
+                    subtitle: OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel)
+                        ? "Bypassed because the selected response model owns live speech input."
+                        : companionManager.buddyDictationManager.transcriptionProviderDisplayName,
+                    systemImageName: "waveform"
+                )
+
+                if let transcriptionError = companionManager.buddyDictationManager.lastErrorMessage,
+                   !transcriptionError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    warningRow(
+                        title: "Transcription error",
+                        subtitle: transcriptionError
+                    )
+                }
+
+                editableFieldRow(
+                    title: "OpenClicky volume",
+                    subtitle: "Controls spoken reply playback without changing macOS system volume.",
+                    systemImageName: "speaker.wave.2"
+                ) {
+                    HStack(spacing: 10) {
+                        Slider(
+                            value: Binding(
+                                get: { openClickyVoicePlaybackVolume },
+                                set: { openClickyVoicePlaybackVolume = min(max($0, 0.0), 1.0) }
+                            ),
+                            in: 0...1
+                        )
+                        Text("\(Int((openClickyVoicePlaybackVolume * 100).rounded()))%")
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                }
+
+                toggleRow(
+                    title: "Caption every spoken response",
+                    subtitle: "Shows OpenClicky's spoken reply beside the cursor while voice playback runs.",
+                    systemImageName: "captions.bubble",
+                    isOn: $voiceResponseCaptionsEnabled
+                )
+
+                actionRow(title: "Test caption playback", systemImageName: "play.circle") {
+                    companionManager.testVoiceResponseCaptionPlayback()
+                }
+            }
+
+            settingsGroup("Local listening") {
+                localSpeechModelStatusRow
+
+                basicLocalListeningActionRow
+
+                if OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
+                    warningRow(
+                        title: "Realtime bypasses local STT",
+                        subtitle: "GPT Realtime listens directly to the microphone. Use the local listening route when you want Parakeet to transcribe first."
+                    )
+                    actionRow(title: "Use local listening route", systemImageName: "waveform.badge.mic") {
+                        useLocalListeningRoute()
+                    }
+                }
+
+                if let localSpeechError = localSpeechModelManager.lastErrorMessage,
+                   !localSpeechError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    warningRow(
+                        title: "Parakeet model",
+                        subtitle: localSpeechError
+                    )
+                }
+            }
+
+            settingsGroup("Permission status") {
+                permissionRow(
+                    title: "Accessibility",
+                    isGranted: companionManager.hasAccessibilityPermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                )
+                permissionRow(
+                    title: "Screen Recording",
+                    isGranted: companionManager.hasScreenRecordingPermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+                )
+                permissionRow(
+                    title: "Microphone",
+                    isGranted: companionManager.hasMicrophonePermission,
+                    settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!
+                )
+            }
+
             settingsGroup("Companion") {
                 toggleRow(
                     title: "Show OpenClicky cursor",
@@ -606,7 +735,124 @@ struct OpenClickySettingsView: View {
         }
     }
 
-    private var voicePanel: some View {
+    private var localSpeechModelStatusRow: some View {
+        let selectedVersion = localSpeechModelManager.selectedVersion
+        let state = localSpeechModelManager.state(for: selectedVersion)
+        let title = localSpeechModelManager.isAppleSilicon ? "Parakeet local STT" : "Parakeet local STT unavailable"
+        let subtitle: String
+        if localSpeechModelManager.isAppleSilicon {
+            subtitle = "\(selectedVersion.label): \(state.label). \(localSpeechRouteDetail)"
+        } else {
+            subtitle = "Parakeet requires Apple Silicon. Use Apple Speech or a configured cloud STT provider on this Mac."
+        }
+        return valueRow(
+            title: title,
+            subtitle: subtitle,
+            systemImageName: state.isReady ? "checkmark.circle" : "waveform"
+        )
+    }
+
+    private var localSpeechRouteDetail: String {
+        if companionManager.buddyDictationManager.transcriptionProviderID == BuddyTranscriptionProviderID.parakeet.rawValue {
+            return "Selected for local listening."
+        }
+        if companionManager.buddyDictationManager.transcriptionProviderID == BuddyTranscriptionProviderID.automatic.rawValue {
+            return localSpeechModelManager.isSelectedModelReady
+                ? "Automatic can use Parakeet because the selected local model is ready."
+                : "Automatic stays on configured cloud or Apple Speech until a local Parakeet model is ready."
+        }
+        return localSpeechModelManager.isSelectedModelReady
+            ? "Parakeet is ready if you want to switch local listening to it."
+            : "Download a Parakeet model in Advanced Providers before selecting it."
+    }
+
+    private func localSpeechModelSubtitle(for version: OpenClickyLocalSpeechModelVersion) -> String {
+        "\(version.subtitle) - \(localSpeechModelManager.state(for: version).label)"
+    }
+
+    @ViewBuilder
+    private var basicLocalListeningActionRow: some View {
+        let selectedVersion = localSpeechModelManager.selectedVersion
+        switch localSpeechModelManager.state(for: selectedVersion) {
+        case .ready:
+            actionRow(title: "Use Parakeet for local listening", systemImageName: "waveform.badge.mic") {
+                companionManager.setVoiceTranscriptionProvider(BuddyTranscriptionProviderID.parakeet.rawValue)
+            }
+        case .downloading:
+            actionRow(title: "Cancel Parakeet download", systemImageName: "xmark.circle") {
+                localSpeechModelManager.cancelDownload(selectedVersion)
+            }
+        case .notDownloaded, .failed:
+            actionRow(title: "Open Advanced Providers", systemImageName: "slider.horizontal.3") {
+                selectedSection = .advancedProviders
+            }
+        }
+    }
+
+    private var detailedLocalListeningGroup: some View {
+        settingsGroup("Local listening installs") {
+            localSpeechModelStatusRow
+
+            if localSpeechModelManager.isAppleSilicon {
+                LazyVGrid(columns: settingsOptionColumns(2), spacing: 8) {
+                    ForEach(OpenClickyLocalSpeechModelVersion.allCases) { version in
+                        optionButton(
+                            title: version.label,
+                            subtitle: localSpeechModelSubtitle(for: version),
+                            isSelected: localSpeechModelManager.selectedVersion == version,
+                            action: {
+                                localSpeechModelManager.setSelectedVersion(version)
+                                if companionManager.buddyDictationManager.transcriptionProviderID == BuddyTranscriptionProviderID.parakeet.rawValue,
+                                   !localSpeechModelManager.state(for: version).isReady {
+                                    companionManager.setVoiceTranscriptionProvider(BuddyTranscriptionProviderID.appleSpeech.rawValue)
+                                }
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
+
+                localSpeechModelActionRow
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var localSpeechModelActionRow: some View {
+        let selectedVersion = localSpeechModelManager.selectedVersion
+        switch localSpeechModelManager.state(for: selectedVersion) {
+        case .downloading:
+            actionRow(title: "Cancel Parakeet download", systemImageName: "xmark.circle") {
+                localSpeechModelManager.cancelDownload(selectedVersion)
+            }
+        case .ready:
+            actionRow(title: "Use Parakeet for local listening", systemImageName: "waveform.badge.mic") {
+                companionManager.setVoiceTranscriptionProvider(BuddyTranscriptionProviderID.parakeet.rawValue)
+            }
+        case .notDownloaded, .failed:
+            actionRow(title: "Download selected Parakeet model", systemImageName: "arrow.down.circle") {
+                localSpeechModelManager.downloadSelectedModel()
+            }
+        }
+    }
+
+    private func useLocalListeningRoute() {
+        companionManager.setVoiceTranscriptionProvider(localListeningProviderID.rawValue)
+        if OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
+            companionManager.setSelectedModel(OpenClickyModelCatalog.defaultCodexActionsModelID)
+        }
+        if companionManager.selectedTTSProvider == .openAIRealtime {
+            companionManager.setTTSProvider(.microsoftEdge)
+        }
+    }
+
+    private var localListeningProviderID: BuddyTranscriptionProviderID {
+        localSpeechModelManager.isSelectedModelReady ? .parakeet : .appleSpeech
+    }
+
+    private var advancedVoiceProviderPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             voiceRouteOverview
 
@@ -629,7 +875,7 @@ struct OpenClickySettingsView: View {
                 }
 
                 if OpenClickyModelCatalog.voiceResponseModel(withID: companionManager.selectedModel).provider == .deepgram {
-                    Text("Deepgram Voice Agent uses one WebSocket for listening, thinking, and speaking; it reuses the Deepgram key under API Keys.")
+                    Text("Deepgram Voice Agent uses one WebSocket for listening, thinking, and speaking; it reuses the Deepgram key configured in Advanced Providers.")
                         .font(appUIFont(size: subtextFontSize, weight: .regular))
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -656,37 +902,7 @@ struct OpenClickySettingsView: View {
                 }
             }
 
-            settingsGroup("Listening / transcription") {
-                LazyVGrid(columns: settingsOptionColumns(3), spacing: 8) {
-                    ForEach(OpenClickyVoiceActivationMode.allCases) { mode in
-                        optionButton(
-                            title: mode.label,
-                            subtitle: mode.subtitle,
-                            isSelected: companionManager.voiceActivationMode == mode,
-                            action: { companionManager.setVoiceActivationMode(mode) }
-                        )
-                    }
-                }
-                .padding(14)
-
-                valueRow(
-                    title: wakeWordManager.isListening ? "Wake word armed" : "Wake word",
-                    subtitle: companionManager.voiceActivationMode.usesWakeWord
-                        ? (wakeWordManager.isListening
-                            ? "Say “Hey Clicky” to start a voice turn. Wake detection uses on-device Apple Speech."
-                            : "Activation keys toggle the local Hey Clicky listener; always-listening mode starts it automatically.")
-                        : "Disabled while Push to talk is selected.",
-                    systemImageName: wakeWordManager.isListening ? "ear.badge.waveform" : "ear"
-                )
-
-                if let wakeWordError = wakeWordManager.lastErrorMessage,
-                   !wakeWordError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    warningRow(
-                        title: "Wake-word listener",
-                        subtitle: wakeWordError
-                    )
-                }
-
+            settingsGroup("Transcription provider") {
                 if OpenClickyModelCatalog.isSpeechModelID(companionManager.selectedModel) {
                     valueRow(
                         title: "Current input path",
@@ -712,7 +928,7 @@ struct OpenClickySettingsView: View {
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(BuddyTranscriptionProviderID.allCases) { provider in
+                    ForEach(BuddyTranscriptionProviderFactory.providerIDsForSelectionGrid()) { provider in
                         optionButton(
                             title: provider.label,
                             subtitle: provider.subtitle,
@@ -721,74 +937,6 @@ struct OpenClickySettingsView: View {
                         )
                     }
                 }
-            }
-
-            settingsGroup("Response captions") {
-                toggleRow(
-                    title: "Caption every spoken response",
-                    subtitle: "Shows OpenClicky's spoken reply beside the cursor while voice playback runs.",
-                    systemImageName: "captions.bubble",
-                    isOn: $voiceResponseCaptionsEnabled
-                )
-
-                Picker("Caption font", selection: $voiceResponseCaptionFontRawValue) {
-                    ForEach(OpenClickyResponseCaptionFont.allCases) { captionFont in
-                        Text(captionFont.label).tag(captionFont.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-
-                LazyVGrid(columns: settingsOptionColumns(3), spacing: 8) {
-                    ForEach(OpenClickyResponseCaptionFont.allCases) { captionFont in
-                        optionButton(
-                            title: captionFont.label,
-                            subtitle: captionFont.subtitle,
-                            isSelected: voiceResponseCaptionFontRawValue == captionFont.rawValue,
-                            action: { voiceResponseCaptionFontRawValue = captionFont.rawValue }
-                        )
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 11)
-
-                HStack(spacing: 12) {
-                    Image(systemName: "circle.lefthalf.filled")
-                        .font(appUIFont(size: max(11, bodyFontSize - 1), weight: .semibold))
-                        .foregroundColor(.accentColor)
-                        .frame(width: 18)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Caption bubble opacity")
-                            .font(appUIFont(size: bodyFontSize, weight: .semibold))
-                            .foregroundColor(.primary)
-                        Text("\(Int(voiceResponseCaptionOpacity * 100))%")
-                            .font(appUIFont(size: subtextFontSize, weight: .medium))
-                            .foregroundColor(.secondary)
-                    }
-
-                    Slider(value: $voiceResponseCaptionOpacity, in: 0.55...1.0, step: 0.05)
-                        .frame(maxWidth: 180)
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 11)
-
-                actionRow(title: "Test caption playback", systemImageName: "play.circle") {
-                    companionManager.testVoiceResponseCaptionPlayback()
-                }
-            }
-
-            settingsGroup("Speculative pre-fire") {
-                toggleRow(
-                    title: "Pre-fire on stable speech",
-                    subtitle: "Starts the AI response while you're still talking when a partial is stable, no screen reference, and looks like a question. Saves up to 1s of TTFT but costs ~1.5–2× input tokens per turn for cancelled fires. Off by default.",
-                    systemImageName: "bolt.horizontal",
-                    isOn: Binding(
-                        get: { companionManager.speculativePreFireEnabled },
-                        set: { companionManager.setSpeculativePreFireEnabled($0) }
-                    )
-                )
             }
 
             settingsGroup("Playback") {
@@ -810,26 +958,6 @@ struct OpenClickySettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 4)
-                }
-
-                editableFieldRow(
-                    title: "OpenClicky volume",
-                    subtitle: "Controls spoken reply playback without changing macOS system volume.",
-                    systemImageName: "speaker.wave.2"
-                ) {
-                    HStack(spacing: 10) {
-                        Slider(
-                            value: Binding(
-                                get: { openClickyVoicePlaybackVolume },
-                                set: { openClickyVoicePlaybackVolume = min(max($0, 0.0), 1.0) }
-                            ),
-                            in: 0...1
-                        )
-                        Text("\(Int((openClickyVoicePlaybackVolume * 100).rounded()))%")
-                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .frame(width: 42, alignment: .trailing)
-                    }
                 }
 
                 switch companionManager.selectedTTSProvider {
@@ -858,7 +986,7 @@ struct OpenClickySettingsView: View {
                         )
                     )
                 case .deepgram:
-                    Text("Deepgram TTS reuses the Deepgram API key set under API Keys.")
+                    Text("Deepgram TTS reuses the Deepgram API key configured in Advanced Providers.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 4)
@@ -965,8 +1093,10 @@ struct OpenClickySettingsView: View {
         .padding(.vertical, 11)
     }
 
-    private var apiKeysPanel: some View {
+    private var advancedProvidersPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            advancedVoiceProviderPanel
+
             settingsGroup("OpenAI and Claude") {
                 secureFieldRow(
                     title: "Codex/OpenAI API key",
@@ -989,18 +1119,38 @@ struct OpenClickySettingsView: View {
                         set: { userAnthropicAPIKey = $0; companionManager.setAnthropicAPIKey($0) }
                     )
                 )
-
-                Divider()
-                    .opacity(0.45)
-
-                Text("When GPT Realtime is selected in Voice, OpenClicky uses this OpenAI voice for live spoken replies.")
-                    .font(appUIFont(size: subtextFontSize, weight: .regular))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-
-                openAIRealtimeVoicePicker
             }
+
+            settingsGroup("Hosted endpoints") {
+                valueRow(
+                    title: "Agent Mode provider",
+                    subtitle: codexAgentEndpointSummary,
+                    systemImageName: "network"
+                )
+
+                textFieldRow(
+                    title: "OpenAI-compatible base URL",
+                    subtitle: "Optional endpoint for Agent Mode and Codex-compatible hosted or local servers. Leave empty for OpenAI/ChatGPT auth.",
+                    systemImageName: "link",
+                    placeholder: "https://api.openai.com/v1 or http://127.0.0.1:8000",
+                    text: Binding(
+                        get: { codexAgentBaseURL },
+                        set: { codexAgentBaseURL = $0 }
+                    )
+                )
+
+                actionRow(title: "Sync Agent Mode provider config", systemImageName: "arrow.clockwise") {
+                    syncCodexProviderSettings()
+                }
+
+                valueRow(
+                    title: "Config sync",
+                    subtitle: codexConfigSyncMessage,
+                    systemImageName: "doc.text"
+                )
+            }
+
+            detailedLocalListeningGroup
 
             settingsGroup("Listening providers") {
                 secureFieldRow(
@@ -1087,32 +1237,182 @@ struct OpenClickySettingsView: View {
                 .padding(.vertical, 10)
             }
 
-            if companionManager.isAdvancedModeEnabled {
-                settingsGroup("Agent tools") {
-                    actionRow(title: "Warm up Agent Mode", systemImageName: "bolt") {
-                        companionManager.warmUpCodexAgentMode()
+            settingsGroup("Agent tools") {
+                actionRow(title: "Warm up Agent Mode", systemImageName: "bolt") {
+                    companionManager.warmUpCodexAgentMode()
+                }
+            }
+        }
+    }
+
+    private var superAdvancedPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            settingsGroup("Local inference runtime") {
+                warningRow(
+                    title: "Runtime server required",
+                    subtitle: "OpenClicky can install MLX model bundles into a local cache, but it does not yet launch a vMLX/MLX server. Selectable local Agent Mode inference requires a health-checked OpenAI-compatible endpoint."
+                )
+
+                valueRow(
+                    title: "Configured Agent Mode endpoint",
+                    subtitle: codexAgentEndpointSummary,
+                    systemImageName: "network"
+                )
+            }
+
+            localModelInstallsGroup
+        }
+    }
+
+    private var codexAgentEndpointSummary: String {
+        let trimmed = codexAgentBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Default OpenAI endpoint. Codex uses ChatGPT sign-in unless an OpenAI key is configured."
+        }
+        guard let url = ClickyCodexBackend.validatedWorkerBaseURL(trimmed) else {
+            return "Enter a full http:// or https:// URL before syncing. Agent Mode keeps the previous valid provider config until then."
+        }
+        let endpoint = ClickyCodexConfigTemplate(workerBaseURL: url).openAICompatibleEndpoint.absoluteString
+        return "Custom OpenAI-compatible endpoint to apply on sync: \(endpoint)"
+    }
+
+    private var localModelInstallsGroup: some View {
+        settingsGroup("Local model installs") {
+            valueRow(
+                title: "Model store",
+                subtitle: OpenClickyLocalModelStore.modelsDirectory().path,
+                systemImageName: "externaldrive",
+                openPath: OpenClickyLocalModelStore.modelsDirectory().path
+            )
+
+            ForEach(OpenClickyLocalModelCatalog.models) { model in
+                localModelInstallRow(model)
+            }
+
+            valueRow(
+                title: "Inference runtime",
+                subtitle: "Installed bundles are cache-ready. Selectable local Agent Mode inference still requires an OpenAI-compatible MLX/vMLX server endpoint above.",
+                systemImageName: "server.rack"
+            )
+
+            if let failure = localModelDownloadService.lastFailure {
+                warningRow(
+                    title: "Latest installer failure",
+                    subtitle: failure.diagnosticLine
+                )
+            }
+        }
+    }
+
+    private func localModelInstallRow(_ model: OpenClickyLocalModel) -> some View {
+        let status = localModelDownloadService.installStatuses[model.id]
+            ?? OpenClickyLocalModelStore.status(for: model)
+        let state = localModelDownloadService.downloadStates[model.id]
+            ?? OpenClickyLocalModelDownloadState(
+                modelID: model.id,
+                phase: .notStarted,
+                metrics: nil,
+                updatedAt: Date()
+            )
+
+        return HStack(alignment: .top, spacing: 12) {
+            rowIcon(status.state.isInstalled ? "checkmark.circle" : "externaldrive.badge.plus")
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(model.name)
+                        .font(appUIFont(size: bodyFontSize, weight: .medium))
+                    if model.isRecommended {
+                        Text("Recommended")
+                            .font(appUIFont(size: 10, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(Color.accentColor.opacity(0.12))
+                            )
                     }
                 }
 
-                #if DEBUG
-                settingsGroup("Developer tools") {
-                    actionRow(title: "Open Agent HUD", systemImageName: "message") {
-                        companionManager.showDeveloperCodexHUD()
-                    }
-                    actionRow(title: "Test cursor flight", systemImageName: "arrow.up.right") {
-                        companionManager.debugTestCursorFlight()
-                    }
-                    actionRow(title: "Show response card", systemImageName: "text.bubble") {
-                        companionManager.debugShowResponseCard()
-                    }
-                    actionRow(title: "Capture screen context", systemImageName: "camera") {
-                        companionManager.debugCaptureAgentScreenContext()
-                    }
-                    actionRow(title: "Reset transient UI", systemImageName: "xmark.circle", role: .destructive) {
-                        companionManager.debugResetTransientUI()
-                    }
+                Text(localModelInstallSubtitle(model: model, status: status, state: state))
+                    .font(appUIFont(size: subtextFontSize, weight: .regular))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 16)
+
+            localModelInstallButton(model: model, status: status, state: state)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
+    private func localModelInstallSubtitle(
+        model: OpenClickyLocalModel,
+        status: OpenClickyLocalModelStatus,
+        state: OpenClickyLocalModelDownloadState
+    ) -> String {
+        var parts: [String] = [status.state.label]
+        switch state.phase {
+        case .notStarted, .completed:
+            break
+        case .downloading:
+            parts.append(state.phase.label)
+            if let metrics = state.metrics {
+                parts.append(metrics.formattedLine)
+            }
+        case .resolvingManifest, .verifying:
+            parts.append(state.phase.label)
+        case .cancelled:
+            parts.append("Cancelled")
+        case .failed(let message):
+            parts.append("Failed: \(message)")
+        }
+
+        if case .notStarted = state.phase, let size = model.formattedEstimatedDownloadSize {
+            parts.append(size)
+        }
+        if let memory = model.minimumRecommendedMemoryGB {
+            parts.append("\(memory) GB RAM recommended")
+        }
+        parts.append(model.id)
+        return parts.joined(separator: " - ")
+    }
+
+    @ViewBuilder
+    private func localModelInstallButton(
+        model: OpenClickyLocalModel,
+        status: OpenClickyLocalModelStatus,
+        state: OpenClickyLocalModelDownloadState
+    ) -> some View {
+        switch state.phase {
+        case .resolvingManifest, .verifying:
+            Button(state.phase.label) {}
+                .buttonStyle(.bordered)
+                .disabled(true)
+        case .downloading:
+            Button("Cancel") {
+                localModelDownloadService.cancel(modelID: model.id)
+            }
+            .buttonStyle(.bordered)
+        case .completed where status.state.isInstalled:
+            Button("Show") {
+                NSWorkspace.shared.activateFileViewerSelecting([status.localDirectory])
+            }
+            .buttonStyle(.bordered)
+        default:
+            if status.state.isInstalled {
+                Button("Show") {
+                    NSWorkspace.shared.activateFileViewerSelecting([status.localDirectory])
                 }
-                #endif
+                .buttonStyle(.bordered)
+            } else {
+                Button("Download") {
+                    localModelDownloadService.download(model)
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
     }
@@ -1274,32 +1574,6 @@ struct OpenClickySettingsView: View {
                     subtitle: nativeComputerUseController.status.focusedTargetSummary,
                     systemImageName: "scope"
                 )
-            }
-
-            if companionManager.isAdvancedModeEnabled {
-                settingsGroup("Experimental Background Computer Use") {
-                    valueRow(
-                        title: "Experimental runtime",
-                        subtitle: "Dev-only external runtime. Native CUA is the supported OpenClicky path.",
-                        systemImageName: "exclamationmark.triangle"
-                    )
-                    valueRow(
-                        title: "Runtime status",
-                        subtitle: backgroundComputerUseController.status.summary,
-                        systemImageName: backgroundComputerUseController.status.isRuntimeReady ? "checkmark.circle" : "exclamationmark.triangle"
-                    )
-                    valueRow(
-                        title: "Manifest",
-                        subtitle: backgroundComputerUseController.status.manifestPath,
-                        systemImageName: "doc.text.magnifyingglass"
-                    )
-                    actionRow(title: "Start Experimental Background Computer Use", systemImageName: "play.circle") {
-                        companionManager.startBackgroundComputerUseRuntime()
-                    }
-                    actionRow(title: "Refresh experimental status", systemImageName: "arrow.clockwise") {
-                        companionManager.refreshBackgroundComputerUseStatus()
-                    }
-                }
             }
 
             settingsGroup("Actions") {
@@ -1651,9 +1925,54 @@ struct OpenClickySettingsView: View {
         return "Command will be written to config.toml, but the path was not found yet."
     }
 
+    private func commitCodexAgentBaseURLDraft() throws -> URL {
+        let trimmed = codexAgentBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "clickyAgentBaseURL")
+            codexAgentBaseURL = ""
+            return ClickyCodexBackend.defaultOpenAIBaseURL
+        }
+
+        guard let url = ClickyCodexBackend.validatedWorkerBaseURL(trimmed) else {
+            throw OpenClickySettingsValidationError.invalidAgentBaseURL
+        }
+
+        let normalized = url.absoluteString
+        UserDefaults.standard.set(normalized, forKey: "clickyAgentBaseURL")
+        codexAgentBaseURL = normalized
+        return url
+    }
+
+    private func applyCodexAgentBaseURLToSessions(_ url: URL) {
+        companionManager.codexAgentSessions.forEach { $0.setWorkerBaseURL(url) }
+    }
+
+    private func settingsCodexHomeManager() -> CodexHomeManager {
+        CodexHomeManager(
+            applicationSupportDirectory: companionManager.codexHomeManager.applicationSupportDirectory,
+            workerBaseURL: ClickyCodexBackend.configuredWorkerBaseURL(),
+            model: session.model,
+            reasoningEffort: UserDefaults.standard.string(forKey: "clickyCodexReasoningEffort") ?? "medium"
+        )
+    }
+
+    private func syncCodexProviderSettings() {
+        do {
+            let workerBaseURL = try commitCodexAgentBaseURLDraft()
+            applyCodexAgentBaseURLToSessions(workerBaseURL)
+            let configFile = try session.syncProviderConfigurationFromCurrentSettings()
+            let endpoint = ClickyCodexConfigTemplate(workerBaseURL: workerBaseURL).openAICompatibleEndpoint.absoluteString
+            codexConfigSyncMessage = "Synced provider config to \(configFile.path). Agent Mode will use \(endpoint) on the next session start."
+        } catch OpenClickySettingsValidationError.invalidAgentBaseURL {
+            codexConfigSyncMessage = "Could not sync provider config: enter a full http:// or https:// URL with a host. Saved endpoint unchanged."
+        } catch {
+            codexConfigSyncMessage = "Could not sync provider config: \(error.localizedDescription)"
+        }
+    }
+
     private func syncCodexMCPSettings() {
         do {
-            let configFile = try companionManager.codexHomeManager.writeCodexConfigFromSettings()
+            let configFile = try settingsCodexHomeManager().writeCodexConfigFromSettings()
             codexConfigSyncMessage = "Synced MCP settings to \(configFile.path). Restart active agents to pick up changes."
         } catch {
             codexConfigSyncMessage = "Could not sync MCP settings: \(error.localizedDescription)"

@@ -10,6 +10,7 @@ import Foundation
 
 enum BuddyTranscriptionProviderID: String, CaseIterable, Identifiable {
     case automatic = "automatic"
+    case parakeet = "parakeet"
     case appleSpeech = "apple"
     case assemblyAI = "assemblyai"
     case deepgram = "deepgram"
@@ -21,8 +22,10 @@ enum BuddyTranscriptionProviderID: String, CaseIterable, Identifiable {
         switch self {
         case .automatic:
             return "Automatic"
+        case .parakeet:
+            return "Parakeet"
         case .appleSpeech:
-            return "Apple"
+            return "Apple Speech"
         case .assemblyAI:
             return "AssemblyAI"
         case .deepgram:
@@ -35,9 +38,11 @@ enum BuddyTranscriptionProviderID: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .automatic:
-            return "Best configured"
+            return "Local-first"
+        case .parakeet:
+            return "Local Parakeet"
         case .appleSpeech:
-            return "Local"
+            return "On-device Apple"
         case .assemblyAI:
             return "Streaming"
         case .deepgram:
@@ -70,17 +75,45 @@ protocol BuddyTranscriptionProvider {
 }
 
 enum BuddyTranscriptionProviderFactory {
+    struct ProviderSelection {
+        let requestedProviderID: BuddyTranscriptionProviderID
+        let displayedProviderID: BuddyTranscriptionProviderID
+        let provider: any BuddyTranscriptionProvider
+    }
+
     static func makeDefaultProvider() -> any BuddyTranscriptionProvider {
-        let provider = resolveProvider()
-        print("🎙️ Transcription: using \(provider.displayName)")
-        return provider
+        let selection = resolveProviderSelection(preferredProvider: selectedProviderID())
+        print("Transcription: using \(selection.provider.displayName)")
+        return selection.provider
     }
 
     static func makeProvider(preferredProviderID: String) -> any BuddyTranscriptionProvider {
-        let preferredProvider = BuddyTranscriptionProviderID(rawValue: preferredProviderID)
-        let provider = resolveProvider(preferredProvider: preferredProvider)
-        print("🎙️ Transcription: using \(provider.displayName)")
-        return provider
+        let selection = resolveProviderSelection(
+            preferredProvider: BuddyTranscriptionProviderID(rawValue: preferredProviderID)
+        )
+        print("Transcription: using \(selection.provider.displayName)")
+        return selection.provider
+    }
+
+    static func currentProviderSelection() -> ProviderSelection {
+        resolveProviderSelection(preferredProvider: selectedProviderID())
+    }
+
+    static func providerSelection(preferredProviderID: String) -> ProviderSelection {
+        resolveProviderSelection(
+            preferredProvider: BuddyTranscriptionProviderID(rawValue: preferredProviderID)
+        )
+    }
+
+    static func providerIDsForSelectionGrid() -> [BuddyTranscriptionProviderID] {
+        BuddyTranscriptionProviderID.allCases.filter { providerID in
+            switch providerID {
+            case .parakeet:
+                return OpenClickyParakeetTranscriptionProvider().isConfigured
+            default:
+                return true
+            }
+        }
     }
 
     static func selectedProviderID() -> BuddyTranscriptionProviderID {
@@ -90,11 +123,7 @@ enum BuddyTranscriptionProviderFactory {
         return BuddyTranscriptionProviderID(rawValue: rawValue.lowercased()) ?? .automatic
     }
 
-    private static func resolveProvider() -> any BuddyTranscriptionProvider {
-        resolveProvider(preferredProvider: selectedProviderID())
-    }
-
-    private static func resolveProvider(preferredProvider: BuddyTranscriptionProviderID?) -> any BuddyTranscriptionProvider {
+    private static func resolveProviderSelection(preferredProvider: BuddyTranscriptionProviderID? = nil) -> ProviderSelection {
         let preferredProviderRawValue = AppBundleConfiguration
             .stringValue(forKey: "VoiceTranscriptionProvider")?
             .lowercased()
@@ -103,58 +132,123 @@ enum BuddyTranscriptionProviderFactory {
         let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
         let deepgramProvider = DeepgramStreamingTranscriptionProvider()
         let openAIProvider = OpenAIAudioTranscriptionProvider()
+        let parakeetProvider = OpenClickyParakeetTranscriptionProvider()
 
         if resolvedPreferredProvider == .appleSpeech {
-            return AppleSpeechTranscriptionProvider()
+            return ProviderSelection(
+                requestedProviderID: .appleSpeech,
+                displayedProviderID: .appleSpeech,
+                provider: AppleSpeechTranscriptionProvider()
+            )
+        }
+
+        if resolvedPreferredProvider == .parakeet {
+            if parakeetProvider.isConfigured {
+                return ProviderSelection(
+                    requestedProviderID: .parakeet,
+                    displayedProviderID: .parakeet,
+                    provider: parakeetProvider
+                )
+            }
+
+            print("Transcription: Parakeet preferred but not available, falling back")
+            let fallback = configuredFallback(
+                excluding: .parakeet,
+                assemblyAIProvider: assemblyAIProvider,
+                deepgramProvider: deepgramProvider,
+                openAIProvider: openAIProvider,
+                parakeetProvider: parakeetProvider
+            )
+            return ProviderSelection(
+                requestedProviderID: .parakeet,
+                displayedProviderID: fallback.0,
+                provider: fallback.1
+            )
         }
 
         if resolvedPreferredProvider == .assemblyAI {
             if assemblyAIProvider.isConfigured {
-                return assemblyAIProvider
+                return ProviderSelection(
+                    requestedProviderID: .assemblyAI,
+                    displayedProviderID: .assemblyAI,
+                    provider: assemblyAIProvider
+                )
             }
 
-            print("⚠️ Transcription: AssemblyAI preferred but not configured, falling back")
-            return configuredFallback(
+            print("Transcription: AssemblyAI preferred but not configured, falling back")
+            let fallback = configuredFallback(
                 excluding: .assemblyAI,
                 assemblyAIProvider: assemblyAIProvider,
                 deepgramProvider: deepgramProvider,
-                openAIProvider: openAIProvider
+                openAIProvider: openAIProvider,
+                parakeetProvider: parakeetProvider
+            )
+            return ProviderSelection(
+                requestedProviderID: .assemblyAI,
+                displayedProviderID: .assemblyAI,
+                provider: fallback.1
             )
         }
 
         if resolvedPreferredProvider == .deepgram {
             if deepgramProvider.isConfigured {
-                return deepgramProvider
+                return ProviderSelection(
+                    requestedProviderID: .deepgram,
+                    displayedProviderID: .deepgram,
+                    provider: deepgramProvider
+                )
             }
 
-            print("⚠️ Transcription: Deepgram preferred but not configured, falling back")
-            return configuredFallback(
+            print("Transcription: Deepgram preferred but not configured, falling back")
+            let fallback = configuredFallback(
                 excluding: .deepgram,
                 assemblyAIProvider: assemblyAIProvider,
                 deepgramProvider: deepgramProvider,
-                openAIProvider: openAIProvider
+                openAIProvider: openAIProvider,
+                parakeetProvider: parakeetProvider
+            )
+            return ProviderSelection(
+                requestedProviderID: .deepgram,
+                displayedProviderID: .deepgram,
+                provider: fallback.1
             )
         }
 
         if resolvedPreferredProvider == .openAI {
             if openAIProvider.isConfigured {
-                return openAIProvider
+                return ProviderSelection(
+                    requestedProviderID: .openAI,
+                    displayedProviderID: .openAI,
+                    provider: openAIProvider
+                )
             }
 
-            print("⚠️ Transcription: OpenAI preferred but not configured, falling back")
-            return configuredFallback(
+            print("Transcription: OpenAI preferred but not configured, falling back")
+            let fallback = configuredFallback(
                 excluding: .openAI,
                 assemblyAIProvider: assemblyAIProvider,
                 deepgramProvider: deepgramProvider,
-                openAIProvider: openAIProvider
+                openAIProvider: openAIProvider,
+                parakeetProvider: parakeetProvider
+            )
+            return ProviderSelection(
+                requestedProviderID: .openAI,
+                displayedProviderID: .openAI,
+                provider: fallback.1
             )
         }
 
-        return configuredFallback(
+        let fallback = configuredFallback(
             excluding: nil,
             assemblyAIProvider: assemblyAIProvider,
             deepgramProvider: deepgramProvider,
-            openAIProvider: openAIProvider
+            openAIProvider: openAIProvider,
+            parakeetProvider: parakeetProvider
+        )
+        return ProviderSelection(
+            requestedProviderID: .automatic,
+            displayedProviderID: .automatic,
+            provider: fallback.1
         )
     }
 
@@ -162,24 +256,30 @@ enum BuddyTranscriptionProviderFactory {
         excluding excludedProvider: BuddyTranscriptionProviderID?,
         assemblyAIProvider: AssemblyAIStreamingTranscriptionProvider,
         deepgramProvider: DeepgramStreamingTranscriptionProvider,
-        openAIProvider: OpenAIAudioTranscriptionProvider
-    ) -> any BuddyTranscriptionProvider {
+        openAIProvider: OpenAIAudioTranscriptionProvider,
+        parakeetProvider: OpenClickyParakeetTranscriptionProvider
+    ) -> (BuddyTranscriptionProviderID, any BuddyTranscriptionProvider) {
+        if excludedProvider != .parakeet, parakeetProvider.isConfigured {
+            print("Transcription: using Parakeet as fallback")
+            return (.parakeet, parakeetProvider)
+        }
+
         if excludedProvider != .assemblyAI, assemblyAIProvider.isConfigured {
-            print("⚠️ Transcription: using AssemblyAI as fallback")
-            return assemblyAIProvider
+            print("Transcription: using AssemblyAI as fallback")
+            return (.assemblyAI, assemblyAIProvider)
         }
 
         if excludedProvider != .deepgram, deepgramProvider.isConfigured {
-            print("⚠️ Transcription: using Deepgram as fallback")
-            return deepgramProvider
+            print("Transcription: using Deepgram as fallback")
+            return (.deepgram, deepgramProvider)
         }
 
         if excludedProvider != .openAI, openAIProvider.isConfigured {
-            print("⚠️ Transcription: using OpenAI as fallback")
-            return openAIProvider
+            print("Transcription: using OpenAI as fallback")
+            return (.openAI, openAIProvider)
         }
 
-        print("⚠️ Transcription: using Apple Speech as fallback")
-        return AppleSpeechTranscriptionProvider()
+        print("Transcription: using Apple Speech as fallback")
+        return (.appleSpeech, AppleSpeechTranscriptionProvider())
     }
 }

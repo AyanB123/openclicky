@@ -934,7 +934,7 @@ struct CodexAgentModeSettingsSheet: View {
         ]
 
         return LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-            ForEach(BuddyTranscriptionProviderID.allCases) { option in
+            ForEach(BuddyTranscriptionProviderFactory.providerIDsForSelectionGrid()) { option in
                 Button {
                     setVoiceTranscriptionProvider(option.rawValue)
                 } label: {

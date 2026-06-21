@@ -290,23 +290,48 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private var lastPermissionRequestCompletedAt: Date?
 
     override init() {
-        let transcriptionProviderID = BuddyTranscriptionProviderFactory.selectedProviderID().rawValue
-        let transcriptionProvider = BuddyTranscriptionProviderFactory.makeDefaultProvider()
-        self.transcriptionProvider = transcriptionProvider
-        self.transcriptionProviderID = transcriptionProviderID
-        self.transcriptionProviderDisplayName = transcriptionProvider.displayName
+        let selection = BuddyTranscriptionProviderFactory.currentProviderSelection()
+        if selection.requestedProviderID == .parakeet,
+           selection.displayedProviderID != .parakeet {
+            UserDefaults.standard.set(
+                selection.displayedProviderID.rawValue,
+                forKey: AppBundleConfiguration.userVoiceTranscriptionProviderDefaultsKey
+            )
+        }
+        self.transcriptionProvider = selection.provider
+        self.transcriptionProviderID = selection.displayedProviderID.rawValue
+        self.transcriptionProviderDisplayName = selection.provider.displayName
         super.init()
     }
 
     func setTranscriptionProvider(_ providerID: String) {
         guard !isDictationInProgress else { return }
-        let resolvedProviderID = BuddyTranscriptionProviderID(rawValue: providerID)?.rawValue
-            ?? BuddyTranscriptionProviderID.automatic.rawValue
-        UserDefaults.standard.set(resolvedProviderID, forKey: AppBundleConfiguration.userVoiceTranscriptionProviderDefaultsKey)
-        transcriptionProviderID = resolvedProviderID
-        let transcriptionProvider = BuddyTranscriptionProviderFactory.makeProvider(preferredProviderID: resolvedProviderID)
-        self.transcriptionProvider = transcriptionProvider
-        transcriptionProviderDisplayName = transcriptionProvider.displayName
+        let requestedProviderID = BuddyTranscriptionProviderID(rawValue: providerID)
+            ?? BuddyTranscriptionProviderID.automatic
+        let selection = BuddyTranscriptionProviderFactory.providerSelection(
+            preferredProviderID: requestedProviderID.rawValue
+        )
+        let persistedProviderID = requestedProviderID == .parakeet
+            ? selection.displayedProviderID
+            : selection.requestedProviderID
+
+        UserDefaults.standard.set(
+            persistedProviderID.rawValue,
+            forKey: AppBundleConfiguration.userVoiceTranscriptionProviderDefaultsKey
+        )
+        transcriptionProviderID = selection.displayedProviderID.rawValue
+        self.transcriptionProvider = selection.provider
+        transcriptionProviderDisplayName = selection.provider.displayName
+    }
+
+    private func refreshAutomaticTranscriptionProviderIfNeeded() {
+        guard transcriptionProviderID == BuddyTranscriptionProviderID.automatic.rawValue else { return }
+        let selection = BuddyTranscriptionProviderFactory.providerSelection(
+            preferredProviderID: BuddyTranscriptionProviderID.automatic.rawValue
+        )
+        transcriptionProviderID = selection.displayedProviderID.rawValue
+        transcriptionProvider = selection.provider
+        transcriptionProviderDisplayName = selection.provider.displayName
     }
 
     func updateContextualKeyterms(_ contextualKeyterms: [String]) {
@@ -439,7 +464,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
 
-        print("🎙️ BuddyDictationManager: start requested (\(startSource))")
+        print("BuddyDictationManager: start requested (\(startSource))")
         activeDictationSessionID = UUID()
         activeDictationRequestedAt = Date()
         activeDictationRecordingStartedAt = nil
@@ -456,7 +481,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         pendingStartRequestIdentifier = startRequestIdentifier
 
         if needsInitialPermissionPrompt {
-            print("🎙️ BuddyDictationManager: requesting initial permissions")
+            print("BuddyDictationManager: requesting initial permissions")
             logDictationEvent(
                 "voice.dictation.permission_check_started",
                 fields: [
@@ -478,7 +503,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isPreparingToRecord = true
 
         guard await requestMicrophoneAndSpeechPermissionsWithoutDuplicatePrompts() else {
-            print("🎙️ BuddyDictationManager: permissions missing or denied")
+            print("BuddyDictationManager: permissions missing or denied")
             logDictationEvent(
                 "voice.dictation.permission_check_failed",
                 fields: [
@@ -489,7 +514,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
         guard !Task.isCancelled else {
-            print("🎙️ BuddyDictationManager: start cancelled (shortcut released during permission check)")
+            print("BuddyDictationManager: start cancelled (shortcut released during permission check)")
             logDictationEvent(
                 "voice.dictation.start_cancelled",
                 fields: [
@@ -501,7 +526,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             return
         }
         guard pendingStartRequestIdentifier == startRequestIdentifier else {
-            print("🎙️ BuddyDictationManager: start request superseded")
+            print("BuddyDictationManager: start request superseded")
             logDictationEvent(
                 "voice.dictation.start_cancelled",
                 fields: [
@@ -535,7 +560,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         lastRecordedAudioPowerSampleDate = .distantPast
 
         guard !Task.isCancelled else {
-            print("🎙️ BuddyDictationManager: start cancelled (shortcut released before recording began)")
+            print("BuddyDictationManager: start cancelled (shortcut released before recording began)")
             logDictationEvent(
                 "voice.dictation.start_cancelled",
                 fields: [
@@ -552,7 +577,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         do {
             try await startRecognitionSession()
             guard pendingStartRequestIdentifier == startRequestIdentifier else {
-                print("🎙️ BuddyDictationManager: start request superseded during session start")
+                print("BuddyDictationManager: start request superseded during session start")
                 logDictationEvent(
                     "voice.dictation.start_cancelled",
                     fields: [
@@ -565,7 +590,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 return
             }
             guard !Task.isCancelled else {
-                print("🎙️ BuddyDictationManager: start cancelled (shortcut released during session start)")
+                print("BuddyDictationManager: start cancelled (shortcut released during session start)")
                 logDictationEvent(
                     "voice.dictation.start_cancelled",
                     fields: [
@@ -582,7 +607,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             }
             activeDictationRecordingStartedAt = Date()
             isPreparingToRecord = false
-            print("🎙️ BuddyDictationManager: recognition session started")
+            print("BuddyDictationManager: recognition session started")
             logDictationEvent(
                 "voice.dictation.recording_started",
                 fields: [
@@ -596,7 +621,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 from: error,
                 fallback: "couldn't start voice input. try again."
             )
-            print("❌ BuddyDictationManager: failed to start recognition session (\(transcriptionProvider.displayName)): \(error)")
+            print("BuddyDictationManager: failed to start recognition session (\(transcriptionProvider.displayName)): \(error)")
             logDictationEvent(
                 "voice.dictation.start_failed",
                 fields: [
@@ -629,7 +654,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         }
         guard !isFinalizingTranscript else { return }
 
-        print("🎙️ BuddyDictationManager: stop requested (\(expectedStartSource))")
+        print("BuddyDictationManager: stop requested (\(expectedStartSource))")
         logDictationEvent(
             "voice.dictation.stop_requested",
             fields: [
@@ -693,10 +718,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
     private func startRecognitionSession() async throws {
         tearDownAudioCapture(cancelTranscriptionSession: true)
+        refreshAutomaticTranscriptionProviderIfNeeded()
 
         try startAudioCaptureBeforeProviderReady()
 
-        print("🎙️ BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
+        print("BuddyDictationManager: opening transcription provider \(transcriptionProvider.displayName)")
         activeTranscriptionProviderOpenStartedAt = Date()
         logDictationEvent("voice.dictation.provider_opening")
 
@@ -748,7 +774,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let bufferedAudioBufferCount = audioBuffersCapturedBeforeProviderReady.count
         audioBuffersCapturedBeforeProviderReady.forEach { activeTranscriptionSession.appendAudioBuffer($0) }
         audioBuffersCapturedBeforeProviderReady.removeAll()
-        print("🎙️ BuddyDictationManager: provider ready, flushed \(bufferedAudioBufferCount) buffered audio buffers")
+        print("BuddyDictationManager: provider ready, flushed \(bufferedAudioBufferCount) buffered audio buffers")
         logDictationEvent(
             "voice.dictation.provider_ready",
             fields: [
@@ -845,7 +871,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 completionReason: "error_with_partial_transcript"
             )
         } else {
-            print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
+            print("Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
             logDictationEvent(
                 "voice.dictation.error",
                 fields: [
