@@ -100,7 +100,11 @@ nonisolated enum OpenClickyModelCatalog {
         OpenClickyModelOption(id: "gpt-5.3-codex", label: "GPT-5.3 Codex", provider: .openAI, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-5.2-codex", label: "GPT-5.2 Codex", provider: .openAI, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-5.2", label: "GPT-5.2", provider: .openAI, maxOutputTokens: 128_000)
-    ] + OpenClickyLocalModelCatalog.agentModeModelOptions
+    ]
+    // Local MLX models are intentionally NOT offered for Agent Mode: the local
+    // endpoint (mlx_lm at 127.0.0.1:32124) only speaks /v1/chat/completions,
+    // but Codex requires the Responses API, so routing agents there 404s on
+    // /v1/responses. Keep agents on real cloud providers.
 
     static func voiceResponseModel(withID modelID: String) -> OpenClickyModelOption {
         responseVoiceModels.first { $0.id == modelID } ?? voiceResponseModels[0]

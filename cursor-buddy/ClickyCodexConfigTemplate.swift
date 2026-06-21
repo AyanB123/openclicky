@@ -186,13 +186,18 @@ enum ClickyCodexBackend {
     static let openClickyLocalModelBaseURL = URL(string: "http://127.0.0.1:32124")!
 
     static func configuredWorkerBaseURL() -> URL {
+        // Never route Codex agents at the local MLX endpoint: mlx_lm only serves
+        // /v1/chat/completions, while Codex requires the Responses API, so that
+        // endpoint 404s on /v1/responses. Ignore it wherever it is configured.
         if let raw = ProcessInfo.processInfo.environment["CLICKY_AGENT_BASE_URL"],
-           let url = validatedWorkerBaseURL(raw) {
+           let url = validatedWorkerBaseURL(raw),
+           !isOpenClickyLocalModelBaseURL(url) {
             return url
         }
 
         if let raw = UserDefaults.standard.string(forKey: "clickyAgentBaseURL"),
-           let url = validatedWorkerBaseURL(raw) {
+           let url = validatedWorkerBaseURL(raw),
+           !isOpenClickyLocalModelBaseURL(url) {
             return url
         }
 
