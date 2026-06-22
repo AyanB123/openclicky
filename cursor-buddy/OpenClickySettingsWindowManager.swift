@@ -134,12 +134,12 @@ final class OpenClickySettingsWindowManager {
 private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
     case basic
     case advancedProviders
-    case superAdvanced
     case computerUse
     case permissions
     case agents
     case automations
     case connections
+    case models
 
     var id: String { rawValue }
 
@@ -147,12 +147,12 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .basic: return "Basic"
         case .advancedProviders: return "Advanced Providers"
-        case .superAdvanced: return "Super Advanced"
         case .computerUse: return "Computer Use"
         case .permissions: return "Permissions"
         case .agents: return "Agents"
         case .automations: return "Automations"
         case .connections: return "System & Logs"
+        case .models: return "Models"
         }
     }
 
@@ -160,12 +160,12 @@ private enum OpenClickySettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .basic: return "gearshape"
         case .advancedProviders: return "key"
-        case .superAdvanced: return "cpu"
         case .computerUse: return "macwindow.and.cursorarrow"
         case .permissions: return "hand.raised"
         case .agents: return "person.2"
         case .automations: return "calendar.badge.clock"
         case .connections: return "server.rack"
+        case .models: return "cpu"
         }
     }
 }
@@ -294,7 +294,9 @@ struct OpenClickySettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        OpenClickyProfileSelectorView(companionManager: companionManager)
+                        if selectedSection != .models {
+                            OpenClickyProfileSelectorView(companionManager: companionManager)
+                        }
                         sectionHeader
                         selectedPanel
                     }
@@ -393,8 +395,6 @@ struct OpenClickySettingsView: View {
             return "Working defaults, voice status, permission status, and everyday OpenClicky controls."
         case .advancedProviders:
             return "Provider credentials, voice services, Agent Mode defaults, and external service configuration."
-        case .superAdvanced:
-            return "Model cache installs and runtime plumbing for users managing their own local inference endpoints."
         case .computerUse:
             return "In-app Native Computer Use, pointing models, and cuaDriver configuration."
         case .permissions:
@@ -405,6 +405,8 @@ struct OpenClickySettingsView: View {
             return "Scheduled prompts and workflows. Interval (every N minutes) or 5-field cron, optionally bound to a specialist agent."
         case .connections:
             return "Google Workspace, persistent memory folders, logs, widgets, and utilities."
+        case .models:
+            return "Offline model installs and the local inference runtime that gets models ready for use."
         }
     }
 
@@ -461,8 +463,6 @@ struct OpenClickySettingsView: View {
             basicPanel
         case .advancedProviders:
             advancedProvidersPanel
-        case .superAdvanced:
-            superAdvancedPanel
         case .computerUse:
             computerUsePanel
         case .permissions:
@@ -473,6 +473,8 @@ struct OpenClickySettingsView: View {
             automationsPanel
         case .connections:
             connectionsPanel
+        case .models:
+            superAdvancedPanel
         }
     }
 
