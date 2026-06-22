@@ -172,6 +172,21 @@ final class OpenClickyLocalModelDownloadService: ObservableObject {
         setState(modelID: modelID, phase: .cancelled, metrics: downloadStates[modelID]?.metrics)
     }
 
+    func delete(_ model: OpenClickyLocalModel) throws {
+        cancel(modelID: model.id)
+        let directory = OpenClickyLocalModelStore.localDirectory(for: model.id)
+        if fileManager.fileExists(atPath: directory.path) {
+            try fileManager.removeItem(at: directory)
+        }
+        installStatuses[model.id] = OpenClickyLocalModelStore.status(for: model, fileManager: fileManager)
+        downloadStates[model.id] = OpenClickyLocalModelDownloadState(
+            modelID: model.id,
+            phase: .notStarted,
+            metrics: nil,
+            updatedAt: Date()
+        )
+    }
+
     private func runDownload(_ model: OpenClickyLocalModel, token: UUID) async {
         let modelID = model.id
         let localDirectory = model.localDirectory

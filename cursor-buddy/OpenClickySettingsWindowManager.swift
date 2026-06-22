@@ -214,10 +214,10 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
     @AppStorage(AppBundleConfiguration.userDesktopNotificationsEnabledDefaultsKey) private var desktopNotificationsEnabled = true
-    @AppStorage(AppBundleConfiguration.userWidgetsEnabledDefaultsKey) private var widgetsEnabled = false
-    @AppStorage(AppBundleConfiguration.userWidgetsIncludeAgentTaskNamesDefaultsKey) private var widgetsIncludeAgentTaskNames = false
-    @AppStorage(AppBundleConfiguration.userWidgetsIncludeMemorySnippetsDefaultsKey) private var widgetsIncludeMemorySnippets = false
-    @AppStorage(AppBundleConfiguration.userWidgetsIncludeFocusedAppContextDefaultsKey) private var widgetsIncludeFocusedAppContext = false
+    @AppStorage(AppBundleConfiguration.userWidgetsEnabledDefaultsKey) private var widgetsEnabled = true
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeAgentTaskNamesDefaultsKey) private var widgetsIncludeAgentTaskNames = true
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeMemorySnippetsDefaultsKey) private var widgetsIncludeMemorySnippets = true
+    @AppStorage(AppBundleConfiguration.userWidgetsIncludeFocusedAppContextDefaultsKey) private var widgetsIncludeFocusedAppContext = true
     @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
     @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
     @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var clickyTheme = ClickyTheme.system.rawValue
@@ -227,6 +227,8 @@ struct OpenClickySettingsView: View {
     @State private var codexConfigSyncMessage = "MCP servers are written into Codex config.toml for new Agent Mode sessions."
     @State private var notificationAuthorizationSummary = "Checking..."
     @State private var notificationAuthorizationGranted = false
+    @State private var pendingLocalModelDeletion: OpenClickyLocalModel?
+    @State private var localModelDeletionError: String?
     private static let openAIRealtimeVoiceIDs = [
         "marin", "cedar", "alloy", "ash", "ballad",
         "coral", "echo", "sage", "shimmer", "verse"
@@ -294,7 +296,7 @@ struct OpenClickySettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        if selectedSection != .models {
+                        if selectedSection != .models && selectedSection != .permissions {
                             OpenClickyProfileSelectorView(companionManager: companionManager)
                         }
                         sectionHeader
@@ -312,6 +314,41 @@ struct OpenClickySettingsView: View {
         .font(appUIFont(size: bodyFontSize, weight: .regular))
         .lineSpacing(appTextLineSpacing)
         .background(Color.clear)
+        .confirmationDialog(
+            "Remove downloaded model?",
+            isPresented: Binding(
+                get: { pendingLocalModelDeletion != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingLocalModelDeletion = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let model = pendingLocalModelDeletion {
+                Button("Delete \(model.name)", role: .destructive) {
+                    deleteLocalModel(model)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let model = pendingLocalModelDeletion {
+                Text("OpenClicky will remove the local files for \(model.name) from disk.")
+            }
+        }
+        .alert("Could not remove model", isPresented: Binding(
+            get: { localModelDeletionError != nil },
+            set: { newValue in
+                if !newValue { localModelDeletionError = nil }
+            }
+        )) {
+            Button("OK", role: .cancel) {
+                localModelDeletionError = nil
+            }
+        } message: {
+            Text(localModelDeletionError ?? "")
+        }
         .onChange(of: selectedSection) { _, newSection in
             if newSection == .connections, !gogCLIStatus.isInstalled, !isRefreshingGogCLIStatus {
                 refreshGogCLIStatus()
@@ -1265,7 +1302,7 @@ struct OpenClickySettingsView: View {
                 )
 
                 valueRow(
-                    title: "Configured Agent Mode endpoint",
+                    title: "Agent Mode endpoint",
                     subtitle: codexAgentEndpointSummary,
                     systemImageName: "network"
                 )
@@ -1302,7 +1339,7 @@ struct OpenClickySettingsView: View {
 
             valueRow(
                 title: "Inference runtime",
-                subtitle: "Installed bundles can be launched by OpenClicky at \(ClickyCodexConfigTemplate(workerBaseURL: ClickyCodexBackend.openClickyLocalModelBaseURL).openAICompatibleEndpoint.absoluteString). Use the model row action to start the endpoint and sync Agent Mode.",
+                subtitle: "Installed bundles can be launched by OpenClicky at \(ClickyCodexConfigTemplate(workerBaseURL: ClickyCodexBackend.openClickyLocalModelBaseURL).openAICompatibleEndpoint.absoluteString). Downloaded rows show a green tick, and Delete removes the local bundle.",
                 systemImageName: "server.rack"
             )
 
@@ -1327,7 +1364,7 @@ struct OpenClickySettingsView: View {
             )
 
         return HStack(alignment: .top, spacing: 12) {
-            rowIcon(status.state.isInstalled ? "checkmark.circle" : "externaldrive.badge.plus")
+            localModelRowIcon(isInstalled: status.state.isInstalled)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -1398,47 +1435,48 @@ struct OpenClickySettingsView: View {
         status: OpenClickyLocalModelStatus,
         state: OpenClickyLocalModelDownloadState
     ) -> some View {
-        switch state.phase {
-        case .resolvingManifest, .verifying:
-            Button(state.phase.label) {}
-                .buttonStyle(.bordered)
-                .disabled(true)
-        case .downloading:
-            Button("Cancel") {
-                localModelDownloadService.cancel(modelID: model.id)
-            }
-            .buttonStyle(.bordered)
-        case .completed where status.state.isInstalled:
-            HStack(spacing: 8) {
-                Button("Use") {
-                    useLocalModelInAgentMode(model)
-                }
-                .buttonStyle(.borderedProminent)
+        if status.state.isInstalled {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(appUIFont(size: bodyFontSize + 1, weight: .semibold))
+                    .accessibilityLabel("\(model.name) downloaded")
 
-                Button("Show") {
-                    NSWorkspace.shared.activateFileViewerSelecting([status.localDirectory])
+                Button("Delete") {
+                    pendingLocalModelDeletion = model
                 }
                 .buttonStyle(.bordered)
             }
-        default:
-            if status.state.isInstalled {
-                HStack(spacing: 8) {
-                    Button("Use") {
-                        useLocalModelInAgentMode(model)
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Show") {
-                        NSWorkspace.shared.activateFileViewerSelecting([status.localDirectory])
-                    }
+        } else {
+            switch state.phase {
+            case .resolvingManifest, .verifying:
+                Button(state.phase.label) {}
                     .buttonStyle(.bordered)
+                    .disabled(true)
+            case .downloading:
+                Button("Cancel") {
+                    localModelDownloadService.cancel(modelID: model.id)
                 }
-            } else {
+                .buttonStyle(.bordered)
+            default:
                 Button("Download") {
                     localModelDownloadService.download(model)
                 }
                 .buttonStyle(.borderedProminent)
             }
+        }
+    }
+
+    private func deleteLocalModel(_ model: OpenClickyLocalModel) {
+        pendingLocalModelDeletion = nil
+        do {
+            if case let .running(modelID) = localInferenceRuntime.state.phase,
+               modelID == model.agentModeModelID {
+                localInferenceRuntime.stop()
+            }
+            try localModelDownloadService.delete(model)
+        } catch {
+            localModelDeletionError = error.localizedDescription
         }
     }
 
@@ -1788,61 +1826,6 @@ struct OpenClickySettingsView: View {
                 }
             }
 
-            settingsGroup("Widgets") {
-                toggleRow(
-                    title: "Enable desktop widgets",
-                    subtitle: "Publishes a compact OpenClicky snapshot for WidgetKit.",
-                    systemImageName: "rectangle.grid.1x2",
-                    isOn: Binding(
-                        get: { widgetsEnabled },
-                        set: { newValue in
-                            widgetsEnabled = newValue
-                            companionManager.publishWidgetSnapshot()
-                        }
-                    )
-                )
-                toggleRow(
-                    title: "Show agent task names",
-                    subtitle: "Allows widgets to display task titles and short captions.",
-                    systemImageName: "text.alignleft",
-                    isOn: Binding(
-                        get: { widgetsIncludeAgentTaskNames },
-                        set: { newValue in
-                            widgetsIncludeAgentTaskNames = newValue
-                            companionManager.publishWidgetSnapshot()
-                        }
-                    )
-                )
-                toggleRow(
-                    title: "Show memory snippets",
-                    subtitle: "Allows widgets to show a compact recent memory summary.",
-                    systemImageName: "brain.head.profile",
-                    isOn: Binding(
-                        get: { widgetsIncludeMemorySnippets },
-                        set: { newValue in
-                            widgetsIncludeMemorySnippets = newValue
-                            companionManager.publishWidgetSnapshot()
-                        }
-                    )
-                )
-                toggleRow(
-                    title: "Show focused-app context",
-                    subtitle: "Reserved for future focus widgets. Keep off unless you want desktop context shown.",
-                    systemImageName: "macwindow",
-                    isOn: Binding(
-                        get: { widgetsIncludeFocusedAppContext },
-                        set: { newValue in
-                            widgetsIncludeFocusedAppContext = newValue
-                            companionManager.publishWidgetSnapshot()
-                        }
-                    )
-                )
-                actionRow(title: "Open widget snapshot", systemImageName: "doc.text.magnifyingglass") {
-                    companionManager.publishWidgetSnapshot()
-                    NSWorkspace.shared.open(OpenClickyWidgetStateStore.snapshotURL)
-                }
-            }
-
             settingsGroup("Logs") {
                 valueRow(
                     title: "Message log",
@@ -1858,6 +1841,10 @@ struct OpenClickySettingsView: View {
                 }
                 actionRow(title: "Open logs folder", systemImageName: "folder") {
                     openLogsFolder()
+                }
+                actionRow(title: "Open widget snapshot", systemImageName: "rectangle.grid.1x2") {
+                    companionManager.publishWidgetSnapshot()
+                    NSWorkspace.shared.open(OpenClickyWidgetStateStore.snapshotURL)
                 }
             }
 
@@ -2705,6 +2692,12 @@ struct OpenClickySettingsView: View {
     private func rowIcon(_ systemImageName: String) -> some View {
         Image(systemName: systemImageName)
             .font(appUIFont(size: bodyFontSize + 1, weight: .medium))
+    }
+
+    private func localModelRowIcon(isInstalled: Bool) -> some View {
+        Image(systemName: isInstalled ? "checkmark.circle.fill" : "externaldrive.badge.plus")
+            .font(appUIFont(size: bodyFontSize + 1, weight: .medium))
+            .foregroundStyle(isInstalled ? Color.green : Color.secondary)
     }
 
     private func openFeedbackInbox() {

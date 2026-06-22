@@ -63,6 +63,15 @@ nonisolated enum AppBundleConfiguration {
     static let userThemeDefaultsKey = "openClickyThemeAppearance"
     static let appGroupIdentifier = "group.com.jkneen.openclicky"
 
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            userWidgetsEnabledDefaultsKey: true,
+            userWidgetsIncludeAgentTaskNamesDefaultsKey: true,
+            userWidgetsIncludeMemorySnippetsDefaultsKey: true,
+            userWidgetsIncludeFocusedAppContextDefaultsKey: true
+        ])
+    }
+
     static func anthropicAPIKey() -> String? {
         let configuredAnthropicAPIKey = userDefaultsValue(forKey: userAnthropicAPIKeyDefaultsKey) ?? stringValue(
             forKey: "AnthropicAPIKey",

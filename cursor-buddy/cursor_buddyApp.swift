@@ -111,6 +111,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
         }
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
+        AppBundleConfiguration.registerDefaults()
 
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()

@@ -78,9 +78,9 @@ struct OpenClickyAutomationsSettingsSection: View {
       ))
       .labelsHidden()
 
-      VStack(alignment: .leading, spacing: 2) {
+      VStack(alignment: .leading, spacing: 3) {
         Text(a.name)
-          .font(.system(size: 12, weight: .semibold))
+          .font(.system(size: 13, weight: .semibold))
         HStack(spacing: 6) {
           Text(a.schedule.displayString)
           if let slug = a.agentSlug {
@@ -93,17 +93,17 @@ struct OpenClickyAutomationsSettingsSection: View {
             Text("· next: \(next.formatted(.dateTime.weekday().hour().minute()))")
           }
         }
-        .font(.system(size: 10))
+        .font(.system(size: 11))
         .foregroundColor(.secondary)
         Text(a.prompt)
-          .font(.system(size: 10))
+          .font(.system(size: 11))
           .foregroundColor(.secondary)
           .lineLimit(2)
       }
       Spacer()
       if isProtected {
         Label("System", systemImage: "lock.fill")
-          .font(.system(size: 10, weight: .semibold))
+          .font(.system(size: 11, weight: .semibold))
           .foregroundColor(.secondary)
       } else {
         Button("Edit") { editing = a }
