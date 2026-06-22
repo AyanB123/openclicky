@@ -718,6 +718,54 @@ final class CompanionManager: ObservableObject {
         FillerPhraseLibrary.shared.prepare(client: currentClient)
     }
 
+    @MainActor
+    private func warmRealtimeVoiceInputIfNeeded(reason: String) {
+        guard !hasCompletedRealtimeVoiceInputWarmupThisLaunch,
+              realtimeVoiceInputWarmupTask == nil else { return }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        let selectedVoiceResponseModel = OpenClickyModelCatalog.voiceResponseModel(withID: selectedModel)
+        guard selectedVoiceResponseModel.provider == .openAI,
+              OpenClickyModelCatalog.isSpeechModelID(selectedVoiceResponseModel.id) else { return }
+
+        realtimeVoiceInputWarmupTask = Task.detached(priority: .utility) {
+            let startedAt = Date()
+            do {
+                let engine = AVAudioEngine()
+                _ = engine.inputNode.outputFormat(forBus: 0)
+                engine.prepare()
+                try engine.start()
+                engine.stop()
+                engine.reset()
+                await MainActor.run {
+                    self.hasCompletedRealtimeVoiceInputWarmupThisLaunch = true
+                    self.realtimeVoiceInputWarmupTask = nil
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "internal",
+                        event: "voice.realtime_bidirectional.input_warmed",
+                        fields: [
+                            "reason": reason,
+                            "startupDurationMs": Self.elapsedMilliseconds(since: startedAt)
+                        ]
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self.realtimeVoiceInputWarmupTask = nil
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "internal",
+                        event: "voice.realtime_bidirectional.input_warmup_failed",
+                        fields: [
+                            "reason": reason,
+                            "error": error.localizedDescription
+                        ]
+                    )
+                }
+            }
+        }
+    }
+
     private lazy var microsoftEdgeTTSClient: MicrosoftEdgeTTSClient = {
         return MicrosoftEdgeTTSClient(
             voiceID: AppBundleConfiguration.microsoftEdgeVoiceID()
@@ -865,12 +913,14 @@ final class CompanionManager: ObservableObject {
         let resolvedModel = OpenClickyModelCatalog.speechModel(withID: model).id
         guard selectedSpeechModel != resolvedModel else {
             setTTSProvider(.openAIRealtime)
+            warmRealtimeVoiceInputIfNeeded(reason: "speech_model_selected")
             return
         }
         selectedSpeechModel = resolvedModel
         openAIRealtimeSpeechClient.model = resolvedModel
         UserDefaults.standard.set(resolvedModel, forKey: "openClickySpeechModel")
         setTTSProvider(.openAIRealtime)
+        warmRealtimeVoiceInputIfNeeded(reason: "speech_model_selected")
     }
 
     func setOpenAIRealtimeVoiceID(_ voiceID: String) {
@@ -1414,6 +1464,8 @@ final class CompanionManager: ObservableObject {
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     private var pendingAgentDockItemRemovalTasks: [UUID: DispatchWorkItem] = [:]
+    private var realtimeVoiceInputWarmupTask: Task<Void, Never>?
+    private var hasCompletedRealtimeVoiceInputWarmupThisLaunch = false
 
     /// Screenshot captured in parallel with audio recording. Started the
     /// instant push-to-talk is pressed so capture latency overlaps with
@@ -1692,6 +1744,7 @@ final class CompanionManager: ObservableObject {
                 openAIRealtimeSpeechClient.model = resolvedModel
                 setTTSProvider(.openAIRealtime)
                 openAIRealtimeSpeechClient.warmUpConnection()
+                warmRealtimeVoiceInputIfNeeded(reason: "voice_model_selected")
             } else if selectedVoiceResponseModel.provider == .deepgram {
                 deepgramVoiceAgentClient.updateConfiguration(
                     apiKey: AppBundleConfiguration.deepgramAPIKey(),
@@ -2172,6 +2225,7 @@ final class CompanionManager: ObservableObject {
             UserDefaults.standard.set(OpenClickyTTSProvider.openAIRealtime.rawValue, forKey: AppBundleConfiguration.userTTSProviderDefaultsKey)
             UserDefaults.standard.set(selectedVoiceResponseModel.id, forKey: "openClickySpeechModel")
             openAIRealtimeSpeechClient.warmUpConnection()
+            warmRealtimeVoiceInputIfNeeded(reason: "startup")
         case .deepgram:
             selectedSpeechModel = selectedVoiceResponseModel.id
             UserDefaults.standard.set(selectedVoiceResponseModel.id, forKey: "openClickySpeechModel")
@@ -3113,6 +3167,7 @@ final class CompanionManager: ObservableObject {
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
             ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+            warmRealtimeVoiceInputIfNeeded(reason: "microphone_permission_granted")
         }
         if !previouslyHadCamera && hasCameraPermission {
             ClickyAnalytics.trackPermissionGranted(permission: "camera")

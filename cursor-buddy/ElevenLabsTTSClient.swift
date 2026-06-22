@@ -2381,12 +2381,28 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     private func stopPlayback(for turn: BidirectionalVoiceTurn) {
         ElevenLabsTTSClient.stopPlayerIfAttached(turn.playerNode)
         turn.outputEngine.stop()
+        turn.outputEngine.reset()
         if playerNode === turn.playerNode {
             playerNode = nil
         }
         if audioEngine === turn.outputEngine {
             audioEngine = nil
         }
+    }
+
+    private static func isRecoverableAudioEngineStartError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.code == -10877 {
+            return true
+        }
+        return nsError.localizedDescription.contains("-10877")
+    }
+
+    private static func prepareEngineForRetry(_ engine: AVAudioEngine) {
+        if engine.isRunning {
+            engine.stop()
+        }
+        engine.reset()
     }
 
     private func ensureMicrophonePermission() async throws {
@@ -2805,21 +2821,17 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         }
 
         func start() throws {
-            let inputNode = inputEngine.inputNode
-            let inputFormat = inputNode.outputFormat(forBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
-                guard let self,
-                      let pcmData = self.inputConverter.convertToPCM16Data(from: buffer),
-                      !pcmData.isEmpty else { return }
-                let powerLevel = Self.audioPowerLevel(from: buffer)
-                Task { @MainActor [onInputPowerLevel] in
-                    onInputPowerLevel(powerLevel)
+            do {
+                try installTapAndStartEngine()
+            } catch {
+                guard OpenAIRealtimeSpeechClient.isRecoverableAudioEngineStartError(error) else {
+                    stop()
+                    throw error
                 }
-                self.handle(pcmData, powerLevel: powerLevel)
+                stop()
+                OpenAIRealtimeSpeechClient.prepareEngineForRetry(inputEngine)
+                try installTapAndStartEngine()
             }
-            hasInstalledInputTap = true
-            inputEngine.prepare()
-            try inputEngine.start()
         }
 
         func setSender(_ sender: @escaping (Data) -> Void) {
@@ -2850,6 +2862,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             if inputEngine.isRunning {
                 inputEngine.stop()
             }
+            inputEngine.reset()
         }
 
         func captureStats() -> (byteCount: Int, peakPower: Double) {
@@ -2895,6 +2908,24 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             lock.unlock()
             activeSender?(pcmData)
         }
+
+        private func installTapAndStartEngine() throws {
+            let inputNode = inputEngine.inputNode
+            let inputFormat = inputNode.outputFormat(forBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 256, format: inputFormat) { [weak self] buffer, _ in
+                guard let self,
+                      let pcmData = self.inputConverter.convertToPCM16Data(from: buffer),
+                      !pcmData.isEmpty else { return }
+                let powerLevel = Self.audioPowerLevel(from: buffer)
+                Task { @MainActor [onInputPowerLevel] in
+                    onInputPowerLevel(powerLevel)
+                }
+                self.handle(pcmData, powerLevel: powerLevel)
+            }
+            hasInstalledInputTap = true
+            inputEngine.prepare()
+            try inputEngine.start()
+        }
     }
 
     private final class BidirectionalVoiceTurn {
@@ -2936,7 +2967,15 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             let playerNode = AVAudioPlayerNode()
             outputEngine.attach(playerNode)
             outputEngine.connect(playerNode, to: outputEngine.mainMixerNode, format: streamFormat)
-            try outputEngine.start()
+            do {
+                try outputEngine.start()
+            } catch {
+                guard OpenAIRealtimeSpeechClient.isRecoverableAudioEngineStartError(error) else {
+                    throw error
+                }
+                OpenAIRealtimeSpeechClient.prepareEngineForRetry(outputEngine)
+                try outputEngine.start()
+            }
             self.outputEngine = outputEngine
             self.playerNode = playerNode
         }
@@ -3020,6 +3059,7 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
             receiveTask = nil
             ElevenLabsTTSClient.stopPlayerIfAttached(playerNode)
             outputEngine.stop()
+            outputEngine.reset()
             webSocket.cancel(with: .goingAway, reason: nil)
         }
 
