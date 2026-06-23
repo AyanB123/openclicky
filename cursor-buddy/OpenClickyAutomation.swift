@@ -129,10 +129,28 @@ struct CronExpression {
       let d = comps.day ?? -1
       let mo = comps.month ?? -1
       let wd = comps.weekday ?? -1
-      if minutes.contains(m), hours.contains(h), days.contains(d), months.contains(mo), weekdays.contains(wd) {
-        return candidate
+      guard minutes.contains(m), hours.contains(h), months.contains(mo) else {
+        candidate = calendar.date(byAdding: .minute, value: 1, to: candidate) ?? candidate
+        continue
       }
-      candidate = calendar.date(byAdding: .minute, value: 1, to: candidate) ?? candidate
+      // M12: standard Vixie cron semantics — when BOTH day-of-month and
+      // day-of-week are restricted, fire when EITHER matches (OR); when only
+      // one is restricted, match that one. Previously this required BOTH
+      // (AND), so `0 0 1 * 1` fired only when the 1st happened to be a Monday.
+      let daysRestricted = days.count != 31
+      let weekdaysRestricted = weekdays.count != 7
+      let dayMatches: Bool
+      switch (daysRestricted, weekdaysRestricted) {
+      case (true, true):
+        dayMatches = days.contains(d) || weekdays.contains(wd)
+      default:
+        dayMatches = days.contains(d) && weekdays.contains(wd)
+      }
+      guard dayMatches else {
+        candidate = calendar.date(byAdding: .minute, value: 1, to: candidate) ?? candidate
+        continue
+      }
+      return candidate
     }
     return nil
   }

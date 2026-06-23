@@ -73,6 +73,7 @@ public enum OpenClickyLiquidGlassWindowSurface {
     }
 }
 
+@MainActor
 public final class OpenClickyGlassContainerView: NSView {
     public override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(point) else { return nil }
@@ -80,6 +81,7 @@ public final class OpenClickyGlassContainerView: NSView {
     }
 }
 
+@MainActor
 public final class OpenClickyLiquidGlassBackdropView: NSView {
     public enum Strength {
         case compact
@@ -150,7 +152,9 @@ public final class OpenClickyLiquidGlassBackdropView: NSView {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.updateLiquidGlassState()
+            MainActor.assumeIsolated {
+                self?.updateLiquidGlassState()
+            }
         }
     }
 
@@ -277,6 +281,7 @@ public final class OpenClickyLiquidGlassBackdropView: NSView {
     }
 }
 
+@MainActor
 private final class OpenClickyLiquidGlassAccentWashView: NSView {
     var accentColor: NSColor = .systemBlue { didSet { needsDisplay = true } }
     var glassOpacity: Double = 0.75 { didSet { needsDisplay = true } }

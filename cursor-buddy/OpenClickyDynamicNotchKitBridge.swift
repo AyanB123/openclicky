@@ -406,31 +406,31 @@ final class OpenClickyDynamicNotchKitBridge {
         model.openNotch = { [weak self] in
             guard let self else { return }
             self.model.isExpanded = true
-            let screen = self.currentTargetScreen()
+            guard let screen = self.currentTargetScreen() else { return }
             Task { await self.expandNotch(on: screen) }
         }
         model.closeNotch = { [weak self] in
             guard let self else { return }
             self.model.isExpanded = false
-            let screen = self.currentTargetScreen()
             if self.model.hidesWhenClosed {
                 Task {
                     await self.hideNotchIfNeeded()
                     self.model.onHiddenWhenClosed?()
                 }
             } else {
+                guard let screen = self.currentTargetScreen() else { return }
                 Task { await self.compactNotch(on: screen) }
             }
         }
         return notch
     }()
 
-    private func currentTargetScreen() -> NSScreen {
+    private func currentTargetScreen() -> NSScreen? {
         targetScreen
             ?? notch.windowController?.window?.screen
             ?? NSScreen.openClickyActiveInteractionScreen()
             ?? NSScreen.main
-            ?? NSScreen.screens.first!
+            ?? NSScreen.screens.first
     }
 
     private func prepareNotchForPresentation(on screen: NSScreen) async {

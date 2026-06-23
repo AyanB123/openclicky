@@ -511,7 +511,7 @@ struct BlueCursorView: View {
         _cursorPosition = State(initialValue: CGPoint(x: localX + 35, y: localY + 25))
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
     }
-    @State private var timer: Timer?
+    @State private var welcomeTypingTimer: Timer?
     /// High-priority background timer that drives cursor tracking. Held
     /// as a strong reference so the source isn't deallocated mid-tick.
     /// We sample on a `userInteractive` queue (not @MainActor) so the
@@ -886,7 +886,7 @@ struct BlueCursorView: View {
             self.cursorOpacity = 1.0
         }
         .onDisappear {
-            timer?.invalidate()
+            welcomeTypingTimer?.invalidate()
             cursorTrackingTimer?.cancel()
             cursorTrackingTimer = nil
             navigationAnimationTimer?.invalidate()
@@ -1110,7 +1110,11 @@ struct BlueCursorView: View {
 
     private func colorFromHex(_ rawHex: String?) -> Color? {
         guard let hex = rawHex?.trimmingCharacters(in: .whitespacesAndNewlines), !hex.isEmpty else { return nil }
-        return Color(hex: hex)
+        // H11: use the failable initializer so malformed/empty hex from model
+        // output or external cursor state returns nil, letting the caller's
+        // `?? overlayCursorColor` fallback actually engage (previously
+        // Color(hex:) silently returned black, making those fallbacks dead).
+        return Color(optionalHex: hex)
     }
 
     private func anchoredBubblePosition(
@@ -1176,6 +1180,14 @@ struct BlueCursorView: View {
     }
 
     private func updateCursorTracking() {
+        // H9: skip the cursor-tracking work when the buddy is hidden on this
+        // screen, so a multi-display setup doesn't pay for per-frame state
+        // writes that produce no visible pixels. Checked here on the main
+        // thread (not in the background timer handler) because this struct's
+        // @State-backed `buddyIsVisibleOnThisScreen` must be read via SwiftUI's
+        // live indirection — capturing `self` in the background closure would
+        // snapshot stale state, and `[weak self]` is illegal on a value type.
+        guard buddyIsVisibleOnThisScreen else { return }
         let mouseLocation = NSEvent.mouseLocation
         isCursorOnThisScreen = screenFrame.contains(mouseLocation)
 
@@ -1536,23 +1548,31 @@ struct BlueCursorView: View {
         }
 
         var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < self.fullWelcomeMessage.count else {
+        // H8: capture the timer into @State (`welcomeTypingTimer`) so onDisappear
+        // can invalidate it. Previously the timer was a local (its `timer` param
+        // shadowed the dead @State `timer`), so an overlay disappear mid-typing
+        // left it firing against recycled state. BlueCursorView is a SwiftUI
+        // struct, so there is no retain cycle to guard against — capture `self`
+        // by value; @State writes go through SwiftUI's live backing storage.
+        let typingTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
+            guard currentIndex < fullWelcomeMessage.count else {
                 timer.invalidate()
+                welcomeTypingTimer = nil
                 // Hold the text for 2 seconds, then fade it out
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.bubbleOpacity = 0.0
+                    bubbleOpacity = 0.0
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    self.showWelcome = false
+                    showWelcome = false
                 }
                 return
             }
 
-            let index = self.fullWelcomeMessage.index(self.fullWelcomeMessage.startIndex, offsetBy: currentIndex)
-            self.welcomeText.append(self.fullWelcomeMessage[index])
+            let index = fullWelcomeMessage.index(fullWelcomeMessage.startIndex, offsetBy: currentIndex)
+            welcomeText.append(fullWelcomeMessage[index])
             currentIndex += 1
         }
+        welcomeTypingTimer = typingTimer
     }
 }
 

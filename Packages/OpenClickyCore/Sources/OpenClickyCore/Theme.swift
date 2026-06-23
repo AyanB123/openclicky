@@ -169,12 +169,50 @@ public enum ClickyTheme: String, CaseIterable, Identifiable {
 }
 
 extension Color {
+    /// H11: non-failable initializer for known-valid hex literals used throughout
+    /// the design system (89 call sites pass string literals). Returns black on
+    /// parse failure, which is acceptable for compile-time-constant tokens. For
+    /// DYNAMIC hex values (model output, external cursor state), use the failable
+    /// `Color(optionalHex:)` initializer so a malformed string can fall back to
+    /// the intended color instead of silently becoming black.
     public init(hex: String) {
         let hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "#", with: "")
 
         var rgbValue: UInt64 = 0
-        Scanner(string: hexSanitized).scanHexInt64(&rgbValue)
+        guard Scanner(string: hexSanitized).scanHexInt64(&rgbValue),
+              hexSanitized.count == 6 || hexSanitized.count == 3,
+              hexSanitized.allSatisfy({ $0.isHexDigit }) else {
+            self.init(red: 0, green: 0, blue: 0)
+            return
+        }
+        let normalized = hexSanitized.count == 3
+            ? hexSanitized.map { String(repeating: $0, count: 2) }.joined()
+            : hexSanitized
+        _ = Scanner(string: normalized).scanHexInt64(&rgbValue)
+
+        let red = Double((rgbValue & 0xFF0000) >> 16) / 255.0
+        let green = Double((rgbValue & 0x00FF00) >> 8) / 255.0
+        let blue = Double(rgbValue & 0x0000FF) / 255.0
+
+        self.init(red: red, green: green, blue: blue)
+    }
+
+    /// Failable initializer for DYNAMIC hex values (model output, external
+    /// cursor state, user input). Returns nil on parse failure so callers can
+    /// fall back to their intended color rather than silently getting black.
+    public init?(optionalHex: String) {
+        let hexSanitized = optionalHex.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+        guard hexSanitized.count == 6 || hexSanitized.count == 3,
+              hexSanitized.allSatisfy({ $0.isHexDigit }) else {
+            return nil
+        }
+        let normalized = hexSanitized.count == 3
+            ? hexSanitized.map { String(repeating: $0, count: 2) }.joined()
+            : hexSanitized
+        var rgbValue: UInt64 = 0
+        guard Scanner(string: normalized).scanHexInt64(&rgbValue) else { return nil }
 
         let red = Double((rgbValue & 0xFF0000) >> 16) / 255.0
         let green = Double((rgbValue & 0x00FF00) >> 8) / 255.0

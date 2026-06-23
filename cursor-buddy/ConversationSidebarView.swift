@@ -14,6 +14,7 @@ struct ConversationSidebarView: View {
   @ObservedObject var companion: CompanionManager
   @State private var search: String = ""
   @State private var showArchived: Bool = false
+  @State private var archivedVisibleLimit: Int = 24
   @AppStorage(AppBundleConfiguration.userAppFontDefaultsKey) private var appFontRawValue = OpenClickyResponseCaptionFont.fallback.rawValue
   @AppStorage(AppBundleConfiguration.userAppBoldTextDefaultsKey) private var appBoldTextEnabled = false
   @AppStorage(AppBundleConfiguration.userAppBodyFontSizeDefaultsKey) private var appBodyFontSize = 13.0
@@ -119,11 +120,22 @@ struct ConversationSidebarView: View {
     )
   }
 
-  private var archivedSessions: [CodexAgentSession] {
-    sortedHistorySessions(
-      companion.codexAgentSessions
-        .filter { companion.archivedSessionIDs.contains($0.id) }
-        .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+  private var archivedSessionCount: Int {
+    companion.codexAgentSessions.lazy
+      .filter { companion.archivedSessionIDs.contains($0.id) }
+      .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+      .count
+  }
+
+  private var visibleArchivedSessions: [CodexAgentSession] {
+    guard showArchived || !search.isEmpty else { return [] }
+    return Array(
+      sortedHistorySessions(
+        companion.codexAgentSessions
+          .filter { companion.archivedSessionIDs.contains($0.id) }
+          .filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
+      )
+      .prefix(archivedVisibleLimit)
     )
   }
 
@@ -144,14 +156,17 @@ struct ConversationSidebarView: View {
           row(session: session, isArchived: false)
         }
 
-        if !archivedSessions.isEmpty {
-          Button(action: { showArchived.toggle() }) {
+        let archiveCount = archivedSessionCount
+        let archivedRows = visibleArchivedSessions
+
+        if archiveCount > 0 {
+          Button(action: { toggleArchived() }) {
             HStack(spacing: 4) {
               Image(systemName: showArchived ? "chevron.down" : "chevron.right")
                 .font(appUIFont(size: max(9, subtextFontSize - 2), weight: .semibold))
               Text("Archived")
                 .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
-              Text("\(archivedSessions.count)")
+              Text("\(archiveCount)")
                 .font(appUIFont(size: max(10, subtextFontSize - 1), weight: .medium))
                 .foregroundColor(Self.textSecondary.opacity(0.7))
               Spacer()
@@ -163,14 +178,32 @@ struct ConversationSidebarView: View {
           }
           .buttonStyle(.plain)
 
-          if showArchived {
-            ForEach(archivedSessions) { session in
+          if showArchived || !search.isEmpty {
+            ForEach(archivedRows) { session in
               row(session: session, isArchived: true)
+            }
+
+            if archivedRows.count < archiveCount {
+              Button(action: loadMoreArchived) {
+                HStack {
+                  Spacer()
+                  Text("Show more archived")
+                    .font(appUIFont(size: max(11, subtextFontSize), weight: .semibold))
+                    .foregroundColor(Self.textSecondary)
+                  Spacer()
+                }
+                .padding(.vertical, 8)
+              }
+              .buttonStyle(.plain)
+              .accessibilityLabel("Show more archived conversations")
             }
           }
         }
       }
       .padding(.vertical, 4)
+    }
+    .onChange(of: search) { _ in
+      archivedVisibleLimit = 24
     }
   }
 
@@ -253,6 +286,15 @@ struct ConversationSidebarView: View {
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 10)
+  }
+
+  private func toggleArchived() {
+    showArchived.toggle()
+    archivedVisibleLimit = 24
+  }
+
+  private func loadMoreArchived() {
+    archivedVisibleLimit += 24
   }
 
   private func newChat() {

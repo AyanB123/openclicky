@@ -35,7 +35,12 @@ final class OpenClickySystemAudioCaptureController: NSObject, SCStreamOutput, SC
     ) async throws {
         self.stateChanged = onStateChanged
         self.audioBufferHandler = onAudioBuffer
-        state = CaptureState(isRunning: false, outputURL: outputURL, errorMessage: nil, receivedAudioBuffers: 0)
+        // H6: all writer/input/state mutations are serialized on `queue` (the
+        // same serial queue the audio callback runs on) so the callback cannot
+        // observe a half-constructed writer/input pair.
+        queue.sync {
+            state = CaptureState(isRunning: false, outputURL: outputURL, errorMessage: nil, receivedAudioBuffers: 0)
+        }
         notifyStateChanged()
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -54,9 +59,13 @@ final class OpenClickySystemAudioCaptureController: NSObject, SCStreamOutput, SC
         if writer.canAdd(input) {
             writer.add(input)
         }
-        assetWriter = writer
-        audioInput = input
-        hasStartedWriting = false
+        // H6: assign writer/input behind `queue` so the audio callback (also on
+        // `queue`) never races the assignment in `start()`.
+        queue.sync {
+            assetWriter = writer
+            audioInput = input
+            hasStartedWriting = false
+        }
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
@@ -70,15 +79,21 @@ final class OpenClickySystemAudioCaptureController: NSObject, SCStreamOutput, SC
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-        self.stream = stream
+        // H6: assign stream behind `queue` to serialize with stop()/didStop.
+        queue.sync {
+            self.stream = stream
+        }
         try await stream.startCapture()
-        state.isRunning = true
+        queue.sync { state.isRunning = true }
         notifyStateChanged()
     }
 
     func stop() async {
-        let activeStream = stream
-        stream = nil
+        let activeStream = queue.sync { () -> SCStream? in
+            let active = stream
+            stream = nil
+            return active
+        }
         if let activeStream {
             try? await activeStream.stopCapture()
         }
@@ -104,13 +119,17 @@ final class OpenClickySystemAudioCaptureController: NSObject, SCStreamOutput, SC
             }
         }
 
-        state.isRunning = false
+        queue.sync { state.isRunning = false }
         notifyStateChanged()
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        state.isRunning = false
-        state.errorMessage = error.localizedDescription
+        // H6: mutate state on `queue` to serialize with the audio callback and
+        // start()/stop().
+        queue.sync {
+            state.isRunning = false
+            state.errorMessage = error.localizedDescription
+        }
         notifyStateChanged()
     }
 

@@ -845,10 +845,14 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
     }
 
     private static func point(from json: [String: Any]) -> CGPoint? {
+        // M14: guard against NaN/Infinity so a malformed {"x":"NaN","y":"NaN"}
+        // cannot propagate through pointClampedToDesktop into a CGEvent.
         if let point = dictionary(json["point"]), let x = double(point["x"]), let y = double(point["y"]) {
+            guard x.isFinite, y.isFinite else { return nil }
             return CGPoint(x: x, y: y)
         }
         guard let x = double(json["x"]), let y = double(json["y"]) else { return nil }
+        guard x.isFinite, y.isFinite else { return nil }
         return CGPoint(x: x, y: y)
     }
 
@@ -926,9 +930,9 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
     }
 
     private static func double(_ value: Any?) -> Double? {
-        if let value = value as? Double { return value }
+        if let value = value as? Double { return value.isFinite ? value : nil }
         if let value = value as? Int { return Double(value) }
-        if let value = value as? String { return Double(value) }
+        if let value = value as? String, let parsed = Double(value) { return parsed.isFinite ? parsed : nil }
         return nil
     }
 

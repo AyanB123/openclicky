@@ -86,6 +86,15 @@ struct OpenClickyLocalModelRuntimeReadiness: Equatable, Sendable {
 struct OpenClickyLocalModelRemoteFile: Equatable, Sendable {
     let path: String
     let size: Int64
+    /// Optional SHA256 digest from the HuggingFace tree API (`lfs.oid`). Used
+    /// by the download service to verify integrity beyond a size check (H7).
+    let sha256: String?
+
+    init(path: String, size: Int64, sha256: String? = nil) {
+        self.path = path
+        self.size = size
+        self.sha256 = sha256
+    }
 }
 
 struct OpenClickyLocalInferenceRuntimeState: Equatable {

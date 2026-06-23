@@ -89,9 +89,13 @@ final class MenuBarPanelManager: NSObject {
             object: UserDefaults.standard,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshThemeAppearance()
-                self?.refreshGlassBackdropAccent()
+            // M22: the closure already runs on the main queue (.main above), but
+            // Swift 6 still sees it as nonisolated unless we assert main-actor
+            // execution explicitly.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.refreshThemeAppearance()
+                self.refreshGlassBackdropAccent()
             }
         }
     }
@@ -111,6 +115,12 @@ final class MenuBarPanelManager: NSObject {
         }
         if let observer = contentSizeObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        // Low: remove the menu-bar slot on dealloc for symmetry with the
+        // observer cleanup above. Negligible today (app-lifetime owner) but
+        // prevents a leaked slot if the manager is ever recreated.
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
         }
     }
 

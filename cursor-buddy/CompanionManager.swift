@@ -12,6 +12,7 @@ import AppKit
 import Combine
 import CoreAudio
 import Foundation
+import os
 import ScreenCaptureKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -239,8 +240,16 @@ private struct OpenClickyRequestTiming {
     let requestedAt: Date
 }
 
+// M1: previously this was `@unchecked Sendable` with an unsynchronised `var
+// didComplete` — safe only because all access happened to land on the main
+// actor, with nothing enforcing that. Now the flag is guarded by an
+// OSAllocatedUnfairLock so the invariant holds regardless of caller context.
 private final class OpenClickyRequestCompletionState: @unchecked Sendable {
-    var didComplete = false
+    private let didCompleteStorage = OSAllocatedUnfairLock(initialState: false)
+    var didComplete: Bool {
+        get { didCompleteStorage.withLock { $0 } }
+        set { didCompleteStorage.withLock { $0 = newValue } }
+    }
 }
 
 nonisolated private enum OpenClickyLocalAutomationRunner {
@@ -1357,6 +1366,7 @@ final class CompanionManager: ObservableObject {
     private var lastVoiceAgentStartFingerprint: String?
     private var lastVoiceAgentStartAt: Date?
     private var lastVoiceAgentStartSessionID: UUID?
+    private var suppressNextVoiceAgentStartAcknowledgement = false
     private static let voiceAgentStartDuplicateTTL: TimeInterval = 8
 
     /// Guards against the realtime final-transcript callback and the
@@ -2988,10 +2998,35 @@ final class CompanionManager: ObservableObject {
 
     private func clickExternalControlPoint(_ point: CGPoint, caption: String?) -> OpenClickyExternalControlResponse {
         let targetPoint = Self.clampedExternalCursorPoint(point)
+        // H3/M10: previously this force-enabled native CUA (`setEnabled(true)`)
+        // and always called `nativeComputerUseController.click` regardless of
+        // the selected backend — so a user who selected Background Computer Use
+        // still got a cursor-warping native click, and a user who *disabled* CUA
+        // had their preference silently overridden. Now: honor the selector, and
+        // treat "disabled" as authoritative (return an error, let the caller
+        // decide) instead of flipping it back on.
+        if !nativeComputerUseController.isEnabled && selectedComputerUseBackend == .nativeSwift {
+            OpenClickyMessageLogStore.shared.append(
+                lane: "computer-use",
+                direction: "error",
+                event: "external_control.click_disabled",
+                fields: [
+                    "executor": "openClickyControl",
+                    "reason": "Native computer use is disabled. Enable it in Settings to allow bridge clicks."
+                ]
+            )
+            return .error(409, "Computer use is disabled")
+        }
+        switch selectedComputerUseBackend {
+        case .backgroundComputerUse:
+            return clickExternalControlPointViaBackgroundComputerUse(targetPoint, caption: caption)
+        case .nativeSwift:
+            return clickExternalControlPointViaNativeComputerUse(targetPoint, caption: caption)
+        }
+    }
+
+    private func clickExternalControlPointViaNativeComputerUse(_ targetPoint: CGPoint, caption: String?) -> OpenClickyExternalControlResponse {
         do {
-            if !nativeComputerUseController.isEnabled {
-                nativeComputerUseController.setEnabled(true)
-            }
             try nativeComputerUseController.click(at: targetPoint)
             detectedElementScreenLocation = targetPoint
             detectedElementDisplayFrame = NSScreen.screen(containingOrNearestTo: targetPoint)?.frame
@@ -3004,6 +3039,7 @@ final class CompanionManager: ObservableObject {
                 fields: [
                     "executor": "openClickyControl",
                     "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "backend": "nativeSwift",
                     "x": Int(targetPoint.x),
                     "y": Int(targetPoint.y),
                     "caption": caption ?? ""
@@ -3023,6 +3059,7 @@ final class CompanionManager: ObservableObject {
                 fields: [
                     "executor": "openClickyControl",
                     "executionMethod": "OpenClickyNativeComputerUseController.click",
+                    "backend": "nativeSwift",
                     "x": Int(targetPoint.x),
                     "y": Int(targetPoint.y),
                     "caption": caption ?? "",
@@ -3031,6 +3068,83 @@ final class CompanionManager: ObservableObject {
             )
             return .error(500, error.localizedDescription)
         }
+    }
+
+    private func clickExternalControlPointViaBackgroundComputerUse(_ targetPoint: CGPoint, caption: String?) -> OpenClickyExternalControlResponse {
+        // The bridge caller gave us a GLOBAL display point. BCU clicks in
+        // window-screenshot pixel space, so we capture the frontmost window
+        // (which also yields the stateToken BCU requires — H4), convert the
+        // global point into the window's local screenshot space using the AX
+        // window bounds, and post the click through the selected backend. This
+        // keeps the bridge honest about the user's backend choice (no cursor
+        // warp when BCU is selected). Coordinate conversion: localPoint =
+        // (globalPoint - windowOrigin) * (screenshotPixels / windowPoints).
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let capture = try await self.backgroundComputerUseController.captureFrontmostWindowAsJPEG()
+                guard let window = OpenClickyComputerUseWindowEnumerator.frontmostTargetWindow() else {
+                    throw OpenClickyComputerUseError.noTargetWindow
+                }
+                // AX bounds use AppKit bottom-left origin; BCU screenshot is
+                // top-left. Convert: flip Y, subtract window origin, scale by
+                // retina factor derived from screenshot pixels vs window points.
+                let screenFrame = (NSScreen.screen(containingOrNearestTo: targetPoint) ?? NSScreen.main)?.frame ?? .zero
+                let globalTopLeftY = screenFrame.height - targetPoint.y
+                let localX = (targetPoint.x - window.bounds.x)
+                let localY = (globalTopLeftY - (screenFrame.height - window.bounds.y))
+                let pointsW = max(window.bounds.width, 1)
+                let pointsH = max(window.bounds.height, 1)
+                let scaleX = Double(capture.screenshotWidthInPixels) / pointsW
+                let scaleY = Double(capture.screenshotHeightInPixels) / pointsH
+                let scaled = CGPoint(x: localX * scaleX, y: localY * scaleY)
+                _ = try await self.backgroundComputerUseController.click(
+                    at: scaled,
+                    window: capture.windowID,
+                    targetAppName: caption,
+                    stateToken: capture.stateToken
+                )
+                self.detectedElementScreenLocation = targetPoint
+                self.detectedElementDisplayFrame = NSScreen.screen(containingOrNearestTo: targetPoint)?.frame
+                self.detectedElementBubbleText = Self.pointingBubbleText(for: caption)
+                self.rememberPointedElement(at: targetPoint, displayFrame: self.detectedElementDisplayFrame, label: caption)
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "outgoing",
+                    event: "external_control.click",
+                    fields: [
+                        "executor": "openClickyControl",
+                        "executionMethod": "OpenClickyBackgroundComputerUseController.click",
+                        "backend": "backgroundComputerUse",
+                        "x": Int(targetPoint.x),
+                        "y": Int(targetPoint.y),
+                        "caption": caption ?? ""
+                    ]
+                )
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "computer-use",
+                    direction: "error",
+                    event: "external_control.click_error",
+                    fields: [
+                        "executor": "openClickyControl",
+                        "executionMethod": "OpenClickyBackgroundComputerUseController.click",
+                        "backend": "backgroundComputerUse",
+                        "x": Int(targetPoint.x),
+                        "y": Int(targetPoint.y),
+                        "caption": caption ?? "",
+                        "error": error.localizedDescription
+                    ]
+                )
+            }
+        }
+        return .ok([
+            "clicked": true,
+            "x": targetPoint.x,
+            "y": targetPoint.y,
+            "caption": caption ?? "",
+            "backend": "backgroundComputerUse"
+        ])
     }
 
     private func speakExternalProxyText(_ text: String, interrupt: Bool) -> OpenClickyExternalControlResponse {
@@ -3077,6 +3191,10 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = nil
         claudeAgentSDKAPI?.stop()
         codexVoiceSession.stop()
+        // M11: tear down the Background Computer Use runtime too. Previously
+        // stop() killed the external bridge, voice, and timers but never the
+        // spawned BCU helper, orphaning it across app restarts.
+        backgroundComputerUseController.stopRuntime()
         externalControlBridgeServer?.stop()
         externalControlBridgeServer = nil
         externalProxyClearTask?.cancel()
@@ -3583,9 +3701,13 @@ final class CompanionManager: ObservableObject {
     @discardableResult
     func createAndSelectNewCodexAgentSession(title: String? = nil, accentTheme: ClickyAccentTheme? = nil) -> CodexAgentSession {
         let resolvedAccentTheme = accentTheme ?? Self.nextAgentDockAccentTheme(existingCount: codexAgentSessions.count)
+        // Inject the persistent Claude Agent SDK bridge so title generation
+        // follows the money rule (SDK first, direct REST fallback). See
+        // CodexAgentSession.fastFriendlyTitle.
         let session = CodexAgentSession(
             title: title ?? "Ask Agent",
-            accentTheme: resolvedAccentTheme
+            accentTheme: resolvedAccentTheme,
+            claudeAgentSDKAPI: claudeAgentSDKAPI
         )
         codexAgentSessions.append(session)
         observeCodexAgentSession(session)
@@ -4574,9 +4696,20 @@ final class CompanionManager: ObservableObject {
                     // route claims the turn, force the agent dispatch instead of
                     // dropping the decision and letting the model just talk
                     // (previously the tool name was logged here and discarded).
+                    // Tool-routed realtime turns can already have produced a
+                    // spoken assistant acknowledgement before the app sees the
+                    // function call. If the normal deterministic cascade turns
+                    // that same transcript into an agent start, keep the
+                    // app-level handoff silent so OpenClicky does not say the
+                    // background acknowledgement twice.
+                    self.suppressNextVoiceAgentStartAcknowledgement = true
                     if self.routeCompletedRealtimeVoiceTranscriptIfNeeded(transcript) {
+                        if self.suppressNextVoiceAgentStartAcknowledgement {
+                            self.suppressNextVoiceAgentStartAcknowledgement = false
+                        }
                         return true
                     }
+                    self.suppressNextVoiceAgentStartAcknowledgement = false
                     if toolName == "openclicky_use_screen_context" {
                         let instruction = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !instruction.isEmpty else { return false }
@@ -4617,6 +4750,7 @@ final class CompanionManager: ObservableObject {
                     self.startVoiceAgentTaskPlan(
                         instruction: instruction,
                         acknowledgement: "i’ll take care of that in the background.",
+                        speakAcknowledgement: false,
                         voiceContextUserTranscript: transcript
                     )
                     self.recordRealtimeVoiceRouteFingerprint(Self.realtimeVoiceRouteFingerprint(instruction))
@@ -4686,6 +4820,18 @@ final class CompanionManager: ObservableObject {
                     self.lastTranscript = userTranscript
                     let routedByApp = wasRoutedByApp || self.routeCompletedRealtimeVoiceTranscriptIfNeeded(userTranscript)
                     wasRoutedByApp = routedByApp
+                    if !routedByApp,
+                       self.autoEscalateVoiceResponseToAgentIfNeeded(
+                        responseText: assistantText,
+                        transcript: userTranscript,
+                        source: "realtime_bidirectional"
+                       ) {
+                        self.recordRealtimeVoiceRouteFingerprint(Self.realtimeVoiceRouteFingerprint(userTranscript))
+                        self.releaseRealtimeVoiceConversationMode(reason: "routed_by_app")
+                        self.lastVoiceInteractionCompletedAt = Date()
+                        self.scheduleWidgetSnapshotPublish()
+                        return
+                    }
                     if !routedByApp {
                         self.rememberVoiceExchange(
                             userTranscript: userTranscript,
@@ -5372,8 +5518,68 @@ final class CompanionManager: ObservableObject {
             instruction: instruction,
             acknowledgement: "i’ll handle the background part too.",
             route: "agent.hybrid_start",
-            speakAcknowledgement: false,
             interruptVoiceResponse: false,
+            voiceContextUserTranscript: transcript
+        )
+        return true
+    }
+
+    private func autoEscalateVoiceResponseToAgentIfNeeded(
+        responseText: String,
+        transcript: String,
+        source: String,
+        route: String = "agent.auto_escalate"
+    ) -> Bool {
+        guard Self.shouldEscalateVoiceResponseToAgent(
+            responseText: responseText,
+            transcript: transcript
+        ) else {
+            return false
+        }
+
+        let acknowledgement: String
+        let instruction: String
+        let reason: String
+        if let decision = Self.smartAgentRouteDecision(from: transcript) {
+            acknowledgement = decision.acknowledgement
+            instruction = decision.instruction
+            reason = "smart_\(decision.reason)"
+        } else if let filesystemInstruction = Self.implicitFilesystemTaskInstruction(from: transcript) {
+            acknowledgement = Self.filesystemTaskAcknowledgement(from: transcript)
+            instruction = filesystemInstruction
+            reason = "filesystem_refusal_recovery"
+        } else if let implicitInstruction = Self.implicitAgentTaskInstruction(from: transcript) {
+            acknowledgement = "i’ll take care of that in the background."
+            instruction = implicitInstruction
+            reason = "implicit_refusal_recovery"
+        } else {
+            return false
+        }
+
+        OpenClickyMessageLogStore.shared.append(
+            lane: "agent",
+            direction: "incoming",
+            event: "openclicky.agent_task.voice_auto_escalated",
+            fields: [
+                "source": source,
+                "transcript": transcript,
+                "responseText": responseText,
+                "instruction": instruction,
+                "reason": reason,
+                "executor": "agent_mode",
+                "route": route,
+                "requestID": activeRequestTiming?.requestID ?? "none"
+            ]
+        )
+
+        pendingAgentOfferInstruction = nil
+        pendingAgentOfferAt = nil
+        startVoiceAgentTaskPlan(
+            instruction: instruction,
+            acknowledgement: acknowledgement,
+            route: route,
+            speakAcknowledgement: false,
+            interruptVoiceResponse: true,
             voiceContextUserTranscript: transcript
         )
         return true
@@ -6607,8 +6813,12 @@ final class CompanionManager: ObservableObject {
                 targetAppName: appName
             )
         case .nativeSwift:
-            if !nativeComputerUseController.isEnabled {
-                nativeComputerUseController.setEnabled(true)
+            guard ensureNativeComputerUseEnabledOrRefuse(spokenAction: "press that key") else {
+                throw NSError(
+                    domain: "OpenClickyComputerUse",
+                    code: 13,
+                    userInfo: [NSLocalizedDescriptionKey: "Native computer use is disabled."]
+                )
             }
             Self.activateRunningApplication(named: appName)
             guard let targetWindow = await waitForNativeComputerUseWindow(for: appName) else {
@@ -6631,8 +6841,12 @@ final class CompanionManager: ObservableObject {
         case .backgroundComputerUse:
             _ = try await backgroundComputerUseController.typeText(text, targetAppName: appName)
         case .nativeSwift:
-            if !nativeComputerUseController.isEnabled {
-                nativeComputerUseController.setEnabled(true)
+            guard ensureNativeComputerUseEnabledOrRefuse(spokenAction: "type that") else {
+                throw NSError(
+                    domain: "OpenClickyComputerUse",
+                    code: 13,
+                    userInfo: [NSLocalizedDescriptionKey: "Native computer use is disabled."]
+                )
             }
             Self.activateRunningApplication(named: appName)
             guard let targetWindow = await waitForNativeComputerUseWindow(for: appName) else {
@@ -7062,6 +7276,27 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// M10: native computer use "disabled" is the user's authoritative choice.
+    /// Previously every action path force-enabled it (`setEnabled(true)`),
+    /// silently overriding the preference and persisting the override. Now
+    /// action paths call this and bail with a spoken prompt when disabled.
+    /// Returns true when enabled (action may proceed).
+    @discardableResult
+    private func ensureNativeComputerUseEnabledOrRefuse(spokenAction: String) -> Bool {
+        if nativeComputerUseController.isEnabled { return true }
+        speakShortSystemResponse("computer use is turned off. turn it on in settings if you want me to \(spokenAction).")
+        OpenClickyMessageLogStore.shared.append(
+            lane: "computer-use",
+            direction: "error",
+            event: "native_cua.refused_disabled",
+            fields: [
+                "executor": "native_cua",
+                "reason": "Native computer use is disabled; action refused instead of force-enabling."
+            ]
+        )
+        return false
+    }
+
     private func clickUsingBackgroundComputerUse(_ request: OpenClickyNativeClickRequest) {
         interruptCurrentVoiceResponse()
         let timing = activeRequestTiming
@@ -7126,7 +7361,8 @@ final class CompanionManager: ObservableObject {
                 let result = try await backgroundComputerUseController.click(
                     at: pointCoordinate,
                     window: capture.windowID,
-                    targetAppName: request.targetPhrase
+                    targetAppName: request.targetPhrase,
+                    stateToken: capture.stateToken
                 )
                 let spokenLabel = parseResult.elementLabel ?? request.targetPhrase
                 speakShortSystemResponse(spokenLabel.map { "clicked \($0)." } ?? "clicked that.")
@@ -7182,8 +7418,8 @@ final class CompanionManager: ObservableObject {
             ]
         )
 
-        if !nativeComputerUseController.isEnabled {
-            nativeComputerUseController.setEnabled(true)
+        if !ensureNativeComputerUseEnabledOrRefuse(spokenAction: "click that") {
+            return
         }
 
         if request.prefersLastPointedElement,
@@ -7703,8 +7939,8 @@ final class CompanionManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 650_000_000)
             Self.activateRunningApplication(named: "Messages")
 
-            if !nativeComputerUseController.isEnabled {
-                nativeComputerUseController.setEnabled(true)
+            if !ensureNativeComputerUseEnabledOrRefuse(spokenAction: "search messages") {
+                return
             }
 
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -7822,8 +8058,8 @@ final class CompanionManager: ObservableObject {
             ]
         )
 
-        if !nativeComputerUseController.isEnabled {
-            nativeComputerUseController.setEnabled(true)
+        if !ensureNativeComputerUseEnabledOrRefuse(spokenAction: "type that") {
+            return
         }
 
         guard let targetWindow = nativeComputerUseController.refreshFocusedTarget() else {
@@ -7920,8 +8156,8 @@ final class CompanionManager: ObservableObject {
             ]
         )
 
-        if !nativeComputerUseController.isEnabled {
-            nativeComputerUseController.setEnabled(true)
+        if !ensureNativeComputerUseEnabledOrRefuse(spokenAction: "press that key") {
+            return
         }
 
         guard let targetWindow = nativeComputerUseController.refreshFocusedTarget() else {
@@ -11898,11 +12134,23 @@ final class CompanionManager: ObservableObject {
         let normalizedTranscript = SpokenText.normalizedSpokenCommandText(transcript)
         let isAgentSuitableTask = isLocalFilesystemInspectionRequest(normalizedTranscript)
             || implicitAgentTaskInstruction(from: transcript) != nil
+            || smartAgentRouteDecision(from: transcript) != nil
         guard isAgentSuitableTask else { return false }
 
         let normalizedResponse = SpokenText.normalizedSpokenCommandText(responseText)
-        let refusalPattern = #"\b(?:i\s+(?:do\s+not|don't|dont)\s+have\s+access|i\s+(?:can't|cannot)|unable\s+to|not\s+able\s+to)\b.{0,96}\b(?:file\s*system|files?|folders?|desktop|downloads?|documents?|browse|inspect|read)\b"#
-        return normalizedResponse.range(of: refusalPattern, options: .regularExpression) != nil
+        let filesystemRefusalPattern = #"\b(?:i\s+(?:do\s+not|don't|dont)\s+have\s+access|i\s+(?:can't|cannot)|unable\s+to|not\s+able\s+to)\b.{0,96}\b(?:file\s*system|files?|folders?|desktop|downloads?|documents?|browse|inspect|read)\b"#
+        let agentRouteRefusalPatterns = [
+            #"\bthat\s+needs\s+openclicky(?:'s)?\s+agent\s+route\b"#,
+            #"\bit\s+did(?:n\s*'?t| not)\s+start\s+from\s+this\s+voice\s+turn\b"#,
+            #"\bneeds\s+agent\s+mode\b"#,
+            #"\bstart\s+an\s+agent\b"#
+        ]
+        if normalizedResponse.range(of: filesystemRefusalPattern, options: .regularExpression) != nil {
+            return true
+        }
+        return agentRouteRefusalPatterns.contains {
+            normalizedResponse.range(of: $0, options: .regularExpression) != nil
+        }
     }
 
     static func implicitFilesystemTaskInstruction(from transcript: String) -> String? {
@@ -12766,17 +13014,25 @@ final class CompanionManager: ObservableObject {
         instruction: String,
         acknowledgement: String? = nil,
         route: String = "agent.start",
-        speakAcknowledgement: Bool = false,
+        speakAcknowledgement: Bool = true,
         interruptVoiceResponse: Bool = false,
         voiceContextUserTranscript: String? = nil
     ) {
+        let effectiveSpeakAcknowledgement: Bool
+        if suppressNextVoiceAgentStartAcknowledgement {
+            effectiveSpeakAcknowledgement = false
+            suppressNextVoiceAgentStartAcknowledgement = false
+        } else {
+            effectiveSpeakAcknowledgement = speakAcknowledgement
+        }
+
         let plannedInstructions = Self.parallelAgentInstructions(from: instruction)
         guard plannedInstructions.count > 1 else {
             startVoiceAgentTask(
                 instruction: instruction,
                 acknowledgement: acknowledgement,
                 route: route,
-                speakAcknowledgement: speakAcknowledgement,
+                speakAcknowledgement: effectiveSpeakAcknowledgement,
                 interruptVoiceResponse: interruptVoiceResponse,
                 voiceContextUserTranscript: voiceContextUserTranscript
             )
@@ -12802,7 +13058,7 @@ final class CompanionManager: ObservableObject {
                 instruction: plannedInstruction,
                 acknowledgement: index == 0 ? splitAcknowledgement : nil,
                 route: "\(route).split",
-                speakAcknowledgement: speakAcknowledgement && index == 0,
+                speakAcknowledgement: effectiveSpeakAcknowledgement && index == 0,
                 interruptVoiceResponse: interruptVoiceResponse && index == 0,
                 voiceContextUserTranscript: voiceContextUserTranscript ?? instruction
             )
@@ -12813,7 +13069,7 @@ final class CompanionManager: ObservableObject {
         instruction: String,
         acknowledgement: String? = nil,
         route: String = "agent.start",
-        speakAcknowledgement: Bool = false,
+        speakAcknowledgement: Bool = true,
         interruptVoiceResponse: Bool = false,
         voiceContextUserTranscript: String? = nil
     ) {
@@ -13611,6 +13867,8 @@ final class CompanionManager: ObservableObject {
                 "outcome": outcome
             ]
         )
+
+        guard AppBundleConfiguration.agentCompletionVoiceEnabled() else { return }
 
         // Skip narration if the user is mid-conversation with the voice
         // responder — the dock item still updates visually, and the desktop
@@ -14472,6 +14730,7 @@ final class CompanionManager: ObservableObject {
         lastAgentContextSessionID = session.id
         activeCodexAgentSessionID = session.id
         let baselinePasteboardChangeCount = NSPasteboard.general.changeCount
+        let forceClipboardSelection = Self.shouldForceAgentClipboardSelection(for: trimmedPrompt)
         OpenClickyApplicationUsageLogStore.shared.recordFrontmostApplication(source: "agent_prompt")
         Task {
             // Agent allocation should not make the main OpenClicky panel feel
@@ -14481,7 +14740,10 @@ final class CompanionManager: ObservableObject {
             await Task.yield()
             try? await Task.sleep(for: .milliseconds(120))
 
-            let screenContext = includeScreenContext ? await prepareAgentScreenContextForNextTurn(minimumPasteboardChangeCount: baselinePasteboardChangeCount) : nil
+            let screenContext = includeScreenContext ? await prepareAgentScreenContextForNextTurn(
+                minimumPasteboardChangeCount: baselinePasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            ) : nil
             if !includeScreenContext {
                 OpenClickyMessageLogStore.shared.append(
                     lane: "agent",
@@ -14522,11 +14784,18 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    private func prepareAgentScreenContextForNextTurn(minimumPasteboardChangeCount: Int) async -> CodexAgentScreenContext? {
+    private func prepareAgentScreenContextForNextTurn(
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) async -> CodexAgentScreenContext? {
         if !handoffQueue.isEmpty {
             let queuedRegions = handoffQueue
             do {
-                let context = try writeQueuedHandoffScreenContext(queuedRegions, minimumPasteboardChangeCount: minimumPasteboardChangeCount)
+                let context = try writeQueuedHandoffScreenContext(
+                    queuedRegions,
+                    minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                    forceClipboardSelection: forceClipboardSelection
+                )
                 handoffQueue.removeAll { queued in
                     queuedRegions.contains { $0.id == queued.id }
                 }
@@ -14540,7 +14809,11 @@ final class CompanionManager: ObservableObject {
             if selectedComputerUseBackend == .backgroundComputerUse {
                 do {
                     let capture = try await backgroundComputerUseController.captureFrontmostWindowAsJPEG()
-                    return try writeBackgroundComputerUseScreenContext(capture, minimumPasteboardChangeCount: minimumPasteboardChangeCount)
+                    return try writeBackgroundComputerUseScreenContext(
+                        capture,
+                        minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                        forceClipboardSelection: forceClipboardSelection
+                    )
                 } catch {
                     OpenClickyMessageLogStore.shared.append(
                         lane: "computer-use",
@@ -14557,21 +14830,33 @@ final class CompanionManager: ObservableObject {
             } else if nativeComputerUseController.isEnabled {
                 do {
                     let capture = try await nativeComputerUseController.captureFocusedWindowAsJPEG()
-                    return try writeNativeComputerUseScreenContext(capture, minimumPasteboardChangeCount: minimumPasteboardChangeCount)
+                    return try writeNativeComputerUseScreenContext(
+                        capture,
+                        minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                        forceClipboardSelection: forceClipboardSelection
+                    )
                 } catch {
                     print("OpenClicky Agent Mode: native CUA Swift focused-window context unavailable: \(error)")
                 }
             }
 
             let captures = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
-            return try writeCapturedScreenContext(captures, minimumPasteboardChangeCount: minimumPasteboardChangeCount)
+            return try writeCapturedScreenContext(
+                captures,
+                minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            )
         } catch {
             print("OpenClicky Agent Mode: current screen context unavailable: \(error)")
             return nil
         }
     }
 
-    private func writeQueuedHandoffScreenContext(_ queuedRegions: [HandoffQueuedRegionScreenshot], minimumPasteboardChangeCount: Int) throws -> CodexAgentScreenContext {
+    private func writeQueuedHandoffScreenContext(
+        _ queuedRegions: [HandoffQueuedRegionScreenshot],
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) throws -> CodexAgentScreenContext {
         let directory = try createAgentScreenContextDirectory()
         let batchID = Self.agentContextBatchID()
         let attachments = try queuedRegions.enumerated().map { index, queuedRegion in
@@ -14599,12 +14884,20 @@ final class CompanionManager: ObservableObject {
         return CodexAgentScreenContext(
             source: "queued screen handoff",
             capturedAt: Date(),
-            selectedText: resolveSelectedText(from: queuedNotes, minimumPasteboardChangeCount: minimumPasteboardChangeCount),
+            selectedText: resolveSelectedText(
+                from: queuedNotes,
+                minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            ),
             attachments: attachments
         )
     }
 
-    private func writeNativeComputerUseScreenContext(_ capture: OpenClickyComputerUseWindowCapture, minimumPasteboardChangeCount: Int) throws -> CodexAgentScreenContext {
+    private func writeNativeComputerUseScreenContext(
+        _ capture: OpenClickyComputerUseWindowCapture,
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) throws -> CodexAgentScreenContext {
         OpenClickyApplicationUsageLogStore.shared.recordApplication(
             name: capture.window.owner,
             bundleIdentifier: capture.window.bundleIdentifier,
@@ -14618,7 +14911,10 @@ final class CompanionManager: ObservableObject {
         return CodexAgentScreenContext(
             source: "native CUA Swift focused-window context",
             capturedAt: Date(),
-            selectedText: readSelectedTextForAgentContext(minimumPasteboardChangeCount: minimumPasteboardChangeCount),
+            selectedText: readSelectedTextForAgentContext(
+                minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            ),
             attachments: [
                 CodexAgentScreenContextAttachment(
                     label: capture.label,
@@ -14629,7 +14925,11 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    private func writeBackgroundComputerUseScreenContext(_ capture: OpenClickyBackgroundComputerUseWindowCapture, minimumPasteboardChangeCount: Int) throws -> CodexAgentScreenContext {
+    private func writeBackgroundComputerUseScreenContext(
+        _ capture: OpenClickyBackgroundComputerUseWindowCapture,
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) throws -> CodexAgentScreenContext {
         OpenClickyApplicationUsageLogStore.shared.recordApplication(
             name: capture.appName,
             bundleIdentifier: capture.bundleID,
@@ -14643,7 +14943,10 @@ final class CompanionManager: ObservableObject {
         return CodexAgentScreenContext(
             source: "Background Computer Use focused-window context",
             capturedAt: Date(),
-            selectedText: readSelectedTextForAgentContext(minimumPasteboardChangeCount: minimumPasteboardChangeCount),
+            selectedText: readSelectedTextForAgentContext(
+                minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            ),
             attachments: [
                 CodexAgentScreenContextAttachment(
                     label: capture.label,
@@ -14654,7 +14957,11 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    private func writeCapturedScreenContext(_ captures: [CompanionScreenCapture], minimumPasteboardChangeCount: Int) throws -> CodexAgentScreenContext {
+    private func writeCapturedScreenContext(
+        _ captures: [CompanionScreenCapture],
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) throws -> CodexAgentScreenContext {
         let directory = try createAgentScreenContextDirectory()
         let batchID = Self.agentContextBatchID()
         let attachments = try captures.enumerated().map { index, capture in
@@ -14679,18 +14986,31 @@ final class CompanionManager: ObservableObject {
         return CodexAgentScreenContext(
             source: "current desktop screenshot",
             capturedAt: Date(),
-            selectedText: readSelectedTextForAgentContext(minimumPasteboardChangeCount: minimumPasteboardChangeCount),
+            selectedText: readSelectedTextForAgentContext(
+                minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+                forceClipboardSelection: forceClipboardSelection
+            ),
             attachments: attachments
         )
     }
 
-    private func readSelectedTextForAgentContext(minimumPasteboardChangeCount: Int) -> String? {
-        let selection = readSelectedTextFromPasteboard(minimumChangeCount: minimumPasteboardChangeCount)
+    private func readSelectedTextForAgentContext(
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) -> String? {
+        let selection = readSelectedTextFromPasteboard(
+            minimumChangeCount: minimumPasteboardChangeCount,
+            allowUnchangedPasteboard: forceClipboardSelection
+        )
         guard let selection else { return nil }
         return selection
     }
 
-    private func resolveSelectedText(from notes: [String], minimumPasteboardChangeCount: Int) -> String? {
+    private func resolveSelectedText(
+        from notes: [String],
+        minimumPasteboardChangeCount: Int,
+        forceClipboardSelection: Bool = false
+    ) -> String? {
         let cleanedNotes = notes
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -14699,14 +15019,20 @@ final class CompanionManager: ObservableObject {
             return first
         }
 
-        return readSelectedTextForAgentContext(minimumPasteboardChangeCount: minimumPasteboardChangeCount)
+        return readSelectedTextForAgentContext(
+            minimumPasteboardChangeCount: minimumPasteboardChangeCount,
+            forceClipboardSelection: forceClipboardSelection
+        )
     }
 
-    private func readSelectedTextFromPasteboard(minimumChangeCount: Int) -> String? {
+    private func readSelectedTextFromPasteboard(
+        minimumChangeCount: Int,
+        allowUnchangedPasteboard: Bool = false
+    ) -> String? {
         let pasteboard = NSPasteboard.general
         let currentChangeCount = pasteboard.changeCount
 
-        guard currentChangeCount > minimumChangeCount else { return nil }
+        guard allowUnchangedPasteboard || currentChangeCount > minimumChangeCount else { return nil }
         guard let rawText = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawText.isEmpty else {
             return nil
@@ -14717,6 +15043,19 @@ final class CompanionManager: ObservableObject {
 
         guard !compact.isEmpty else { return nil }
         return String(compact.prefix(1_500))
+    }
+
+    private static func shouldForceAgentClipboardSelection(for prompt: String) -> Bool {
+        let normalized = prompt
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+
+        guard normalized.contains("clipboard") || normalized.contains("pasteboard") else {
+            return false
+        }
+
+        let explicitClipboardUsePattern = #"\b(?:take|pull|use|read|get|grab|fetch|bring|copy|paste|include|attach)\b.{0,40}\b(?:my|the)?\s*(?:clipboard|pasteboard)\b|\bfrom\s+(?:my|the)\s+(?:clipboard|pasteboard)\b"#
+        return normalized.range(of: explicitClipboardUsePattern, options: .regularExpression) != nil
     }
 
     private func createAgentScreenContextDirectory() throws -> URL {
@@ -15036,7 +15375,7 @@ final class CompanionManager: ObservableObject {
     YOUR JOB IS NARROW. you only do these things:
     1. GIVE ADVICE, EXPLAIN, and ANSWER QUESTIONS conversationally — including conceptual coding questions, walkthroughs, "what does this mean", "how would i", etc.
     2. SEARCH THE WEB conversationally when the user asks. answer from your own general knowledge; if the user explicitly wants live/current data (today's weather, latest price, breaking news), give a brief handoff-style acknowledgement; OpenClicky routes that kind of task to Agent Mode.
-    3. ROUTE WORK NATURALLY — simple conversational help stays in voice, direct computer-control is handled by OpenClicky's computer-use path, and concrete file/code/research/settings/log work is handed to Agent Mode only when the user is asking for real tool work rather than talking through an idea.
+    3. ROUTE WORK NATURALLY — simple conversational help stays in voice, direct computer-control is handled by OpenClicky's computer-use path, and concrete file/code/research/settings/log work should be handed to Agent Mode when the user is asking OpenClicky to actually carry it out rather than merely talking through an idea.
 
     YOU DO NOT, EVER:
     - run code, run commands, run shell, run terminal, run python, run scripts
@@ -15045,11 +15384,11 @@ final class CompanionManager: ObservableObject {
     - perform any filesystem, git, build, install, or refactor work
     - include any control tags, point tags, coordinate tags, markdown, brackets, or hidden routing markers in your answer
 
-    keep the user's normal conversation in this voice lane. if they are reflecting, brainstorming, asking whether something is possible, saying "i like this", "i want it to feel like this", "could we", or "can we make sure", answer conversationally first. don't turn that into background work unless they clearly ask for an agent, a direct computer action, or a concrete change that truly needs tools.
+    keep the user's normal conversation in this voice lane. if they are reflecting, brainstorming, or asking a pure capability question, answer conversationally first. but if they are asking OpenClicky to actually do deeper tool work — for example fix code, inspect logs, change settings, research something current, or work on files — call the background-agent tool even if they did not explicitly say the word "agent".
 
-    if the user asks you to do anything in the "DO NOT" list and OpenClicky has not already routed it before you see the turn, be honest that no action has started. do not say "i’ll take care of that in the background", "on it", or "starting an agent" unless the app has actually routed the turn to Agent Mode or direct computer-use before it reaches you. say briefly: "that needs OpenClicky's agent route, but it didn't start from this voice turn."
+    if the user asks you to do anything in the "DO NOT" list and it is concrete tool work, do not explain that an agent would be needed — call the background-agent tool. only stay conversational when the user is discussing whether something is possible, reflecting on design, or otherwise not asking you to execute the work yet.
 
-    when the user clearly mentions "agent" / "start an agent" / "spin up an agent" / "ask an agent", or when the app has already decided the task needs Agent Mode, your job is just to confirm briefly: "on it, starting an agent for that."
+    when the user clearly mentions "agent" / "start an agent" / "spin up an agent" / "ask an agent", or when you decide the task needs Agent Mode, call the background-agent tool instead of talking about the route. if you do speak after routing, keep it to a brief acknowledgement like "on it."
 
     response style:
     - default to one or two sentences. be direct and dense. sound like a capable coworker over the user's shoulder, not a formal report. if the user asks you to explain more or go deeper, give a thorough explanation with no length cap — but still no file edits, no commands, just words.
@@ -15279,7 +15618,7 @@ final class CompanionManager: ObservableObject {
         - selected computer-use backend: \(backend.rawValue) (\(backend.label))
         - selected computer-use model: \(computerUseModel.id) (\(computerUseModel.provider.rawValue), \(computerUseModel.label))
         - background Agent Mode model: \(codexAgentSession.model)
-        - keep spoken voice inference on the realtime model. for direct computer-control requests, including app-plus-action commands like "open Spotify and play a track", call OpenClicky's computer-use tool so the app can execute through the selected backend. do not route ordinary app control to Agent Mode just because it has more than one step. for deeper file, code, research, settings, logs, builds, installs, refactors, or long-running work, call the background-agent tool so Agent Mode can run on the full configured model.
+        - keep spoken voice inference on the realtime model. for direct computer-control requests, including app-plus-action commands like "open Spotify and play a track", call OpenClicky's computer-use tool so the app can execute through the selected backend. do not route ordinary app control to Agent Mode just because it has more than one step. for deeper file, code, research, settings, logs, builds, installs, refactors, or long-running work, call the background-agent tool so Agent Mode can run on the full configured model, even when the user did not explicitly say "agent".
         - when background work has several parts, choose the agent shape deliberately: keep tightly coupled work in one background agent, but split into multiple background-agent calls when the user explicitly asks for multiple/separate/parallel agents or the request clearly contains independent workstreams that can run safely side by side.
         - temporary visual guidance is not computer-use and not Agent Mode. if the user asks OpenClicky to point, highlight, draw a rectangle, box an area, circle something, draw around something, scribble, trace, mark, or put a shape around visible screen content, do not say you'll get another system to do it and do not call a routing tool. let OpenClicky's screen-aware voice-response path handle it directly.
         """
@@ -15747,6 +16086,22 @@ final class CompanionManager: ObservableObject {
                 // Parse the visual guidance tag from Claude's response.
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
                 let spokenText = parseResult.spokenText
+
+                if self.autoEscalateVoiceResponseToAgentIfNeeded(
+                    responseText: spokenText,
+                    transcript: transcript,
+                    source: "voice_response"
+                ) {
+                    streamingTTSSession.cancel()
+                    await completeRequest(
+                        status: "cancelled",
+                        extra: [
+                            "cancelledAt": "auto_escalated_to_agent",
+                            "autoEscalatedToAgent": true
+                        ]
+                    )
+                    return
+                }
 
                 // Handle element pointing if Claude returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
@@ -16414,6 +16769,9 @@ final class CompanionManager: ObservableObject {
                     systemPrompt: systemPrompt,
                     conversationHistory: conversationHistory,
                     userPrompt: userPrompt,
+                    // M16: forward prefill to the SDK (primary) path so it behaves
+                    // like the HTTP fallback below.
+                    assistantPrefill: assistantPrefill,
                     onTextChunk: onTextChunk
                 )
                 return text
@@ -16602,6 +16960,10 @@ final class CompanionManager: ObservableObject {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
         let commandText = SpokenText.normalizedSpokenCommandText(transcript)
+
+        if shouldForceAgentClipboardSelection(for: transcript) {
+            return true
+        }
 
         if isVisualGuidanceDrawingRequest(normalized: normalized, commandText: commandText) {
             return true
@@ -18038,6 +18400,12 @@ private final class OpenClickyDirectActionMemoryStore: @unchecked Sendable {
 
     @discardableResult
     private func seedBuiltInShortcutsIfNeeded(_ memory: inout OpenClickyDirectActionStoredMemory) -> Bool {
+        // Debug-only developer convenience: seed a shortcut to the local source
+        // checkout. The hardcoded absolute path only resolves on the developer's
+        // machine (guarded by fileExists), but gating behind DEBUG keeps it out
+        // of release builds entirely so it can't collide with a user's own
+        // "project folder" intent on a machine that happens to have that path.
+        #if DEBUG
         let sourcePath = "/Users/jkneen/Documents/GitHub/openclicky"
         guard fileManager.fileExists(atPath: sourcePath) else { return false }
         guard !memory.folderShortcuts.contains(where: { $0.path == sourcePath }) else { return false }
@@ -18063,6 +18431,9 @@ private final class OpenClickyDirectActionMemoryStore: @unchecked Sendable {
             )
         )
         return true
+        #else
+        return false
+        #endif
     }
 
     private static func aliases(forInstruction instruction: String, displayName: String, path: String) -> [String] {

@@ -135,6 +135,23 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
     private let installedAppURL: URL
     private let manifestURL: URL
 
+    /// Per-install random bearer token sent on every BCU HTTP request.
+    ///
+    /// SECURITY(C3): the bundled `BackgroundComputerUse` binary currently does
+    /// NOT validate any credential on its localhost HTTP action server, so any
+    /// same-user process that can read `runtime-manifest.json` can POST
+    /// `/v1/click` / `/v1/type_text` / `/v1/press_key` and synthesize
+    /// Accessibility-trusted, invisible input. Full remediation requires the
+    /// BCU binary to be rebuilt to validate this `Authorization: Bearer <token>`
+    /// header (or to bind a 0700 Unix-domain socket and check peer euid). Until
+    /// that binary ships, this header is a no-op server-side — but we send it
+    /// anyway so the contract is in place and enforced the moment a validating
+    /// binary is bundled, and so the token is available to pass to the spawned
+    /// process via `OPENCLICKY_BCU_CONTROL_TOKEN`.
+    private let controlToken: String
+
+    nonisolated private static let controlTokenDefaultsKey = "OpenClickyBCUControlToken"
+
     nonisolated private static let developmentSourceRootURL = URL(
         fileURLWithPath: "/Users/jkneen/Documents/GitHub/background-computer-use",
         isDirectory: true
@@ -147,6 +164,22 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
 
     nonisolated private static func bundledAppURL(in runtimeRootURL: URL) -> URL {
         runtimeRootURL.appendingPathComponent("BackgroundComputerUse.app", isDirectory: true)
+    }
+
+    /// Load the per-install control token from UserDefaults, or generate and
+    /// persist a fresh 256-bit random token on first launch. See `controlToken`
+    /// doc comment for the C3 remediation status.
+    nonisolated private static func loadOrCreateControlToken() -> String {
+        let defaults = UserDefaults.standard
+        if let existing = defaults.string(forKey: controlTokenDefaultsKey),
+           !existing.isEmpty {
+            return existing
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let token = (status == errSecSuccess) ? Data(bytes).base64EncodedString() : UUID().uuidString + UUID().uuidString
+        defaults.set(token, forKey: controlTokenDefaultsKey)
+        return token
     }
 
     nonisolated private static func installedAppURL(fileManager: FileManager) -> URL {
@@ -175,6 +208,7 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
         self.manifestURL = fileManager.temporaryDirectory
             .appendingPathComponent("background-computer-use", isDirectory: true)
             .appendingPathComponent("runtime-manifest.json", isDirectory: false)
+        self.controlToken = Self.loadOrCreateControlToken()
         self.status = Self.makeStatus(
             sourceRootURL: sourceRootURL,
             installedAppURL: installedAppURL,
@@ -192,6 +226,26 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
             manifestURL: manifestURL,
             fileManager: fileManager,
             isStarting: status.isStarting,
+            lastErrorMessage: nil
+        )
+    }
+
+    /// M11: tear down the spawned Background Computer Use helper. Previously
+    /// nothing stopped it — startRuntime spawns via /usr/bin/open and forgets the
+    /// PID, so this terminates any running instance of the bundled app by bundle
+    /// id. Best-effort; logs failures. Also flips the status to not-ready.
+    func stopRuntime() {
+        let bundleID = "xyz.dubdub.backgroundcomputeruse"
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        for app in apps {
+            app.terminate()
+        }
+        status = Self.makeStatus(
+            sourceRootURL: sourceRootURL,
+            installedAppURL: installedAppURL,
+            manifestURL: manifestURL,
+            fileManager: fileManager,
+            isStarting: false,
             lastErrorMessage: nil
         )
     }
@@ -241,6 +295,12 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
                     process.arguments = [startScriptURL.path]
                     process.currentDirectoryURL = sourceRootURL
                 }
+                // Forward the control token to the spawned runtime via env so a
+                // rebuilt validating binary can read and enforce it. See
+                // SECURITY(C3) on `controlToken`.
+                var spawnEnvironment = ProcessInfo.processInfo.environment
+                spawnEnvironment["OPENCLICKY_BCU_CONTROL_TOKEN"] = await MainActor.run { self.controlToken }
+                process.environment = spawnEnvironment
                 process.standardOutput = logHandle
                 process.standardError = logHandle
                 try process.run()
@@ -340,7 +400,7 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
         )
     }
 
-    func pressKey(_ key: String, modifiers: [String] = [], targetAppName: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
+    func pressKey(_ key: String, modifiers: [String] = [], targetAppName: String? = nil, stateToken: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
         try await ensureRuntimeReady()
         let target = try await resolveTargetWindow(appName: targetAppName)
         OpenClickyApplicationUsageLogStore.shared.recordApplication(
@@ -359,7 +419,8 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
                 color: "#38BDF8"
             ),
             imageMode: "omit",
-            debug: true
+            debug: true,
+            stateToken: stateToken
         )
         let response: OpenClickyBackgroundComputerUseActionResponse = try await postJSON(
             path: "/v1/press_key",
@@ -383,7 +444,7 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
         }
     }
 
-    func typeText(_ text: String, targetAppName: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
+    func typeText(_ text: String, targetAppName: String? = nil, stateToken: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
         try await ensureRuntimeReady()
         let target = try await resolveTargetWindow(appName: targetAppName)
         OpenClickyApplicationUsageLogStore.shared.recordApplication(
@@ -401,7 +462,8 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
                 color: "#38BDF8"
             ),
             imageMode: "omit",
-            debug: true
+            debug: true,
+            stateToken: stateToken
         )
         let response: OpenClickyBackgroundComputerUseActionResponse = try await postJSON(
             path: "/v1/type_text",
@@ -420,7 +482,7 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
     /// returned by get_window_state / captureFrontmostWindowAsJPEG — NOT
     /// global display points — so callers must point against the BCU window
     /// screenshot and pass the raw screenshot coordinate here.
-    func click(at point: CGPoint, window: String, targetAppName: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
+    func click(at point: CGPoint, window: String, targetAppName: String? = nil, stateToken: String? = nil) async throws -> OpenClickyBackgroundComputerUseActionResult {
         try await ensureRuntimeReady()
         OpenClickyApplicationUsageLogStore.shared.recordApplication(
             name: targetAppName,
@@ -438,7 +500,8 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
                 color: "#38BDF8"
             ),
             imageMode: "omit",
-            debug: true
+            debug: true,
+            stateToken: stateToken
         )
         let response: OpenClickyBackgroundComputerUseActionResponse = try await postJSON(
             path: "/v1/click",
@@ -526,6 +589,10 @@ final class OpenClickyBackgroundComputerUseController: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Forward-compatible auth: see `controlToken` / SECURITY(C3). The
+        // current bundled binary ignores this header; a rebuilt validating
+        // binary will enforce it. Sent on every request so the contract holds.
+        request.setValue("Bearer \(controlToken)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(payload)
 
         do {
@@ -726,6 +793,9 @@ private nonisolated struct OpenClickyBackgroundComputerUsePressKeyRequest: Encod
     let cursor: OpenClickyBackgroundComputerUseCursorRequest
     let imageMode: String
     let debug: Bool
+    // BCU stale-coordinate guard token (H4): obtained from /v1/get_window_state
+    // and echoed back so BCU can reject clicks/keys against a stale AX tree.
+    let stateToken: String?
 }
 
 private nonisolated struct OpenClickyBackgroundComputerUseTypeTextRequest: Encodable {
@@ -735,6 +805,7 @@ private nonisolated struct OpenClickyBackgroundComputerUseTypeTextRequest: Encod
     let cursor: OpenClickyBackgroundComputerUseCursorRequest
     let imageMode: String
     let debug: Bool
+    let stateToken: String?
 
     enum CodingKeys: String, CodingKey {
         case window
@@ -743,6 +814,7 @@ private nonisolated struct OpenClickyBackgroundComputerUseTypeTextRequest: Encod
         case cursor
         case imageMode
         case debug
+        case stateToken
     }
 }
 
@@ -754,6 +826,7 @@ private nonisolated struct OpenClickyBackgroundComputerUseClickRequest: Encodabl
     let cursor: OpenClickyBackgroundComputerUseCursorRequest
     let imageMode: String
     let debug: Bool
+    let stateToken: String?
 }
 
 private nonisolated struct OpenClickyBackgroundComputerUseActionResponse: Decodable {
@@ -786,14 +859,12 @@ enum OpenClickyMacPrivacyPermissionProbe {
     }
 
     static func hasAppleEventsAutomationPermission(targetBundleIdentifier: String, prompt: Bool = false) -> Bool {
-        // `AEDeterminePermissionToAutomateTarget` can emit noisy
-        // "procNotFound because no application found for address descriptor"
-        // console lines when asked to silently probe a bundle-id target that is
-        // not currently running. Background permission refreshes should not
-        // spam Xcode just to discover that a target such as System Events has
-        // not been launched yet; the explicit prompt path below is still
-        // allowed to ask macOS for Automation approval.
+        // Avoid noisy probes for arbitrary targets that are not running, but do
+        // not short-circuit System Events. Its TCC grant is durable even when
+        // the helper app is not already launched, and treating that as missing
+        // makes Settings report a false Automation failure.
         if !prompt,
+           targetBundleIdentifier != systemEventsBundleIdentifier,
            NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleIdentifier).isEmpty {
             return false
         }
@@ -1155,17 +1226,48 @@ enum OpenClickyComputerUseKeyboardInput {
 
 enum OpenClickyComputerUseMouseInput {
     static func leftClick(at point: CGPoint) throws {
-        let quartzPoint = quartzPoint(fromAppKitPoint: point)
+        // M9: clamp an off-screen point to the nearest screen before converting,
+        // instead of returning an unconverted AppKit point (wrong-Y) to a CGEvent
+        // — which previously landed an intended-but-off-screen click at an
+        // unrelated on-screen location. Now we find the nearest screen, clamp
+        // into its frame, and convert. If no screen exists at all, we throw.
+        let clampedPoint = Self.clampToNearestScreen(point)
+        let quartzPoint = try Self.quartzPoint(fromAppKitPoint: clampedPoint)
         try postMouseEvent(type: .mouseMoved, at: quartzPoint)
         try postMouseEvent(type: .leftMouseDown, at: quartzPoint)
         usleep(35_000)
         try postMouseEvent(type: .leftMouseUp, at: quartzPoint)
     }
 
-    private static func quartzPoint(fromAppKitPoint point: CGPoint) -> CGPoint {
+    /// Clamp a point to the nearest screen's frame (used when a model-derived
+    /// coordinate lands in a gap between displays or outside the desktop union).
+    private static func clampToNearestScreen(_ point: CGPoint) -> CGPoint {
+        if NSScreen.screens.contains(where: { $0.frame.contains(point) }) {
+            return point
+        }
+        let nearest = NSScreen.screens.min(by: { lhs, rhs in
+            Self.distance(from: point, to: lhs.frame) < Self.distance(from: point, to: rhs.frame)
+        })
+        guard let frame = nearest?.frame else { return point }
+        return CGPoint(
+            x: min(max(point.x, frame.minX), frame.maxX),
+            y: min(max(point.y, frame.minY), frame.maxY)
+        )
+    }
+
+    private static func distance(from point: CGPoint, to frame: CGRect) -> CGFloat {
+        let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+        let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+        return (dx * dx) + (dy * dy)
+    }
+
+    private static func quartzPoint(fromAppKitPoint point: CGPoint) throws -> CGPoint {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }),
               let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
-            return point
+            // After clamping this should not happen unless there are no screens
+            // at all (headless / display sleep). Throw rather than hand an
+            // unconverted AppKit point (wrong Y axis) to CGEvent.
+            throw OpenClickyComputerUseError.eventCreationFailed("click target is off-screen and no display is available")
         }
 
         let appKitFrame = screen.frame

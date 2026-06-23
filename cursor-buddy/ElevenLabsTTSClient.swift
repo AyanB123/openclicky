@@ -588,6 +588,7 @@ final class StreamingTTSSession {
     fileprivate let format: AVAudioFormat?
     fileprivate let sampleRate: Double
     fileprivate let onPlaybackStarted: @MainActor () -> Void
+    fileprivate let startupError: Error?
 
     private var pendingText: String = ""
     /// Serialized chain of sentence-playback tasks. Each new sentence
@@ -622,13 +623,15 @@ final class StreamingTTSSession {
         playerNode: AVAudioPlayerNode?,
         format: AVAudioFormat?,
         sampleRate: Double,
-        onPlaybackStarted: @escaping @MainActor () -> Void
+        onPlaybackStarted: @escaping @MainActor () -> Void,
+        startupError: Error? = nil
     ) {
         self.fetchSamples = fetchSamples
         self.playerNode = playerNode
         self.format = format
         self.sampleRate = sampleRate
         self.onPlaybackStarted = onPlaybackStarted
+        self.startupError = startupError
     }
 
     /// Adds the text the LLM produced since the last call. Sentence
@@ -645,6 +648,9 @@ final class StreamingTTSSession {
     /// playback to drain. Call once when the LLM stream ends.
     func finish() async throws {
         guard !isCancelled else { throw CancellationError() }
+        if let startupError {
+            throw startupError
+        }
         let remaining = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingText = ""
         if !remaining.isEmpty {
@@ -2161,7 +2167,13 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         guard let streamFormat = Self.makeStreamFormat() else { return }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: streamFormat)
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            guard Self.isRecoverableAudioEngineStartError(error) else { throw error }
+            Self.prepareEngineForRetry(engine)
+            try engine.start()
+        }
         audioEngine = engine
         playerNode = player
 
@@ -2204,12 +2216,38 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                 playerNode: nil,
                 format: nil,
                 sampleRate: Self.streamSampleRate,
-                onPlaybackStarted: onPlaybackStarted
+                onPlaybackStarted: onPlaybackStarted,
+                startupError: NSError(
+                    domain: "OpenAIRealtimeSpeechClient",
+                    code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not build OpenAI Realtime PCM stream format."]
+                )
             )
         }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: streamFormat)
-        do { try engine.start() } catch {
+        do {
+            try engine.start()
+        } catch {
+            if Self.isRecoverableAudioEngineStartError(error) {
+                Self.prepareEngineForRetry(engine)
+                do {
+                    try engine.start()
+                } catch {
+                    print("⚠️ AVAudioEngine retry failed for OpenAI Realtime speech session: \(error)")
+                    return StreamingTTSSession(
+                        fetchSamples: { [weak self] text in
+                            guard let self else { throw CancellationError() }
+                            return try await self.fetchSentenceSamples(text)
+                        },
+                        playerNode: nil,
+                        format: nil,
+                        sampleRate: Self.streamSampleRate,
+                        onPlaybackStarted: onPlaybackStarted,
+                        startupError: error
+                    )
+                }
+            }
             print("⚠️ AVAudioEngine failed to start OpenAI Realtime speech session: \(error)")
             return StreamingTTSSession(
                 fetchSamples: { [weak self] text in
@@ -2219,7 +2257,8 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                 playerNode: nil,
                 format: nil,
                 sampleRate: Self.streamSampleRate,
-                onPlaybackStarted: onPlaybackStarted
+                onPlaybackStarted: onPlaybackStarted,
+                startupError: error
             )
         }
         audioEngine = engine
@@ -2456,7 +2495,13 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: streamFormat)
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            guard Self.isRecoverableAudioEngineStartError(error) else { throw error }
+            Self.prepareEngineForRetry(engine)
+            try engine.start()
+        }
         audioEngine = engine
         playerNode = player
 

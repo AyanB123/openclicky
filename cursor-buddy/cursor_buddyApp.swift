@@ -113,6 +113,10 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDel
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
         AppBundleConfiguration.registerDefaults()
 
+        // H15: prune old voice-transcript message logs on launch so the plaintext
+        // PII on disk doesn't grow unbounded.
+        OpenClickyMessageLogStore.shared.pruneOldMessageLogs()
+
         ClickyAnalytics.configure()
         ClickyAnalytics.trackAppOpened()
         OpenClickyDesktopNotificationCenter.shared.configure()

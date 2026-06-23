@@ -211,9 +211,17 @@ final class CodexPointDetector {
         }
         arguments.append(contentsOf: [
             "--model", model,
-            "--sandbox", "danger-full-access",
+            // SECURITY: the point detector's only job is to read the screenshot
+            // and return a `[POINT:x,y]` coordinate. It previously ran with
+            // `--sandbox danger-full-access` + `--dangerously-bypass-approvals-
+            // and-sandbox`, granting arbitrary shell/filesystem reach to a
+            // process driven by untrusted screen pixels (classic screenshot
+            // prompt-injection → arbitrary command execution). `workspace-write`
+            // scoped to the temp working dir is sufficient: it can read the
+            // image args and write its `--output-last-message` file, nothing
+            // else. approval_policy stays "never" (non-interactive subprocess).
+            "--sandbox", "workspace-write",
             "-c", "approval_policy=\"never\"",
-            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--cd", workingDirectory.path,
             "--output-last-message", outputURL.path,

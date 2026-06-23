@@ -34,10 +34,9 @@ public enum DS {
             case .dark: return true
             case .light: return false
             case .system:
-                if #available(macOS 10.14, *) {
-                    return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                }
-                return true
+                // Package targets macOS 26.0; the macOS 10.14 availability
+                // guard was dead code (always-taken branch).
+                return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             }
         }
 

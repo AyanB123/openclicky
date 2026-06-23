@@ -15,7 +15,7 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
     var onStderrLine: ((String) -> Void)?
 
     var isRunning: Bool {
-        process?.isRunning == true
+        stateQueue.sync { process?.isRunning == true }
     }
 
     func start(executableURL: URL, codexHome: URL) throws {
@@ -30,8 +30,16 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
         process.arguments = [
             "app-server",
             "--listen", "stdio://",
+            // Safer seed defaults for the app-server. These are overridden by
+            // every caller's per-turn `turn/start` params: Agent Mode (a
+            // user-directed coding agent) explicitly requests
+            // `danger-full-access` per-turn where the user wants full power; the
+            // voice session and point detector request `workspace-write`.
+            // Defaulting the seed to `workspace-write` means any future caller
+            // that forgets to set a sandbox gets the confined one, not the whole
+            // volume.
             "-c", "approval_policy=\"never\"",
-            "-c", "sandbox_mode=\"danger-full-access\""
+            "-c", "sandbox_mode=\"workspace-write\""
         ]
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
@@ -62,24 +70,30 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
             self?.failAllPendingRequests(message: "Codex app-server exited with status \(terminated.terminationStatus).")
         }
 
-        self.process = process
-        self.inputPipe = inputPipe
-        self.outputPipe = outputPipe
-        self.errorPipe = errorPipe
+        // H5: assign process/pipe ivars behind stateQueue so concurrent
+        // writeLine/isRunning/stop reads on stateQueue cannot tear. The
+        // readability handlers themselves dispatch back onto stateQueue, so
+        // setting them inside the sync block is safe (closure assignment only).
+        stateQueue.sync {
+            self.process = process
+            self.inputPipe = inputPipe
+            self.outputPipe = outputPipe
+            self.errorPipe = errorPipe
 
-        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self?.stateQueue.async { [weak self] in
-                self?.consumeStdout(data)
+            outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                self?.stateQueue.async { [weak self] in
+                    self?.consumeStdout(data)
+                }
             }
-        }
 
-        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self?.stateQueue.async { [weak self] in
-                self?.consumeStderr(data)
+            errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                self?.stateQueue.async { [weak self] in
+                    self?.consumeStderr(data)
+                }
             }
         }
 
@@ -198,16 +212,23 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
     }
 
     func stop() {
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
-        inputPipe?.fileHandleForWriting.closeFile()
-        if process?.isRunning == true {
-            process?.terminate()
+        // H5: serialize teardown with start()/writeLine on stateQueue so a
+        // concurrent writeLine cannot read a half-torn inputPipe.
+        let stoppedProcess: Process? = stateQueue.sync {
+            outputPipe?.fileHandleForReading.readabilityHandler = nil
+            errorPipe?.fileHandleForReading.readabilityHandler = nil
+            inputPipe?.fileHandleForWriting.closeFile()
+            let stopped = process
+            if process?.isRunning == true {
+                process?.terminate()
+            }
+            process = nil
+            inputPipe = nil
+            outputPipe = nil
+            errorPipe = nil
+            return stopped
         }
-        process = nil
-        inputPipe = nil
-        outputPipe = nil
-        errorPipe = nil
+        _ = stoppedProcess
         failAllPendingRequests(message: "Codex app-server stopped.")
     }
 

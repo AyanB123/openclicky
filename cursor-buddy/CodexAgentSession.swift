@@ -122,8 +122,8 @@ actor OpenClickyAgentFileLeaseCoordinator {
     }
 }
 
-struct CodexTranscriptEntry: Identifiable, Equatable, Codable {
-    enum Role: String, Equatable, Codable {
+struct CodexTranscriptEntry: Identifiable, Equatable, Codable, Sendable {
+    enum Role: String, Equatable, Codable, Sendable {
         case user
         case assistant
         case system
@@ -381,6 +381,10 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
 
     private let homeManager: CodexHomeManager
     private let processManager: CodexProcessManager
+    /// Optional Claude Agent SDK bridge used for money-rule-compliant title
+    /// generation (SDK first, direct REST fallback). Injected by
+    /// `CompanionManager`; nil when the SDK bridge is unavailable.
+    private let claudeAgentSDKAPI: ClaudeAgentSDKAPI?
     private var currentAssistantEntryID: String?
     private var pendingAssistantDeltas: [String: String] = [:]
     private var pendingAssistantDeltaFlushTask: Task<Void, Never>?
@@ -400,7 +404,8 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         title: String = "Agent",
         accentTheme: OpenClickyCore.ClickyAccentTheme = .blue,
         homeManager: CodexHomeManager? = nil,
-        processManager: CodexProcessManager? = nil
+        processManager: CodexProcessManager? = nil,
+        claudeAgentSDKAPI: ClaudeAgentSDKAPI? = nil
     ) {
         self.id = id
         self.createdAt = Date()
@@ -408,6 +413,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         self.accentTheme = accentTheme
         self.homeManager = homeManager ?? CodexHomeManager()
         self.processManager = processManager ?? CodexProcessManager()
+        self.claudeAgentSDKAPI = claudeAgentSDKAPI
 
         self.processManager.onNotification = { [weak self] notification in
             Task { @MainActor in
@@ -526,7 +532,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             title = fallbackTitle
             if !Self.shouldKeepInitialTaskTitle(fallbackTitle) {
                 Task { [weak self] in
-                    guard let generatedTitle = await Self.fastFriendlyTitle(from: prompt, fallbackTitle: fallbackTitle) else { return }
+                    guard let generatedTitle = await self?.fastFriendlyTitle(from: prompt, fallbackTitle: fallbackTitle) else { return }
                     guard let self else { return }
                     if self.entries.first?.text == prompt, self.title == fallbackTitle {
                         self.title = generatedTitle
@@ -1677,7 +1683,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         return stableTitles.contains(title)
     }
 
-    private static func fastFriendlyTitle(from prompt: String, fallbackTitle: String) async -> String? {
+    private func fastFriendlyTitle(from prompt: String, fallbackTitle: String) async -> String? {
         let systemPrompt = """
         You create compact, friendly titles for OpenClicky background agent tasks.
         Return only the title, with no quotes or punctuation.
@@ -1695,7 +1701,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
 
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
-            if let title = await localFoundationFriendlyTitle(
+            if let title = await CodexAgentSession.localFoundationFriendlyTitle(
                 systemPrompt: systemPrompt,
                 userPrompt: userPrompt,
                 fallbackTitle: fallbackTitle
@@ -1704,6 +1710,45 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
             }
         }
         #endif
+
+        // Money rule (AGENTS.md): the Claude Agent SDK is PRIMARY — it uses the
+        // local, already-paid-for Claude Code sign-in. Direct ClaudeAPI HTTP
+        // bills per token and is FALLBACK ONLY (SDK nil or throws). Previously
+        // this method short-circuited straight to direct REST on every task.
+        if let sdk = claudeAgentSDKAPI {
+            do {
+                let (text, duration) = try await sdk.analyzeImageStreaming(
+                    images: [],
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    onTextChunk: { _ in }
+                )
+                if let title = CodexAgentSession.cleanedFastFriendlyTitle(text, fallbackTitle: fallbackTitle) {
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "agent",
+                        direction: "incoming",
+                        event: "openclicky.agent_task.title_generated",
+                        fields: [
+                            "provider": "claude_agent_sdk",
+                            "durationMs": Int((duration * 1000).rounded()),
+                            "title": title
+                        ]
+                    )
+                    return title
+                }
+            } catch {
+                OpenClickyMessageLogStore.shared.append(
+                    lane: "agent",
+                    direction: "incoming",
+                    event: "openclicky.agent_task.title_generation_failed",
+                    fields: [
+                        "provider": "claude_agent_sdk",
+                        "error": error.localizedDescription
+                    ]
+                )
+                // Fall through to the direct REST fallback below.
+            }
+        }
 
         if let anthropicAPIKey = AppBundleConfiguration.anthropicAPIKey() {
             let fastAnthropicModel = "claude-haiku-4-5"
@@ -1718,7 +1763,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                     systemPrompt: systemPrompt,
                     userPrompt: userPrompt
                 )
-                if let title = cleanedFastFriendlyTitle(text, fallbackTitle: fallbackTitle) {
+                if let title = CodexAgentSession.cleanedFastFriendlyTitle(text, fallbackTitle: fallbackTitle) {
                     OpenClickyMessageLogStore.shared.append(
                         lane: "agent",
                         direction: "incoming",
@@ -1759,7 +1804,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
                     systemPrompt: systemPrompt,
                     userPrompt: userPrompt
                 )
-                if let title = cleanedFastFriendlyTitle(text, fallbackTitle: fallbackTitle) {
+                if let title = CodexAgentSession.cleanedFastFriendlyTitle(text, fallbackTitle: fallbackTitle) {
                     OpenClickyMessageLogStore.shared.append(
                         lane: "agent",
                         direction: "incoming",

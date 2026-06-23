@@ -212,14 +212,23 @@ final class CodexVoiceSession {
                 "input": input,
                 "cwd": workingDirectory.path,
                 "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
+                // SECURITY: voice turns consume untrusted content (transcribed
+                // speech + full-screen screenshots that may contain adversarial
+                // prompt-injection text). Previously this was `danger-full-access`
+                // which granted arbitrary shell/filesystem reach to a model
+                // driven by screen pixels. `workspace-write` confines the turn
+                // to the temporary working directory (image attachments live
+                // there). approval_policy stays "never" because voice turns are
+                // non-interactive (no human to approve prompts), but the sandbox
+                // now bounds the blast radius.
+                "sandbox": "workspace-write",
                 "model": model,
                 // Voice responses should prioritize first-token latency;
                 // Agent Mode keeps the user-selected reasoning effort.
                 "effort": "low",
                 "config": [
                     "approval_policy": "never",
-                    "sandbox_mode": "danger-full-access"
+                    "sandbox_mode": "workspace-write"
                 ]
             ])
 
@@ -229,7 +238,14 @@ final class CodexVoiceSession {
             }
 
             try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { continuation in
+            // M3: register `pendingTurn` BEFORE awaiting the continuation body
+            // so a `turn/completed` / `item/completed` notification delivered
+            // during the await window finds a registered turn instead of being
+            // dropped (which would hang the continuation). The previous code set
+            // pendingTurn inside the continuation closure, after a fresh-Task
+            // hop to the main actor, leaving a window where notifications were
+            // dropped because pendingTurn was nil.
+            return try await withCheckedThrowingContinuation { (continuation: ResponseContinuation) in
                 pendingTurn = PendingTurn(
                     id: requestID,
                     kind: kind,

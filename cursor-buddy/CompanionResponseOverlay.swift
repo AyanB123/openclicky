@@ -115,11 +115,14 @@ final class CompanionResponseOverlayManager {
 
         // Keep the response bubble glued to the cursor during drags/menus, but
         // avoid queueing extra MainActor tasks every frame. The timer already
-        // fires on the main run loop; `.common` prevents event-tracking hitches.
+        // H10: the timer fires on the main run loop (`.common`), so the closure
+        // is already main-thread / main-actor-isolated. Previously each tick
+        // allocated a fresh `Task { @MainActor in ... }` — ~60 needless Task
+        // allocations/sec for the overlay's lifetime. Swift 6 still treats the
+        // timer closure as nonisolated, so assert the main actor explicitly.
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            Task { @MainActor in
-                self.repositionPanelNearCursor()
+            MainActor.assumeIsolated {
+                self?.repositionPanelNearCursor()
             }
         }
         cursorTrackingTimer = timer

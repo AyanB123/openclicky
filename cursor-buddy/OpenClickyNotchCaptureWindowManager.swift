@@ -18,20 +18,30 @@ private final class OpenClickyNotchCapturePanel: NSPanel {
 }
 
 enum OpenClickyWindowLevels {
-    /// The compact notch/dynamic-island status surface sits above normal apps
-    /// and Space/full-screen surfaces. The external no-notch pill is a normal
-    /// fallback NSPanel rather than DynamicNotchKit's physical-notch surface,
-    /// so status-bar-adjacent levels can be re-stacked behind app/menu-bar
-    /// windows when displays or Spaces settle.
-    static let statusSurface = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+    /// OpenClicky panels need to stay above normal apps, menu-bar popups, and
+    /// full-screen auxiliary surfaces without sitting above macOS drag images.
+    /// If a panel is above `.draggingWindow`, dragged files look and behave as
+    /// if they are underneath OpenClicky's dialog, so SwiftUI drop targets can
+    /// fail to become the active destination. Keep the whole OpenClicky stack
+    /// just below the drag layer while still far above app/status/menu levels.
+    private static let interactiveCeiling = CGWindowLevelForKey(.draggingWindow)
 
-    /// The main OpenClicky panel must sit above the status surface so hovering
-    /// the dynamic island cannot visually cut into the panel's side chrome.
-    static let mainPanel = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+    /// The compact notch/dynamic-island status surface must stay above
+    /// OpenClicky's own panels so the external fallback notch does not vanish
+    /// when the main window opens, while still remaining below active drags.
+    static let statusSurface = NSWindow.Level(rawValue: Int(interactiveCeiling) - 1)
+
+    /// The main OpenClicky panel stays below the compact notch surface but
+    /// above normal app/menu/status surfaces.
+    static let mainPanel = NSWindow.Level(rawValue: Int(interactiveCeiling) - 3)
 
     /// First-party dialogs and document windows float one step above the main
-    /// panel so they never tuck underneath when launched from OpenClicky.
-    static let panelDialog = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 3)
+    /// panel while staying below the drag layer so file drops land on them.
+    static let panelDialog = NSWindow.Level(rawValue: Int(interactiveCeiling) - 2)
+
+    static func applyMainPanelLevel(to window: NSWindow?) {
+        window?.level = mainPanel
+    }
 
     static func applyPanelDialogLevel(to window: NSWindow?) {
         window?.level = panelDialog
@@ -639,6 +649,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func showMainPanelWindow(activating: Bool, width: CGFloat, height: CGFloat) {
         resizeAndRepositionMainPanel(width: width, height: height)
+        OpenClickyWindowLevels.applyMainPanelLevel(to: mainPanel)
         if activating {
             NSApp.activate(ignoringOtherApps: true)
             mainPanel?.makeKeyAndOrderFront(nil)
@@ -648,6 +659,7 @@ final class OpenClickyNotchCaptureWindowManager {
         mainPanel?.orderFrontRegardless()
         installMainPanelEscapeKeyMonitor()
         installMainPanelClickOutsideMonitors()
+        refreshFallbackStatusPanelOrderingIfNeeded()
     }
 
     private func setMainPanelPinned(_ isPinned: Bool) {
@@ -713,6 +725,15 @@ final class OpenClickyNotchCaptureWindowManager {
         removeMainPanelEscapeKeyMonitor()
         mainPanelEscapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
             guard event.keyCode == Self.escapeKeyCode else { return event }
+            // M20: only swallow Escape when the main panel is actually the key
+            // window. Previously this consumed Escape for EVERY window in the
+            // app while the panel was shown, breaking Escape in sibling sheets,
+            // popovers, and inline-edit fields. Also pass through if no panel.
+            guard let self,
+                  let panel = self.mainPanel,
+                  panel.isKeyWindow else {
+                return event
+            }
             Task { @MainActor [weak self] in
                 self?.hideMainPanel()
             }
@@ -1240,9 +1261,10 @@ final class OpenClickyNotchCaptureWindowManager {
             // positive overlap hides the seam and keeps it visually "in the notch".
             return screen.frame.maxY - size.height + Self.noNotchScreenTopOverlap
         }
-        // External / no-notch screens: sit the pill TOP exactly at the screen
-        // top so the rounded top corners are visible.
-        return screen.frame.maxY - size.height - Self.topGap
+        // External / no-notch screens should keep the fake notch at the
+        // physical top edge, overlapping the menu-bar strip like a notch
+        // rather than dropping below it into the normal content area.
+        return screen.frame.maxY - size.height + Self.noNotchScreenTopOverlap
     }
 
     private static func centeredX(for size: NSSize, on screen: NSScreen) -> CGFloat {

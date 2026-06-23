@@ -772,15 +772,11 @@ private struct OpenClickyBrowserWorkspaceView: View {
                         Task { await model.importChromeCookies(scope: .activeSite) }
                     }
                     .disabled(model.isImportingChromeCookies)
-
-                    Button("Import all") {
-                        Task { await model.importChromeCookies(scope: .all) }
-                    }
-                    .disabled(model.isImportingChromeCookies)
                 }
                 .font(.caption.weight(.bold))
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .help("Imports cookies for the currently open site only. Bulk import of all Chrome cookies was removed for security: combined with the automation surface it exposed every logged-in session (banking, email, …) to any page loaded in the workspace.")
             }
         }
         .padding(12)
@@ -1864,7 +1860,7 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
         }
         chromeCookieStatus = profiles.isEmpty
             ? "No readable Chrome cookie profiles found. OpenClicky may need Full Disk Access, or Chrome may not be installed."
-            : "Found \(profiles.count) Chrome profile\(profiles.count == 1 ? "" : "s"). Choose one and import site cookies or all cookies."
+            : "Found \(profiles.count) Chrome profile\(profiles.count == 1 ? "" : "s"). Choose one and import the current site's cookies."
     }
 
     func importChromeCookies(scope: OpenClickyChromeCookieImportScope) async {
@@ -2510,7 +2506,10 @@ private final class OpenClickyBrowserWorkspaceModel: ObservableObject, OpenClick
 
 private enum OpenClickyChromeCookieImportScope {
     case activeSite
-    case all
+    // `.all` was removed: bulk-importing every Chrome cookie (banking, email,
+    // SaaS) into the shared WKWebsiteDataStore — reachable by any page loaded
+    // in the workspace — was a Critical credential-exposure surface. Only
+    // active-site import remains.
 }
 
 private struct OpenClickyBrowserDirectPageAction {
@@ -2843,6 +2842,13 @@ private enum OpenClickyBrowserResearchRunner {
     }
 
     private static func fetchText(from url: URL, limit: Int) async throws -> String {
+        // SSRF / local-file-read guard: only fetch http(s). Search-result URLs
+        // are attacker-influenceable (any site DuckDuckGo indexes), and without
+        // this check a crafted result could direct the app at file:///etc/... ,
+        // http://127.0.0.1/... , or cloud-metadata IPs (169.254.169.254).
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            throw NSError(domain: "OpenClickyBrowserResearch", code: -1, userInfo: [NSLocalizedDescriptionKey: "Refused to fetch non-http(s) URL: \(url.absoluteString)"])
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 18
         request.setValue("Mozilla/5.0 AppleWebKit/605.1.15 OpenClickyBrowserWorkspace/1.0", forHTTPHeaderField: "User-Agent")
@@ -2879,12 +2885,18 @@ private enum OpenClickyBrowserResearchRunner {
            components.path == "/l/",
            let uddg = components.queryItems?.first(where: { $0.name == "uddg" })?.value,
            let url = URL(string: uddg) {
-            return url
+            return Self.sanitizedResultURL(url)
         }
         if decoded.hasPrefix("//") {
-            return URL(string: "https:\(decoded)")
+            return URL(string: "https:\(decoded)").flatMap { Self.sanitizedResultURL($0) }
         }
-        return URL(string: decoded)
+        return URL(string: decoded).flatMap { Self.sanitizedResultURL($0) }
+    }
+
+    /// Reject non-http(s) result URLs (defense-in-depth alongside `fetchText`).
+    private static func sanitizedResultURL(_ url: URL) -> URL? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        return url
     }
 
     private static func pageTitle(from html: String) -> String {
@@ -3042,7 +3054,11 @@ private enum OpenClickyChromeCookieImporter {
         } catch {
             return []
         }
-        defer { try? FileManager.default.removeItem(at: tempURL) }
+        // Securely wipe the temp copy (which contains the user's encrypted
+        // cookie DB) on exit: overwrite with zeros before removing, and do it on
+        // every path including errors so a crash mid-read doesn't leave the
+        // copy behind in temporaryDirectory.
+        defer { Self.securelyDelete(tempURL) }
 
         var db: OpaquePointer?
         guard sqlite3_open_v2(tempURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return [] }
@@ -3132,7 +3148,13 @@ private enum OpenClickyChromeCookieImporter {
     }
 
     private static func chromeSafeStorageKey() -> [UInt8]? {
-        let password = chromeSafeStoragePassword() ?? "peanuts"
+        // Previously fell back to the literal Linux default password "peanuts"
+        // when the Keychain read failed, which produced a *wrong* key and let
+        // decryption "succeed" with garbage values instead of surfacing a clear
+        // "Keychain access denied" error. Now we require the real Keychain
+        // secret; if it is unavailable the importer reports 0 imported and the
+        // UI explains that Keychain access is needed.
+        guard let password = chromeSafeStoragePassword() else { return nil }
         let salt = Array("saltysalt".utf8)
         var key = [UInt8](repeating: 0, count: kCCKeySizeAES128)
         let status = password.withCString { passwordBytes in
@@ -3196,9 +3218,31 @@ private enum OpenClickyChromeCookieImporter {
     }
 
     private static func matches(hostKey: String, activeHost: String) -> Bool {
+        // Standard cookie domain matching: a cookie for `example.com` is sent to
+        // `example.com` and any subdomain (`mail.example.com`). The previous
+        // implementation also matched the REVERSE (a `mail.example.com` cookie
+        // sent to `example.com`), which is incorrect and over-broad — removed.
         let cookieHost = hostKey.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
         let pageHost = activeHost.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-        return pageHost == cookieHost || pageHost.hasSuffix("." + cookieHost) || cookieHost.hasSuffix("." + pageHost)
+        return pageHost == cookieHost || pageHost.hasSuffix("." + cookieHost)
+    }
+
+    private static func securelyDelete(_ url: URL) {
+        // Overwrite then remove, so the encrypted-cookie temp copy isn't
+        // recoverable from free space. Best-effort: ignore failures.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int, size > 0 {
+            if let handle = try? FileHandle(forWritingTo: url) {
+                try? handle.truncate(atOffset: 0)
+                try? handle.write(Data(repeating: 0, count: size))
+                try? handle.close()
+            }
+        }
+        try? FileManager.default.removeItem(at: url)
     }
 
     private static func columnString(_ statement: OpaquePointer, _ index: Int32) -> String {
@@ -3380,10 +3424,18 @@ private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        configuration.userContentController.add(context.coordinator, name: "openClickyInspector")
+        // Retain-cycle fix: WKUserContentController.add(_:) strongly retains its
+        // message handler for the controller's lifetime, which previously pinned
+        // the Coordinator (and via its closures, the whole @MainActor model + all
+        // WKWebViews) forever — a per-tab leak in a long-running menu-bar app.
+        // The weak proxy below breaks the strong edge: the controller retains the
+        // proxy, the proxy holds the Coordinator weakly.
+        let proxy = WeakScriptMessageDelegate(coordinator: context.coordinator)
+        configuration.userContentController.add(proxy, name: "openClickyInspector")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         OpenClickyBrowserUserAgent.apply(to: webView)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.setValue(false, forKey: "drawsBackground")
         DispatchQueue.main.async { onWebViewReady(webView) }
@@ -3403,7 +3455,7 @@ private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var loadedRequestID: UUID?
         var onMetadataChange: (OpenClickyBrowserPageMetadata) -> Void
         var onInspectorSelection: ([String: Any]) -> Void
@@ -3416,6 +3468,35 @@ private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == "openClickyInspector", let payload = message.body as? [String: Any] else { return }
             DispatchQueue.main.async { [onInspectorSelection] in onInspectorSelection(payload) }
+        }
+
+        // Navigation policy: allow http(s) unconditionally; allow file:// only
+        // for typed-address-bar / app-initiated loads (user interaction), never
+        // for page- or script-initiated navigations. Block everything else
+        // (custom schemes, data:, blob:) to prevent navigation hijack / local
+        // file disclosure via injected content.
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let scheme = navigationAction.request.url?.scheme?.lowercased()
+            let isUserInitiated = navigationAction.navigationType == .linkActivated || navigationAction.navigationType == .formSubmitted || navigationAction.navigationType == .formResubmitted
+            switch scheme {
+            case "http", "https":
+                decisionHandler(.allow)
+            case "file" where isUserInitiated:
+                decisionHandler(.allow)
+            case "open-clicky":
+                decisionHandler(.allow)
+            default:
+                decisionHandler(.cancel)
+            }
+        }
+
+        // Open target=_blank / window.open() in the same tab instead of handing
+        // it to the system (which could launch an arbitrary handler).
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -3433,6 +3514,17 @@ private struct OpenClickyWorkspaceWebView: NSViewRepresentable {
                 }
             }
         }
+    }
+}
+
+/// Weak proxy for `WKScriptMessageHandler` so `WKUserContentController.add(_:)`
+/// does not strongly retain the Coordinator (and through it the model). The
+/// controller holds this proxy strongly; the proxy holds the coordinator weakly.
+private final class WeakScriptMessageDelegate: NSObject, WKScriptMessageHandler {
+    weak var coordinator: OpenClickyWorkspaceWebView.Coordinator?
+    init(coordinator: OpenClickyWorkspaceWebView.Coordinator) { self.coordinator = coordinator }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        coordinator?.userContentController(userContentController, didReceive: message)
     }
 }
 

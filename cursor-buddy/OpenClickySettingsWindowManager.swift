@@ -214,6 +214,7 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userMCPComputerUseEnabledDefaultsKey) private var mcpComputerUseEnabled = false
     @AppStorage(AppBundleConfiguration.userMCPCuaDriverCommandDefaultsKey) private var mcpCuaDriverCommand = CuaDriverMCPConfiguration.resolvedCommandPath() ?? ""
     @AppStorage(AppBundleConfiguration.userDesktopNotificationsEnabledDefaultsKey) private var desktopNotificationsEnabled = true
+    @AppStorage(AppBundleConfiguration.userAgentCompletionVoiceEnabledDefaultsKey) private var agentCompletionVoiceEnabled = true
     @AppStorage(AppBundleConfiguration.userWidgetsEnabledDefaultsKey) private var widgetsEnabled = true
     @AppStorage(AppBundleConfiguration.userWidgetsIncludeAgentTaskNamesDefaultsKey) private var widgetsIncludeAgentTaskNames = true
     @AppStorage(AppBundleConfiguration.userWidgetsIncludeMemorySnippetsDefaultsKey) private var widgetsIncludeMemorySnippets = true
@@ -296,7 +297,7 @@ struct OpenClickySettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        if selectedSection != .models && selectedSection != .permissions {
+                        if selectedSection != .models && selectedSection != .permissions && selectedSection != .agents {
                             OpenClickyProfileSelectorView(companionManager: companionManager)
                         }
                         sectionHeader
@@ -1549,6 +1550,12 @@ struct OpenClickySettingsView: View {
                         }
                     )
                 )
+                toggleRow(
+                    title: "Task-complete voice",
+                    subtitle: "Speaks a short finish summary after an OpenClicky background agent completes. Handoff speech stays separate.",
+                    systemImageName: "speaker.wave.2",
+                    isOn: $agentCompletionVoiceEnabled
+                )
                 actionRow(title: "Request notification permission", systemImageName: "bell.badge") {
                     desktopNotificationsEnabled = true
                     OpenClickyDesktopNotificationCenter.shared.requestAuthorizationForUserAction { _ in
@@ -1587,6 +1594,17 @@ struct OpenClickySettingsView: View {
                 actionRow(title: "Request System Events access", systemImageName: "gearshape.2") {
                     companionManager.requestSystemEventsAutomationPermission()
                 }
+            }
+
+            settingsGroup("If macOS shows access but OpenClicky does not") {
+                warningRow(
+                    title: "Check for stale privacy entries",
+                    subtitle: "In Privacy & Security, inspect Accessibility, Full Disk Access, and Automation for older Clicky/OpenClicky entries or separate helper paths. Keep the current OpenClicky entry enabled; remove or disable stale duplicates, then quit and reopen OpenClicky."
+                )
+                warningRow(
+                    title: "Safe re-prompt",
+                    subtitle: "If a stored grant is invalid, do not edit the TCC database directly. Remove or toggle the stale macOS entry, relaunch OpenClicky, then use Request System Events access or the relevant Open Settings button to let macOS issue a fresh prompt."
+                )
             }
         }
     }

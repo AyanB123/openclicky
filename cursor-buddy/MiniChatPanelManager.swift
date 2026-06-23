@@ -16,7 +16,7 @@ import OpenClickyUI
 /// Lives here (not in CompanionManager.swift) so the additive patch
 /// keeps that file's diff minimal.
 enum ChatWorkspaceArchiveStore {
-  struct Snapshot: Codable {
+  struct Snapshot: Codable, Sendable {
     let id: UUID
     let title: String
     let accentThemeRawValue: String
@@ -31,6 +31,7 @@ enum ChatWorkspaceArchiveStore {
   private static let key = "openClickyArchivedSessions"
   private static let snapshotsKey = "openClickyArchivedSessionSnapshots"
   private static let relaunchableSnapshotsKey = "openClickyRelaunchableAgentSessionSnapshots"
+  private static let snapshotPersistenceQueue = DispatchQueue(label: "com.openclicky.chatWorkspaceArchiveStore.snapshots", qos: .utility)
 
   static func load() -> Set<UUID> {
     guard let raw = UserDefaults.standard.array(forKey: key) as? [String] else { return [] }
@@ -48,25 +49,27 @@ enum ChatWorkspaceArchiveStore {
 
   @MainActor
   static func saveSnapshot(for session: CodexAgentSession) {
-    var snapshots = loadSnapshots().filter { $0.id != session.id }
-    snapshots.append(
-      Snapshot(
-        id: session.id,
-        title: session.title,
-        accentThemeRawValue: session.accentTheme.rawValue,
-        entries: session.entries,
-        activeThreadID: session.activeThreadID,
-        lastSubmittedPrompt: session.lastSubmittedPromptText,
-        createdAt: session.createdAt,
-        latestActivityAt: session.latestActivityDate,
-        wasRelaunchResumeCandidate: false
-      )
+    let snapshot = Snapshot(
+      id: session.id,
+      title: session.title,
+      accentThemeRawValue: session.accentTheme.rawValue,
+      entries: session.entries,
+      activeThreadID: session.activeThreadID,
+      lastSubmittedPrompt: session.lastSubmittedPromptText,
+      createdAt: session.createdAt,
+      latestActivityAt: session.latestActivityDate,
+      wasRelaunchResumeCandidate: false
     )
-    saveSnapshots(snapshots)
+
+    snapshotPersistenceQueue.async {
+      saveSnapshot(snapshot)
+    }
   }
 
   static func removeSnapshot(for sessionID: UUID) {
-    saveSnapshots(loadSnapshots().filter { $0.id != sessionID })
+    snapshotPersistenceQueue.async {
+      saveSnapshots(loadSnapshots().filter { $0.id != sessionID })
+    }
   }
 
   static func loadRelaunchableSnapshots() -> [Snapshot] {
@@ -106,6 +109,12 @@ enum ChatWorkspaceArchiveStore {
     let snapshots = loadRelaunchableSnapshots().filter { $0.id != sessionID }
     guard let data = try? JSONEncoder().encode(snapshots) else { return }
     UserDefaults.standard.set(data, forKey: relaunchableSnapshotsKey)
+  }
+
+  private static func saveSnapshot(_ snapshot: Snapshot) {
+    var snapshots = loadSnapshots().filter { $0.id != snapshot.id }
+    snapshots.append(snapshot)
+    saveSnapshots(snapshots)
   }
 
   private static func saveSnapshots(_ snapshots: [Snapshot]) {

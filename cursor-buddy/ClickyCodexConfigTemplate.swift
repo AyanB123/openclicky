@@ -152,6 +152,13 @@ struct ClickyCodexConfigTemplate: Equatable {
         value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            // M19: TOML basic strings cannot contain raw newlines or control
+            // chars (U+0000–U+001F); leaving them in made the generated
+            // config.toml unparseable on bad input. Replace newlines with a
+            // space and strip all other control characters.
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .filter { (" \t".contains($0)) || ($0.unicodeScalars.allSatisfy { $0.value >= 0x20 }) }
     }
 }
 
@@ -214,6 +221,11 @@ enum ClickyCodexBackend {
               !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let url = components.url
         else {
+            return nil
+        }
+        // M15: reject http:// for non-loopback hosts in code (don't lean on ATS).
+        // A remote http endpoint would send the OpenAI key over plaintext.
+        if scheme == "http", host != "127.0.0.1", host != "localhost" {
             return nil
         }
         return url

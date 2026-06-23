@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 
 enum OpenClickyLocalModelDownloadPhase: Equatable, Sendable {
@@ -251,7 +252,8 @@ final class OpenClickyLocalModelDownloadService: ObservableObject {
                 try await downloader.download(
                     from: sourceURL,
                     to: destination,
-                    expectedSize: file.size
+                    expectedSize: file.size,
+                    expectedSHA256: file.sha256
                 ) { [weak self] bytesWritten, _ in
                     Task { @MainActor [weak self] in
                         self?.updateProgress(
@@ -418,6 +420,9 @@ final class OpenClickyLocalModelDownloadService: ObservableObject {
     private struct HuggingFaceTreeNode: Decodable {
         struct LFS: Decodable {
             let size: Int64?
+            /// SHA256 oid of the LFS object (H7): used to verify the download
+            /// cryptographically, not just by size.
+            let oid: String?
         }
 
         let path: String
@@ -427,6 +432,12 @@ final class OpenClickyLocalModelDownloadService: ObservableObject {
 
         var bestSize: Int64 {
             size ?? lfs?.size ?? 0
+        }
+
+        var bestSHA256: String? {
+            // HF LFS oids are sha256 hex digests.
+            guard let oid = lfs?.oid?.trimmingCharacters(in: .whitespacesAndNewlines), oid.count == 64 else { return nil }
+            return oid.lowercased()
         }
     }
 
@@ -459,7 +470,7 @@ final class OpenClickyLocalModelDownloadService: ObservableObject {
             else {
                 return nil
             }
-            return OpenClickyLocalModelRemoteFile(path: safePath, size: node.bestSize)
+            return OpenClickyLocalModelRemoteFile(path: safePath, size: node.bestSize, sha256: node.bestSHA256)
         }
 
         guard !files.isEmpty else {
@@ -484,6 +495,7 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
     private var task: URLSessionDownloadTask?
     private var destination: URL?
     private var expectedSize: Int64?
+    private var expectedSHA256: String?
     private var progress: (@Sendable (Int64, Int64) -> Void)?
     private var lastProgressTime: CFAbsoluteTime = 0
     private static let progressInterval: CFAbsoluteTime = 0.25
@@ -496,6 +508,7 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
         from url: URL,
         to destination: URL,
         expectedSize: Int64,
+        expectedSHA256: String? = nil,
         onProgress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws {
         try FileManager.default.createDirectory(
@@ -508,6 +521,7 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
             self.continuation = continuation
             self.destination = destination
             self.expectedSize = expectedSize
+            self.expectedSHA256 = expectedSHA256
             self.progress = onProgress
             self.lastProgressTime = 0
             let task = session.downloadTask(with: url)
@@ -554,6 +568,7 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
         let continuation = self.continuation
         let destination = self.destination
         let expectedSize = self.expectedSize
+        let expectedSHA256 = self.expectedSHA256
         clearLocked()
         lock.unlock()
 
@@ -590,6 +605,25 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
                     return
                 }
             }
+            // H7: cryptographic integrity check. Size-only verification accepts
+            // truncated/corrupted/substituted files of the right length. If the
+            // HF manifest carried an LFS sha256 oid, verify the downloaded bytes
+            // match it; reject (and clean up) on mismatch.
+            if let expectedSHA256 {
+                let actualSHA256 = Self.sha256Hex(ofFileAt: destination)
+                guard actualSHA256 == expectedSHA256 else {
+                    try? fileManager.removeItem(at: destination)
+                    continuation.resume(
+                        throwing: URLError(
+                            .cannotDecodeContentData,
+                            userInfo: [
+                                NSLocalizedDescriptionKey: "Integrity check failed: expected sha256 \(expectedSHA256), got \(actualSHA256)"
+                            ]
+                        )
+                    )
+                    return
+                }
+            }
             continuation.resume()
         } catch {
             continuation.resume(throwing: error)
@@ -610,7 +644,23 @@ private final class OpenClickyLocalModelFileDownloader: NSObject, URLSessionDown
         task = nil
         destination = nil
         expectedSize = nil
+        expectedSHA256 = nil
         progress = nil
+    }
+
+    /// Stream-hash a file with CryptoKit SHA256 and return the lowercase hex
+    /// digest. Used by the H7 integrity check.
+    private static func sha256Hex(ofFileAt url: URL) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        let chunkSize = 1 << 20 // 1 MiB
+        while true {
+            let data = handle.readData(ofLength: chunkSize)
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     deinit {

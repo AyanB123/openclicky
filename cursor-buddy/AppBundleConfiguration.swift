@@ -54,6 +54,7 @@ nonisolated enum AppBundleConfiguration {
     static let userExternalControlBridgeTokenDefaultsKey = "openClickyExternalControlBridgeToken"
     static let userAgentPlaintextProviderSyncEnabledDefaultsKey = "openClickyAgentPlaintextProviderSyncEnabled"
     static let userDesktopNotificationsEnabledDefaultsKey = "openClickyDesktopNotificationsEnabled"
+    static let userAgentCompletionVoiceEnabledDefaultsKey = "openClickyAgentCompletionVoiceEnabled"
     static let userWidgetsEnabledDefaultsKey = "openClickyWidgetsEnabled"
     static let userWidgetsIncludeAgentTaskNamesDefaultsKey = "openClickyWidgetsIncludeAgentTaskNames"
     static let userWidgetsIncludeMemorySnippetsDefaultsKey = "openClickyWidgetsIncludeMemorySnippets"
@@ -65,6 +66,7 @@ nonisolated enum AppBundleConfiguration {
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
+            userAgentCompletionVoiceEnabledDefaultsKey: true,
             userWidgetsEnabledDefaultsKey: true,
             userWidgetsIncludeAgentTaskNamesDefaultsKey: true,
             userWidgetsIncludeMemorySnippetsDefaultsKey: true,
@@ -161,6 +163,10 @@ nonisolated enum AppBundleConfiguration {
 
     static func agentPlaintextProviderSyncEnabled() -> Bool {
         userDefaultsBool(forKey: userAgentPlaintextProviderSyncEnabledDefaultsKey, defaultValue: false)
+    }
+
+    static func agentCompletionVoiceEnabled() -> Bool {
+        userDefaultsBool(forKey: userAgentCompletionVoiceEnabledDefaultsKey, defaultValue: true)
     }
 
     static func assemblyAIAPIKey() -> String? {

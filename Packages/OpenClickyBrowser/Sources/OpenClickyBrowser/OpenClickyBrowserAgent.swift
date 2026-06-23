@@ -264,20 +264,13 @@ final class OpenClickyBrowserAgentRunner {
                 "properties": [:]
             ]
         ],
-        [
-            "name": "evaluate",
-            "description": "Execute arbitrary Javascript in the page context and return the serialized result.",
-            "input_schema": [
-                "type": "object",
-                "properties": [
-                    "script": [
-                        "type": "string",
-                        "description": "The Javascript code to execute."
-                    ]
-                ],
-                "required": ["script"]
-            ]
-        ],
+        // NOTE: the unrestricted `evaluate` (arbitrary JS) tool was intentionally
+        // REMOVED. Page content is injected verbatim into the conversation, so an
+        // `evaluate` tool is a textbook indirect prompt-injection → arbitrary JS
+        // execution surface (a malicious page could command the model to read
+        // document.cookie / localStorage and exfiltrate it). The structured
+        // tools below (click/type/press_key/scroll/observe_page/get_content/...)
+        // cover every legitimate automation need without exposing raw JS eval.
         [
             "name": "done",
             "description": "Signal that the user's goal has been fully achieved. Call this once with a concise natural-language summary of what was accomplished and any final answer the user asked for. After calling `done` you MUST stop emitting tool calls.",
@@ -321,7 +314,7 @@ final class OpenClickyBrowserAgentRunner {
     text via `get_content`, control Browser Workspace tabs via `list_tabs`,
     `new_tab`, `switch_tab`, and `close_tab`, and act via `click`, `type`,
     `press_key`, `scroll`, `wait_for`, `navigate`, `browser_back`,
-    `browser_forward`, `browser_reload`, `click_at`, and `evaluate`.
+    `browser_forward`, `browser_reload`, and `click_at`.
 
     PLANNING DISCIPLINE
     1. On your VERY FIRST assistant turn, before calling any tool, emit a short
@@ -347,9 +340,8 @@ final class OpenClickyBrowserAgentRunner {
        with an honest summary explaining the block.
 
     SAFETY
-    - Never run `evaluate` scripts that exfiltrate cookies, localStorage, or
-      tokens unless the user explicitly asks for that.
     - Do not navigate to off-task destinations.
+    - There is no `evaluate` tool by design; use the structured tools only.
     """
 
     /// Entry point to execute the CUA Agent loop.
@@ -367,16 +359,27 @@ final class OpenClickyBrowserAgentRunner {
             model.hasAgentSDK()
         }
 
-        // Prefer the direct HTTP path whenever an Anthropic API key is
-        // configured — it speaks real `tool_use` blocks and feeds screenshots
-        // back as `tool_result` images. The SDK fallback only re-parses JSON
-        // out of free-text and is much more fragile.
-        if !hasAPIKey && useSDK {
-            await runWithAgentSDK(prompt: prompt, priorTurns: priorTurns)
-            return
+        // Money rule (AGENTS.md): the Claude Agent SDK is PRIMARY because it
+        // uses the local, already-paid-for Claude Code sign-in. Direct Anthropic
+        // HTTP bills per token and is FALLBACK ONLY (SDK unavailable or throws).
+        // The previous implementation inverted this ("prefer HTTP when a key is
+        // configured"); that quietly burned API credits on every browser task.
+        if useSDK {
+            do {
+                try await runWithAgentSDK(prompt: prompt, priorTurns: priorTurns)
+                return
+            } catch {
+                // SDK path threw — fall through to the HTTP fallback only if a
+                // key is available, else surface the error.
+                if !hasAPIKey {
+                    appendAgentMessage(text: "The Claude Agent SDK failed and no Anthropic API key is configured as fallback. Add one in Settings and try again. (SDK error: \(error.localizedDescription))")
+                    return
+                }
+                appendAgentMessage(text: "Claude Agent SDK failed; retrying this browser task over the direct API. (\(error.localizedDescription))")
+            }
         }
         if !hasAPIKey {
-            appendAgentMessage(text: "I need an Anthropic API key (or the Claude Agent SDK) to drive the browser. Add one in Settings and try again.")
+            appendAgentMessage(text: "I need the Claude Agent SDK or an Anthropic API key to drive the browser. Add one in Settings and try again.")
             return
         }
 
@@ -671,11 +674,11 @@ final class OpenClickyBrowserAgentRunner {
             return result
             
         case "evaluate":
-            guard let script = input["script"] as? String else {
-                return .failure(summary: "Missing required parameter: script")
-            }
-            return await executeEvaluate(script: script)
-            
+            // Removed: arbitrary JS eval is an indirect prompt-injection vector.
+            // Kept as an explicit, logged refusal so a model that tries to call
+            // it gets a clear message instead of an "unknown tool" confusion.
+            return .failure(summary: "The `evaluate` tool is disabled. Use click/type/press_key/scroll/observe_page/get_content instead.")
+
         default:
             return .failure(summary: "Unknown tool: \(name)")
         }
@@ -741,12 +744,18 @@ final class OpenClickyBrowserAgentRunner {
     private func executeNavigate(url: String) async -> ToolResult {
         let lower = url.lowercased()
         var targetURL: URL?
-        if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file://") || lower.hasPrefix("open-clicky://") {
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
             targetURL = URL(string: url)
+        } else if lower.hasPrefix("file://") || lower.hasPrefix("open-clicky://") {
+            // Agent-initiated file:// / custom-scheme navigation is refused: a
+            // screenshot prompt-injection could otherwise direct the agent to
+            // load and read local files. Address-bar file loading (user-initiated)
+            // is handled separately by the workspace's own url(from:) path.
+            return .failure(summary: "Failed: Agent navigation to file:// or custom schemes is not allowed. Use http(s) URLs only.")
         } else if url.contains(".") && !url.contains(" ") {
             targetURL = URL(string: "https://\(url)")
         }
-        
+
         guard let targetURL = targetURL else {
             return .failure(summary: "Failed: Invalid URL format '\(url)'.")
         }
@@ -795,17 +804,10 @@ final class OpenClickyBrowserAgentRunner {
         return .failure(summary: "Timed out waiting for \(desc) to appear after \(timeoutMs)ms.")
     }
 
-    private func executeEvaluate(script: String) async -> ToolResult {
-        do {
-            if let result = try await evaluateRawJSWithThrowing(script) {
-                return .success(summary: "Script evaluated. Result: \(result)")
-            } else {
-                return .success(summary: "Script evaluated successfully (no return value).")
-            }
-        } catch {
-            return .failure(summary: "Javascript execution failed: \(error.localizedDescription)")
-        }
-    }
+    // `executeEvaluate` was removed: the model-facing `evaluate` tool is disabled
+    // (see `executeTool`). The internal `evaluateRawJS*` helpers remain because
+    // they back the structured tools (readyState polling, observe_page, etc.)
+    // which run OpenClicky-authored, non-LLM-controlled scripts.
 
     // MARK: - Injected Action Engine
     
@@ -1075,7 +1077,7 @@ final class OpenClickyBrowserAgentRunner {
         return String(value.prefix(limit)) + "..."
     }
 
-    private func runWithAgentSDK(prompt: String, priorTurns: [PriorTurn] = []) async {
+    private func runWithAgentSDK(prompt: String, priorTurns: [PriorTurn] = []) async throws {
         guard let model = browserModel else { return }
 
         // Seed the SDK conversation with prior workspace turns so the user can

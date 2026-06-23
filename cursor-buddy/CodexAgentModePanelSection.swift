@@ -232,8 +232,11 @@ struct CodexAgentModePanelSection: View {
             }
 
             if !inlineSuggestedActions.isEmpty {
+                // H13: de-duplicate suggested actions so ForEach(id: \.self) can
+                // never trap on duplicate titles emitted by the model.
+                let uniqueActions = NSOrderedSet(array: inlineSuggestedActions).compactMap { $0 as? String }
                 HStack(spacing: 6) {
-                    ForEach(inlineSuggestedActions, id: \.self) { actionTitle in
+                    ForEach(uniqueActions, id: \.self) { actionTitle in
                         Button(actionTitle) {
                             runSuggestedNextAction(actionTitle)
                         }

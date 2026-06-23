@@ -31,7 +31,9 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
             object: UserDefaults.standard,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            // M22: the notification is delivered on the main queue, but Swift 6
+            // still treats this callback as nonisolated unless we assert it.
+            MainActor.assumeIsolated {
                 self?.refreshThemeAppearance()
             }
         }
@@ -71,6 +73,9 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
         }
         enforceMinimumSize()
         positionPanel()
+        if let panel {
+            OpenClickyWindowLevels.applyMainPanelLevel(to: panel)
+        }
         panel?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -118,6 +123,7 @@ final class CodexHUDWindowManager: NSObject, NSWindowDelegate {
         panel.titlebarAppearsTransparent = true
         panel.backgroundColor = .clear
         panel.isOpaque = false
+        OpenClickyWindowLevels.applyMainPanelLevel(to: panel)
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.fullScreenPrimary]
         panel.hasShadow = true

@@ -169,6 +169,10 @@ final class ClaudeAgentSDKAPI {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
+        // M16: optional assistant prefill, forwarded to the bridge so the SDK
+        // (primary) path behaves like the HTTP fallback. Previously prefill was
+        // silently dropped on the SDK path, causing quality divergence.
+        assistantPrefill: String? = nil,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
         try await sendRequest(
@@ -177,6 +181,7 @@ final class ClaudeAgentSDKAPI {
             systemPrompt: systemPrompt,
             conversationHistory: conversationHistory,
             userPrompt: userPrompt,
+            assistantPrefill: assistantPrefill,
             onTextChunk: onTextChunk
         )
     }
@@ -209,6 +214,7 @@ final class ClaudeAgentSDKAPI {
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)],
         userPrompt: String,
+        assistantPrefill: String? = nil,
         onTextChunk: @MainActor @Sendable @escaping (String) -> Void
     ) async throws -> (text: String, duration: TimeInterval) {
         try ensureBridge()
@@ -227,7 +233,7 @@ final class ClaudeAgentSDKAPI {
                 "assistant": entry.assistantResponse
             ]
         }
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": kind,
             "id": requestID,
             "systemPrompt": systemPrompt,
@@ -235,6 +241,11 @@ final class ClaudeAgentSDKAPI {
             "conversationHistory": history,
             "images": attachments
         ]
+        // M16: forward prefill to the bridge when provided so the SDK path can
+        // seed the assistant turn like the HTTP fallback does.
+        if let assistantPrefill, !assistantPrefill.isEmpty {
+            payload["assistantPrefill"] = assistantPrefill
+        }
 
         OpenClickyMessageLogStore.shared.append(
             lane: "voice",

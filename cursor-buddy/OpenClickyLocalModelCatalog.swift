@@ -1,6 +1,6 @@
 import Foundation
 
-enum OpenClickyLocalModelUseCase: String, CaseIterable, Codable, Equatable, Sendable {
+nonisolated enum OpenClickyLocalModelUseCase: String, CaseIterable, Codable, Equatable, Sendable {
     case smallest
     case general
     case vision
@@ -17,7 +17,7 @@ enum OpenClickyLocalModelUseCase: String, CaseIterable, Codable, Equatable, Send
     }
 }
 
-enum OpenClickyLocalModelRuntimeRequirement: Equatable, Sendable {
+nonisolated enum OpenClickyLocalModelRuntimeRequirement: Equatable, Sendable {
     case externalOpenAICompatibleServer
 
     var label: String {
@@ -35,7 +35,7 @@ enum OpenClickyLocalModelRuntimeRequirement: Equatable, Sendable {
     }
 }
 
-struct OpenClickyLocalModel: Identifiable, Equatable, Sendable {
+nonisolated struct OpenClickyLocalModel: Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let description: String
@@ -105,7 +105,7 @@ struct OpenClickyLocalModel: Identifiable, Equatable, Sendable {
     }
 }
 
-enum OpenClickyLocalModelCatalog {
+nonisolated enum OpenClickyLocalModelCatalog {
     /// Installable MLX bundles managed by OpenClicky. The source repository is
     /// just the download location; endpoint launch, model selection, and Codex
     /// provider wiring belong to OpenClicky.

@@ -89,7 +89,7 @@ class OpenAIAPI {
             ])
             contentBlocks.append([
                 "type": "input_image",
-                "image_url": "data:image/jpeg;base64,\(image.data.base64EncodedString())"
+                "image_url": "data:\(Self.openAIImageMediaType(for: image.data));base64,\(image.data.base64EncodedString())"
             ])
         }
         contentBlocks.append([
@@ -374,7 +374,7 @@ class OpenAIAPI {
             ])
             contentBlocks.append([
                 "type": "input_image",
-                "image_url": "data:image/jpeg;base64,\(image.data.base64EncodedString())"
+                "image_url": "data:\(Self.openAIImageMediaType(for: image.data));base64,\(image.data.base64EncodedString())"
             ])
         }
         contentBlocks.append([
@@ -408,4 +408,15 @@ class OpenAIAPI {
     private static func elapsedMilliseconds(from start: Date, to end: Date) -> Int {
         max(0, Int((end.timeIntervalSince(start) * 1000).rounded()))
     }
+    /// M18: detect the image media type from the PNG signature; default to
+    /// jpeg otherwise (matches ClaudeAPI.detectImageMediaType). Previously
+    /// every image was hard-coded as image/jpeg, mislabeling PNG screenshots.
+    private static func openAIImageMediaType(for data: Data) -> String {
+        if data.count >= 4 {
+            let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+            if [UInt8](data.prefix(4)) == pngSignature { return "image/png" }
+        }
+        return "image/jpeg"
+    }
+
 }

@@ -262,8 +262,23 @@ final class OpenClickyAutomationStore: ObservableObject {
     guard let data = try? Data(contentsOf: storeURL) else { return }
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
-    if let list = try? decoder.decode([OpenClickyAutomation].self, from: data) {
-      self.automations = list
+    // M13: previously a decode failure silently returned [] and the next save()
+    // would overwrite the file with only the re-seeded automation, destroying
+    // all user data. Now: on failure, quarantine the bad file (timestamped
+    // backup) and surface the error in-process so the user can recover.
+    do {
+      let envelope = try decoder.decode(AutomationStoreEnvelope.self, from: data)
+      self.automations = envelope.automations
+    } catch {
+      // Back-compat: pre-versioned files were a bare [OpenClickyAutomation].
+      if let legacy = try? decoder.decode([OpenClickyAutomation].self, from: data) {
+        self.automations = legacy
+      } else {
+        let quarantined = storeURL.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+        try? FileManager.default.moveItem(at: storeURL, to: quarantined)
+        print("automation load failed — file quarantined at \(quarantined.path). Underlying error: \(error)")
+      }
+      // Seed in-memory only; the bad file is preserved on disk for recovery.
     }
   }
 
@@ -271,13 +286,26 @@ final class OpenClickyAutomationStore: ObservableObject {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     encoder.dateEncodingStrategy = .iso8601
+    // M13: version the on-disk envelope so future schema changes can migrate
+    // explicitly instead of relying on Codable optional-field tolerance.
     do {
-      let data = try encoder.encode(automations)
+      let envelope = AutomationStoreEnvelope(schemaVersion: AutomationStoreEnvelope.currentVersion, automations: automations)
+      let data = try encoder.encode(envelope)
       try data.write(to: storeURL, options: [.atomic])
     } catch {
       print("automation save failed: \(error)")
     }
   }
+}
+
+/// M13: versioned on-disk envelope for the automation store. The
+/// `automations` array is wrapped so future schema changes can migrate
+/// explicitly. Decode accepts both the new envelope and the legacy bare-array
+/// format (handled in `load()`).
+struct AutomationStoreEnvelope: Codable {
+  static let currentVersion = 1
+  var schemaVersion: Int
+  var automations: [OpenClickyAutomation]
 }
 
 struct OpenClickySkillDiscoverySuggestion: Codable, Identifiable, Equatable {

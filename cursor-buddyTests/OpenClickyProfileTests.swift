@@ -16,6 +16,21 @@ struct OpenClickyProfileTests {
         #expect(OpenClickyProfileCatalog.defaultProfileID == "local")
     }
 
+    @Test func taskCompletionVoiceDefaultsOn() {
+        let key = AppBundleConfiguration.userAgentCompletionVoiceEnabledDefaultsKey
+        let oldValue = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let oldValue {
+                UserDefaults.standard.set(oldValue, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+
+        UserDefaults.standard.removeObject(forKey: key)
+        #expect(AppBundleConfiguration.agentCompletionVoiceEnabled())
+    }
+
     @Test func profileLookupFallsBackToDefaultForUnknownID() {
         #expect(OpenClickyProfileCatalog.profile(withID: "realtime").id == "realtime")
         #expect(OpenClickyProfileCatalog.profile(withID: nil).id == "local")

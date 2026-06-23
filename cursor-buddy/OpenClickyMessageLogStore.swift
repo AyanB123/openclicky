@@ -30,6 +30,29 @@ nonisolated final class OpenClickyMessageLogStore: @unchecked Sendable {
         self.logDirectory = logDirectory ?? Self.defaultLogDirectory(fileManager: fileManager)
     }
 
+    /// H15: default retention for daily message logs (which contain full voice
+    /// transcripts = PII). 30 days balances debug usefulness against unbounded
+    /// growth and plaintext-on-disk exposure.
+    static let defaultRetentionDays: Int = 30
+
+    /// Prune message-log files older than the retention window. Safe to call on
+    /// launch and on the daily boundary. Never touches review-comment files.
+    func pruneOldMessageLogs(olderThanDays days: Int = OpenClickyMessageLogStore.defaultRetentionDays) {
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+            let files = self.availableMessageLogFiles()
+            for file in files {
+                let modDate = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+                if modDate < cutoff {
+                    try? self.fileManager.removeItem(at: file)
+                }
+            }
+        }
+    }
+
     func availableMessageLogFiles() -> [URL] {
         do {
             try fileManager.createDirectory(at: logDirectory, withIntermediateDirectories: true)

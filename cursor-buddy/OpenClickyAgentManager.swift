@@ -202,37 +202,45 @@ final class OpenClickyAgentManager: ObservableObject {
     }
 
     func refreshStatus() {
-        if Self.canConnectToDaemonSocket(path: ipcSocketPath) {
-            status = .running
-            return
-        }
+        // H14: previously this ran the launchctl subprocess + blocking socket
+        // connect on the @MainActor (invoked from .onAppear), beachballing the
+        // UI. The performInstall/ensureRunning paths already move launchctl
+        // off-main; mirror that here.
+        Task { @MainActor in
+            let next = await Task.detached(priority: .userInitiated) { () -> ServiceStatus in
+                if await Self.canConnectToDaemonSocket(path: self.ipcSocketPath) {
+                    return .running
+                }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["list", "com.jkneen.openclicky.agent"]
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                process.arguments = ["list", "com.jkneen.openclicky.agent"]
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
 
-        do {
-            try process.run()
-            process.waitUntilExit()
+                do {
+                    try process.run()
+                    process.waitUntilExit()
 
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    let output = String(data: data, encoding: .utf8) ?? ""
 
-            if Self.launchctlOutputHasRunningPID(output) {
-                status = .running
-            } else if output.localizedCaseInsensitiveContains("Could not find service")
-                || output.localizedCaseInsensitiveContains("Could not find domain")
-                || output.localizedCaseInsensitiveContains("service is not loaded") {
-                status = .notInstalled
-            } else {
-                status = .stopped
-            }
-        } catch {
-            status = .error(error.localizedDescription)
+                    if Self.launchctlOutputHasRunningPID(output) {
+                        return .running
+                    } else if output.localizedCaseInsensitiveContains("Could not find service")
+                        || output.localizedCaseInsensitiveContains("Could not find domain")
+                        || output.localizedCaseInsensitiveContains("service is not loaded") {
+                        return .notInstalled
+                    } else {
+                        return .stopped
+                    }
+                } catch {
+                    return .error(error.localizedDescription)
+                }
+            }.value
+            self.status = next
         }
     }
 
@@ -258,7 +266,7 @@ final class OpenClickyAgentManager: ObservableObject {
         }
     }
 
-    struct AgentResponse: Codable {
+    nonisolated struct AgentResponse: Codable, Sendable {
         let status: String
         let reply: String?
         let error: String?
@@ -274,14 +282,20 @@ final class OpenClickyAgentManager: ObservableObject {
         var requestLine = String(data: input, encoding: .utf8)!
         requestLine.append("\n")
 
-        let handle = try Self.openConnectedSocketHandle(path: socketPath)
-        defer { try? handle.close() }
+        // H14: the connect/write/read helpers below are synchronous with a
+        // 90s idle timeout. Previously this ran inline on the @MainActor (no
+        // suspension point), beachballing for up to 90s. Run them off-main in
+        // a detached task, mirroring streamChatInternal.
+        return try await Task.detached(priority: .userInitiated) { () -> AgentResponse in
+            let handle = try Self.openConnectedSocketHandle(path: socketPath)
+            defer { try? handle.close() }
 
-        try handle.write(contentsOf: Data(requestLine.utf8))
+            try handle.write(contentsOf: Data(requestLine.utf8))
 
-        // Read one JSON line response.
-        let responseData = try Self.readLineData(from: handle)
-        return try JSONDecoder().decode(AgentResponse.self, from: responseData)
+            // Read one JSON line response.
+            let responseData = try Self.readLineData(from: handle)
+            return try JSONDecoder().decode(AgentResponse.self, from: responseData)
+        }.value
     }
 
     // MARK: - Convenience
