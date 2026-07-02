@@ -3238,7 +3238,7 @@ private enum OpenClickyChromeCookieImporter {
            let size = attrs[.size] as? Int, size > 0 {
             if let handle = try? FileHandle(forWritingTo: url) {
                 try? handle.truncate(atOffset: 0)
-                try? handle.write(Data(repeating: 0, count: size))
+                handle.write(Data(repeating: 0, count: size))
                 try? handle.close()
             }
         }

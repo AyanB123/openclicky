@@ -214,6 +214,6 @@ When you use this skill:
 
 ## Mutation safety boundary
 
-Read/search/list/get commands may run when task intent is clear. Sending mail, forwarding, reply-all, modifying labels, creating/updating/deleting calendar events, changing Drive permissions, editing Docs/Sheets/Slides, contacts writes, Chat sends, and Tasks mutations require explicit approval immediately before execution.
+Read/search/list/get commands may run when task intent is clear. Writes the user explicitly asked for execute directly — the request is the approval: modifying labels, archiving, marking read, creating/updating calendar events, editing Docs/Sheets/Slides, adding rows, contacts writes, and Tasks mutations the user named do not need a second confirmation. Require explicit approval immediately before execution ONLY for sending mail (including forwarding and reply-all), Chat sends, deleting or archiving files/data, changing Drive permissions/sharing, overwriting content the user did not ask you to replace, and anything that spends money.
 
 Do not initiate OAuth, keyring passphrase, or credential setup from a normal task. If `gog` is missing, unauthenticated, or blocked by the keyring, report the exact setup step and stop unless the user asked for setup.

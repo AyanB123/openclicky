@@ -93,8 +93,8 @@ struct OpenClickyNotchPanelView: View {
     }
 
     private var titleFontSize: CGFloat { CGFloat(appTitleFontSize) }
-    private var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
-    private var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
+    var bodyFontSize: CGFloat { CGFloat(appBodyFontSize) }
+    var subtextFontSize: CGFloat { CGFloat(appSubtextFontSize) }
     private var appTextLineSpacing: CGFloat { CGFloat(appLineSpacing) }
 
     var quickPromptAutocompleteOptions: [OpenClickyPromptAutocompleteOption] {
@@ -552,7 +552,7 @@ struct OpenClickyNotchConnectionRow: Identifiable, Equatable {
     let systemImageName: String
 }
 
-private enum OpenClickyNotchConnectionState: Equatable {
+enum OpenClickyNotchConnectionState: Equatable {
     case ready
     case available
     case needsAttention

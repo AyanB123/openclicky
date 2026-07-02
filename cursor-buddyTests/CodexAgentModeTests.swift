@@ -176,6 +176,39 @@ struct CodexAgentModeTests {
         #expect(command == "/tmp/custom-cua-driver")
     }
 
+    @Test func cuaDriverBundledRuntimeExecutableURLResolvesFromSourceCheckout() throws {
+        // In a dev/test run, sourceAppResourcesDirectory() resolves to the
+        // repo's AppResources/OpenClicky, where a real cua-driver binary is
+        // checked in. Assert against that shape rather than a fixed absolute
+        // path so this doesn't depend on the checkout location.
+        let bundled = try #require(CuaDriverMCPConfiguration.bundledRuntimeExecutableURL())
+
+        #expect(bundled.path.hasSuffix("CuaDriverRuntime/cua-driver"))
+        #expect(FileManager.default.isExecutableFile(atPath: bundled.path))
+    }
+
+    @Test func cuaDriverResolvedCommandPathPrefersBundledRuntimeOverKnownCommandPaths() throws {
+        // With no env override, resolution should fall through to the
+        // bundled runtime binary (present in this checkout) before ever
+        // considering the static knownCommandPaths list.
+        let command = try #require(CuaDriverMCPConfiguration.resolvedCommandPath(environment: [:]))
+
+        #expect(command.hasSuffix("CuaDriverRuntime/cua-driver"))
+        #expect(!CuaDriverMCPConfiguration.knownCommandPaths.contains(command))
+    }
+
+    @Test func cuaDriverEnvironmentOverrideStillWinsOverBundledRuntime() throws {
+        // Even though bundledRuntimeExecutableURL() resolves to a real
+        // binary in this checkout, an explicit env override must take
+        // priority over it.
+        let command = CuaDriverMCPConfiguration.resolvedCommandPath(
+            environment: [CuaDriverMCPConfiguration.environmentOverrideKey: "/tmp/custom-cua-driver"]
+        )
+
+        #expect(command == "/tmp/custom-cua-driver")
+        #expect(command != CuaDriverMCPConfiguration.bundledRuntimeExecutableURL()?.path)
+    }
+
     @Test func codexHomeManagerUsesOpenClickyResourceNames() throws {
         let manager = CodexHomeManager(
             fileManager: .default,

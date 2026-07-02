@@ -430,11 +430,16 @@ side effects) and gives you the pid in one call — no `list_apps` hop.
 
 `launch_app` is the **background-safe launch primitive** for this MCP
 lane: agents drive apps in the background while the user keeps typing in
-their real foreground app. In Cua v0.1.6,
+their real foreground app. In Cua v0.2.0,
 LaunchServices is called without activating the target, menu hotkey
 delivery restores the previous frontmost app immediately after posting
-the key, and the previous frontmost app is restored if the target
-self-activates while opening URLs. The target window may become visible
+the key, and an internal `FocusRestoreGuard` catches
+`NSApp.activate(ignoringOtherApps:)` calls the target makes during
+`application(_:open:)` and clobbers the frontmost back to what it was
+before the launch. That guard is why `launch_app` with `urls`
+(e.g. `{"bundle_id": "com.colliderli.iina", "urls": ["~/video.mp4"]}`)
+is safe even for apps that normally foreground on media-load (Chrome,
+Electron, media players). The target window may become visible
 behind the user's current app, but it must not become frontmost.
 
 If the user explicitly wants the window foregrounded (usually for a

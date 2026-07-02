@@ -13,7 +13,7 @@ This policy applies to bundled skills when they run inside OpenClicky Agent Mode
 
 - Read-only: search, summarize, inspect, list, preview, and draft. These are safe after normal task intent is clear.
 - Local write: create or edit files inside the selected project/output location. Use archive-first rules when replacing OpenClicky memory, prompts, skills, config, runtime notes, or learned artifacts.
-- External write: send email/messages, create calendar events, modify cloud docs, deploy, publish, trade, open PRs, merge, delete, rename, move, or complete tasks. These require explicit user approval immediately before execution unless the user request already names the exact action and target.
+- External write: the user's instruction IS the approval for writes they clearly asked for — creating calendar events, modifying cloud docs, adding rows, renaming, moving, completing tasks, opening PRs, and similar reversible actions the request names execute directly; do not draft-and-wait or re-confirm an action the user already named. Require explicit user approval immediately before execution ONLY for the narrow risky set: sending email/messages, deleting or archiving existing data, overwriting or replacing content the user did not ask you to touch, merging, deploying, publishing, trading, and spending money.
 - Credential/auth setup: do not start OAuth, keychain, token, or passphrase flows unless the user explicitly asked for setup. Report the missing credential or account clearly.
 - macOS TCC: do not run commands that intentionally trigger new Accessibility, Screen Recording, Contacts, Calendar, Photos, Reminders, Messages, Mail, Full Disk Access, Camera, Microphone, or Speech Recognition prompts unless the user asked for that permission flow.
 

@@ -233,7 +233,7 @@ nonisolated private struct OpenClickyLocalAutomationResult: Sendable {
     let terminationStatus: Int32
 }
 
-private struct OpenClickyRequestTiming {
+struct OpenClickyRequestTiming {
     let requestID: String
     let source: String
     let text: String
@@ -244,7 +244,7 @@ private struct OpenClickyRequestTiming {
 // didComplete` — safe only because all access happened to land on the main
 // actor, with nothing enforcing that. Now the flag is guarded by an
 // OSAllocatedUnfairLock so the invariant holds regardless of caller context.
-private final class OpenClickyRequestCompletionState: @unchecked Sendable {
+final class OpenClickyRequestCompletionState: @unchecked Sendable {
     private let didCompleteStorage = OSAllocatedUnfairLock(initialState: false)
     var didComplete: Bool {
         get { didCompleteStorage.withLock { $0 } }
@@ -462,7 +462,7 @@ private final class OpenClickyWakeWordAudioDucker {
 @MainActor
 final class CompanionManager: ObservableObject {
     let cursorOverlayState = CursorOverlayState()
-    @Published internal(set) var voiceState: CompanionVoiceState = .idle {
+    @Published var voiceState: CompanionVoiceState = .idle {
         didSet {
             cursorOverlayState.voiceState = voiceState
             notchCaptureWindowManager.updateVoiceState(Self.notchVoicePhase(for: voiceState), audioPowerLevel: currentAudioPowerLevel)
@@ -589,10 +589,10 @@ final class CompanionManager: ObservableObject {
     let codexHUDWindowManager = CodexHUDWindowManager()
     let wikiViewerPanelManager = WikiViewerPanelManager()
     @Published private(set) var bundledKnowledgeIndex = OpenClickyCore.WikiManager.Index.empty
-    @Published internal(set) var latestVoiceResponseCard: ClickyResponseCard?
+    @Published var latestVoiceResponseCard: ClickyResponseCard?
     @Published private(set) var homeChatEntries: [CodexTranscriptEntry] = []
     @Published private(set) var isHomeChatModeActive = false
-    @Published internal(set) var handoffQueue: [HandoffQueuedRegionScreenshot] = []
+    @Published var handoffQueue: [HandoffQueuedRegionScreenshot] = []
     @Published private(set) var agentDockItems: [ClickyAgentDockItem] = []
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
@@ -1645,7 +1645,7 @@ final class CompanionManager: ObservableObject {
 
     /// Whether the blue cursor overlay is currently visible on screen.
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
-    @Published internal(set) var isOverlayVisible: Bool = false
+    @Published var isOverlayVisible: Bool = false
 
     /// The model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = CompanionManager.initialVoiceResponseModelID()

@@ -10,6 +10,7 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Keep updates concise.
 - Follow `OpenClickyBundledSkills/_shared/OpenClickySkillCompatibilityPolicy.md` when a bundled skill asks for external writes, credentials, macOS permissions, visual guidance, or tool-specific capabilities.
 - Prefer direct execution when tools are available.
+- Approval gate — the user's instruction IS the approval. For writes the user clearly asked for (creating or updating docs, rows, events, comments, renames, moves, multi-item edits), do them directly and report what you did; do not draft-and-wait or re-confirm a named action. Confirm first ONLY for deleting or archiving existing data, overwriting content the user did not ask you to touch, sending email or messages, and spending money.
 - Route work through structured tools first: web search for fresh facts, image galleries for visual content, screen-aware point/type syntax for guidance, child workers for substantial builds or multi-step tasks, and Composio-backed integrations for connected apps like GitHub.
 - Use OpenClicky's computer-use path only when direct tools cannot finish the job.
 - When working on the OpenClicky app repo, do not run terminal `xcodebuild`. Use Xcode for app builds and permission testing, and use `swiftc -parse <relevant Swift source files>` for lightweight syntax checks.

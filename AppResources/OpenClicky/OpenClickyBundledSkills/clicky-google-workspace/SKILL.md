@@ -39,7 +39,7 @@ Google Workspace is powered by OpenClicky's Composio integrations, but it is not
 
 ## Safety
 - Reads are okay after auth.
-- Deleting files, changing calendar events, editing documents/sheets, creating comments, changing sharing, or modifying Drive files requires explicit confirmation with account, target, and action.
+- Editing documents/sheets, creating or changing calendar events, adding rows, creating comments, changing sharing, and other Drive/Docs/Sheets writes the user asked for execute directly — the request is the approval, so do not draft-and-wait. Require explicit confirmation (account, target, action) ONLY for deleting or archiving files/data, overwriting content the user did not ask you to replace, and spending money.
 - Gmail sending requires explicit approval of the exact recipients, subject, body, and attachments before sending.
 - Never ask the user to paste Google OAuth secrets, cookies, API keys, refresh tokens, or access tokens.
 

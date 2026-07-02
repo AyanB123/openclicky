@@ -128,6 +128,6 @@ gog auth credentials list --json
 
 ## Mutation safety boundary
 
-Use `gog` for Google Workspace read/search/list/get routes first. Treat all sends, shares, edits, deletes, calendar creates, label changes, contact changes, chat posts, and task mutations as external writes requiring explicit approval immediately before execution.
+Use `gog` for Google Workspace read/search/list/get routes first. Edits, calendar creates/updates, label changes, contact changes, and task mutations the user explicitly asked for execute directly — the request is the approval. Require explicit approval immediately before execution ONLY for mail sends, chat posts, shares/permission changes, deletes, overwriting content the user did not ask you to replace, and spending money.
 
 If the local command shape differs from this document, use installed `gog -h` output as source of truth and update the skill later rather than repeating stale commands.

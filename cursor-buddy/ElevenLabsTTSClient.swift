@@ -554,7 +554,7 @@ final class StreamingTTSSession {
         "mr", "mrs", "ms", "dr", "jr", "sr", "st", "vs", "etc", "eg", "ie"
     ]
 
-    fileprivate init(
+    init(
         fetchSamples: @escaping @Sendable (String) async throws -> [Int16],
         playerNode: AVAudioPlayerNode?,
         format: AVAudioFormat?,

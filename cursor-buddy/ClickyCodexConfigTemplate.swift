@@ -178,7 +178,19 @@ nonisolated enum CuaDriverMCPConfiguration {
             return override
         }
 
+        if let bundled = bundledRuntimeExecutableURL(fileManager: fileManager) {
+            return bundled.path
+        }
+
         return knownCommandPaths.first { fileManager.isExecutableFile(atPath: $0) || fileManager.fileExists(atPath: $0) }
+    }
+
+    static func bundledRuntimeExecutableURL(fileManager: FileManager = .default) -> URL? {
+        guard let resources = CodexRuntimeLocator.sourceAppResourcesDirectory(fileManager: fileManager) else { return nil }
+        let executable = resources
+            .appendingPathComponent("CuaDriverRuntime", isDirectory: true)
+            .appendingPathComponent("cua-driver", isDirectory: false)
+        return fileManager.isExecutableFile(atPath: executable.path) ? executable : nil
     }
 
     private static func normalized(_ value: String?) -> String? {

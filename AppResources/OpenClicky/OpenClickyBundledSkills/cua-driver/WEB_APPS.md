@@ -71,7 +71,7 @@ launch_app({bundle_id: "<default_browser_bundle_id>", urls: ["https://cua.ai"]})
 
 Opens the URL in a new tab/window on the existing browser pid (or
 starts the browser if it isn't running). Background-safe — Cua
-v0.1.6's launch path asks LaunchServices not to activate the browser
+v0.2.0's launch path asks LaunchServices not to activate the browser
 and restores the previous frontmost app if the browser self-activates
 while opening the URL. No omnibox dance, no focus-steal, no `⌘L`
 flash. This is the default recommendation — use it even when the

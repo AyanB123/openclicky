@@ -141,7 +141,7 @@ struct OpenClickyPanelDragHandle: NSViewRepresentable {
     func updateNSView(_ nsView: OpenClickyPanelDragHandleView, context: Context) {}
 }
 
-private final class OpenClickyPanelDragHandleView: NSView {
+final class OpenClickyPanelDragHandleView: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
 
