@@ -4,51 +4,17 @@ import OpenClickyMarkdown
 
 @MainActor
 final class OpenClickyLogViewerWindowManager {
-    private var window: NSWindow?
-    private let windowSize = NSSize(width: 1120, height: 720)
-    private let minimumWindowSize = NSSize(width: 940, height: 580)
+    private let windowController = OpenClickyManagedWindowController<OpenClickyLogViewerView>(
+        configuration: .init(
+            title: "OpenClicky Logs",
+            size: NSSize(width: 1120, height: 720),
+            minSize: NSSize(width: 940, height: 580),
+            cornerRadius: 22
+        )
+    )
 
     func show() {
-        if window == nil {
-            createWindow()
-        } else if let hostingView: NSHostingView<OpenClickyLogViewerView> = OpenClickyLiquidGlassWindowSurface.hostingView(in: window) {
-            hostingView.rootView = OpenClickyLogViewerView()
-        }
-
-        guard let logWindow = window else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        OpenClickyWindowLevels.applyPanelDialogLevel(to: logWindow)
-        logWindow.center()
-        logWindow.orderFrontRegardless()
-        logWindow.makeKeyAndOrderFront(nil)
-        logWindow.makeMain()
-    }
-
-    private func createWindow() {
-        let logWindow = NSWindow(
-            contentRect: NSRect(origin: .zero, size: windowSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        logWindow.title = "OpenClicky Logs"
-        logWindow.minSize = minimumWindowSize
-        logWindow.isReleasedWhenClosed = false
-        logWindow.titlebarAppearsTransparent = true
-        logWindow.toolbarStyle = .unified
-        OpenClickyWindowLevels.applyPanelDialogLevel(to: logWindow)
-        logWindow.collectionBehavior.insert(.moveToActiveSpace)
-        logWindow.center()
-
-        OpenClickyLiquidGlassWindowSurface.install(
-            hostingView: NSHostingView(rootView: OpenClickyLogViewerView()),
-            in: logWindow,
-            frame: NSRect(origin: .zero, size: windowSize),
-            cornerRadius: 22,
-            strength: .expanded
-        )
-
-        window = logWindow
+        windowController.show { OpenClickyLogViewerView() }
     }
 }
 

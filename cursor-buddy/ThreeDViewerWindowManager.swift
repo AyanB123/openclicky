@@ -12,7 +12,14 @@ final class ThreeDViewerWindowManager: ObservableObject {
 
     static let shared = ThreeDViewerWindowManager()
 
-    private var window: NSWindow?
+    private let windowController = OpenClickyManagedWindowController<ThreeDViewerWindowContent>(
+        configuration: .init(
+            title: "Generated 3D Models",
+            size: NSSize(width: 420, height: 540),
+            cornerRadius: 22,
+            frameAutosaveName: "OpenClicky.ThreeDViewerWindow"
+        )
+    )
     private var cancellables = Set<AnyCancellable>()
     private var autoOpenedForJob: UUID?
 
@@ -35,65 +42,19 @@ final class ThreeDViewerWindowManager: ObservableObject {
     // MARK: - Public
 
     func toggle() {
-        if let window, window.isVisible {
-            window.close()
+        if windowController.isVisible {
+            windowController.close()
         } else {
             showWindow()
         }
     }
 
     func showWindow() {
-        if window == nil {
-            window = makeWindow()
-        }
-        OpenClickyWindowLevels.applyPanelDialogLevel(to: window)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        windowController.show(recenter: false) { ThreeDViewerWindowContent() }
     }
 
     func close() {
-        window?.close()
-    }
-
-    // MARK: - Construction
-
-    private func makeWindow() -> NSWindow {
-        let content = ThreeDViewerWindowContent()
-            .frame(minWidth: 380, minHeight: 480)
-        let hosting = NSHostingView(rootView: content)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Generated 3D Models"
-        window.titlebarAppearsTransparent = true
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.isReleasedWhenClosed = false
-        OpenClickyWindowLevels.applyPanelDialogLevel(to: window)
-        window.collectionBehavior.insert(.moveToActiveSpace)
-        window.collectionBehavior.insert(.fullScreenAuxiliary)
-        if let targetScreen = NSScreen.openClickyActiveInteractionScreen() {
-            window.setFrame(
-                NSScreen.centerFrame(size: window.frame.size, on: targetScreen),
-                display: true,
-                animate: false
-            )
-        } else {
-            window.center()
-        }
-        window.setFrameAutosaveName("OpenClicky.ThreeDViewerWindow")
-        OpenClickyLiquidGlassWindowSurface.install(
-            hostingView: hosting,
-            in: window,
-            frame: NSRect(x: 0, y: 0, width: 420, height: 540),
-            cornerRadius: 22,
-            strength: .expanded
-        )
-        return window
+        windowController.close()
     }
 }
 
@@ -150,6 +111,7 @@ private struct ThreeDViewerWindowContent: View {
                 .padding(.bottom, 14)
             }
         }
+        .frame(minWidth: 380, minHeight: 480)
     }
 
     private var header: some View {

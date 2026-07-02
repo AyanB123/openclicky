@@ -36,7 +36,7 @@ enum CompanionScreenCaptureUtility {
     private static var cachedShareableContentExpiresAt: Date?
     private static let shareableContentCacheLifetime: TimeInterval = 3.0
 
-    private static func currentShareableContent() async throws -> SCShareableContent {
+    static func currentShareableContent() async throws -> SCShareableContent {
         if let cached = cachedShareableContent,
            let expiresAt = cachedShareableContentExpiresAt,
            expiresAt > Date() {

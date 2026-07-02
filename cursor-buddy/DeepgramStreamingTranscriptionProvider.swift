@@ -61,7 +61,7 @@ final class DeepgramStreamingTranscriptionProvider: BuddyTranscriptionProvider {
     }
 }
 
-private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscriptionSession {
+private final class DeepgramStreamingTranscriptionSession: StreamingWebSocketTranscriptionSession, BuddyStreamingTranscriptionSession {
     private struct MessageEnvelope: Decodable {
         let type: String?
     }
@@ -96,17 +96,14 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
 
     private let apiKey: String
     private let modelName: String
-    private let urlSession: URLSession
     private let keyterms: [String]
     private let onTranscriptUpdate: (String) -> Void
     private let onFinalTranscriptReady: (String) -> Void
     private let onError: (Error) -> Void
 
     private let stateQueue = DispatchQueue(label: "com.learningbuddy.deepgram.state")
-    private let sendQueue = DispatchQueue(label: "com.learningbuddy.deepgram.send")
     private let audioPCM16Converter = BuddyPCM16AudioConverter(targetSampleRate: targetSampleRate)
 
-    private var webSocketTask: URLSessionWebSocketTask?
     private var audioFramesSent = 0
     private var hasDeliveredFinalTranscript = false
     private var isAwaitingExplicitFinalTranscript = false
@@ -126,11 +123,11 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
     ) {
         self.apiKey = apiKey
         self.modelName = modelName
-        self.urlSession = urlSession
         self.keyterms = keyterms
         self.onTranscriptUpdate = onTranscriptUpdate
         self.onFinalTranscriptReady = onFinalTranscriptReady
         self.onError = onError
+        super.init(urlSession: urlSession, sendQueueLabel: "com.learningbuddy.deepgram.send")
     }
 
     func open() async throws {
@@ -139,10 +136,7 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
         var websocketRequest = URLRequest(url: websocketURL)
         websocketRequest.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
 
-        let webSocketTask = urlSession.webSocketTask(with: websocketRequest)
-        self.webSocketTask = webSocketTask
-        webSocketTask.resume()
-        receiveNextMessage()
+        openWebSocket(with: websocketRequest)
     }
 
     func appendAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
@@ -151,18 +145,13 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
             return
         }
 
-        sendQueue.async { [weak self] in
-            guard let self, let webSocketTask = self.webSocketTask else { return }
-            self.audioFramesSent += 1
-            if self.audioFramesSent == 1 {
-                print("[Deepgram] first audio frame sent (\(audioPCM16Data.count) bytes)")
-            }
-            webSocketTask.send(.data(audioPCM16Data)) { [weak self] error in
-                if let error {
-                    print("[Deepgram] audio send error: \(error.localizedDescription)")
-                    self?.failSession(with: error)
-                }
-            }
+        audioFramesSent += 1
+        if audioFramesSent == 1 {
+            print("[Deepgram] first audio frame sent (\(audioPCM16Data.count) bytes)")
+        }
+        sendAudioData(audioPCM16Data) { [weak self] error in
+            print("[Deepgram] audio send error: \(error.localizedDescription)")
+            self?.failSession(with: error)
         }
     }
 
@@ -173,7 +162,9 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
             self.scheduleExplicitFinalTranscriptDeadline()
         }
 
-        sendJSONMessage(["type": "Finalize"])
+        sendJSONMessage(["type": "Finalize"]) { [weak self] error in
+            self?.failSession(with: error)
+        }
     }
 
     func cancel() {
@@ -183,38 +174,20 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
             self.explicitFinalTranscriptDeadlineWorkItem = nil
         }
 
-        sendJSONMessage(["type": "CloseStream"])
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-    }
-
-    private func receiveNextMessage() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self else { return }
-
-            switch result {
-            case .success(let message):
-                switch message {
-                case .string(let text):
-                    self.handleIncomingTextMessage(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        self.handleIncomingTextMessage(text)
-                    }
-                @unknown default:
-                    break
-                }
-
-                self.receiveNextMessage()
-            case .failure(let error):
-                let nsError = error as NSError
-                let closeCode = self.webSocketTask?.closeCode.rawValue ?? -1
-                print("[Deepgram] receive failure: domain=\(nsError.domain) code=\(nsError.code) closeCode=\(closeCode) — \(error.localizedDescription)")
-                self.failSession(with: error)
-            }
+        sendJSONMessage(["type": "CloseStream"]) { [weak self] error in
+            self?.failSession(with: error)
         }
+        closeWebSocket()
     }
 
-    private func handleIncomingTextMessage(_ text: String) {
+    override func handleReceiveFailure(_ error: Error) {
+        let nsError = error as NSError
+        let closeCode = webSocketTask?.closeCode.rawValue ?? -1
+        print("[Deepgram] receive failure: domain=\(nsError.domain) code=\(nsError.code) closeCode=\(closeCode) — \(error.localizedDescription)")
+        failSession(with: error)
+    }
+
+    override func handleIncomingText(_ text: String) {
         guard let messageData = text.data(using: .utf8) else { return }
 
         do {
@@ -297,22 +270,8 @@ private final class DeepgramStreamingTranscriptionSession: BuddyStreamingTranscr
         explicitFinalTranscriptDeadlineWorkItem?.cancel()
         explicitFinalTranscriptDeadlineWorkItem = nil
         onFinalTranscriptReady(transcriptText)
-        sendJSONMessage(["type": "CloseStream"])
-    }
-
-    private func sendJSONMessage(_ payload: [String: Any]) {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            return
-        }
-
-        sendQueue.async { [weak self] in
-            guard let self, let webSocketTask = self.webSocketTask else { return }
-            webSocketTask.send(.string(jsonString)) { [weak self] error in
-                if let error {
-                    self?.failSession(with: error)
-                }
-            }
+        sendJSONMessage(["type": "CloseStream"]) { [weak self] error in
+            self?.failSession(with: error)
         }
     }
 

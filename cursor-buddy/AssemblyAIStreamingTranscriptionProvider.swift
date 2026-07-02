@@ -116,7 +116,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     }
 }
 
-private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStreamingTranscriptionSession, @unchecked Sendable {
+private final class AssemblyAIStreamingTranscriptionSession: StreamingWebSocketTranscriptionSession, BuddyStreamingTranscriptionSession {
     private struct MessageEnvelope: Decodable {
         let type: String
     }
@@ -154,11 +154,8 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
     private let onError: (Error) -> Void
 
     private let stateQueue = DispatchQueue(label: "com.learningbuddy.assemblyai.state")
-    private let sendQueue = DispatchQueue(label: "com.learningbuddy.assemblyai.send")
     private let audioPCM16Converter = BuddyPCM16AudioConverter(targetSampleRate: targetSampleRate)
-    private let urlSession: URLSession
 
-    private var webSocketTask: URLSessionWebSocketTask?
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var hasResolvedReadyContinuation = false
     private var hasDeliveredFinalTranscript = false
@@ -181,11 +178,11 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
     ) {
         self.apiKey = apiKey
         self.temporaryToken = temporaryToken
-        self.urlSession = urlSession
         self.keyterms = keyterms
         self.onTranscriptUpdate = onTranscriptUpdate
         self.onFinalTranscriptReady = onFinalTranscriptReady
         self.onError = onError
+        super.init(urlSession: urlSession, sendQueueLabel: "com.learningbuddy.assemblyai.send")
     }
 
     func open() async throws {
@@ -199,11 +196,7 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
             websocketRequest.setValue(apiKey, forHTTPHeaderField: "Authorization")
         }
 
-        let webSocketTask = urlSession.webSocketTask(with: websocketRequest)
-        self.webSocketTask = webSocketTask
-        webSocketTask.resume()
-
-        receiveNextMessage()
+        openWebSocket(with: websocketRequest)
 
         try await withCheckedThrowingContinuation { continuation in
             stateQueue.async {
@@ -218,13 +211,8 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
             return
         }
 
-        sendQueue.async { [weak self] in
-            guard let self, let webSocketTask = self.webSocketTask else { return }
-            webSocketTask.send(.data(audioPCM16Data)) { [weak self] error in
-                if let error {
-                    self?.failSession(with: error)
-                }
-            }
+        sendAudioData(audioPCM16Data) { [weak self] error in
+            self?.failSession(with: error)
         }
     }
 
@@ -235,7 +223,9 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
             self.scheduleExplicitFinalTranscriptDeadline()
         }
 
-        sendJSONMessage(["type": "ForceEndpoint"])
+        sendJSONMessage(["type": "ForceEndpoint"]) { [weak self] error in
+            self?.failSession(with: error)
+        }
     }
 
     func cancel() {
@@ -245,35 +235,17 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
             self.explicitFinalTranscriptDeadlineWorkItem = nil
         }
 
-        sendJSONMessage(["type": "Terminate"])
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-    }
-
-    private func receiveNextMessage() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self else { return }
-
-            switch result {
-            case .success(let message):
-                switch message {
-                case .string(let text):
-                    self.handleIncomingTextMessage(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        self.handleIncomingTextMessage(text)
-                    }
-                @unknown default:
-                    break
-                }
-
-                self.receiveNextMessage()
-            case .failure(let error):
-                self.failSession(with: error)
-            }
+        sendJSONMessage(["type": "Terminate"]) { [weak self] error in
+            self?.failSession(with: error)
         }
+        closeWebSocket()
     }
 
-    private func handleIncomingTextMessage(_ text: String) {
+    override func handleReceiveFailure(_ error: Error) {
+        failSession(with: error)
+    }
+
+    override func handleIncomingText(_ text: String) {
         guard let messageData = text.data(using: .utf8) else { return }
 
         do {
@@ -404,22 +376,8 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
         explicitFinalTranscriptDeadlineWorkItem?.cancel()
         explicitFinalTranscriptDeadlineWorkItem = nil
         onFinalTranscriptReady(transcriptText)
-        sendJSONMessage(["type": "Terminate"])
-    }
-
-    private func sendJSONMessage(_ payload: [String: Any]) {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            return
-        }
-
-        sendQueue.async { [weak self] in
-            guard let self, let webSocketTask = self.webSocketTask else { return }
-            webSocketTask.send(.string(jsonString)) { [weak self] error in
-                if let error {
-                    self?.failSession(with: error)
-                }
-            }
+        sendJSONMessage(["type": "Terminate"]) { [weak self] error in
+            self?.failSession(with: error)
         }
     }
 

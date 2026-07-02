@@ -859,12 +859,11 @@ enum OpenClickyMacPrivacyPermissionProbe {
     }
 
     static func hasAppleEventsAutomationPermission(targetBundleIdentifier: String, prompt: Bool = false) -> Bool {
-        // Avoid noisy probes for arbitrary targets that are not running, but do
-        // not short-circuit System Events. Its TCC grant is durable even when
-        // the helper app is not already launched, and treating that as missing
-        // makes Settings report a false Automation failure.
+        // Avoid noisy non-prompt probes for targets that are not running. On
+        // macOS, even System Events can emit repeated AEDeterminePermission...
+        // procNotFound diagnostics when probed from the refresh timer before it
+        // is launched. Explicit request flows still pass prompt: true below.
         if !prompt,
-           targetBundleIdentifier != systemEventsBundleIdentifier,
            NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleIdentifier).isEmpty {
             return false
         }
@@ -1080,7 +1079,7 @@ enum OpenClickyComputerUseWindowEnumerator {
 enum OpenClickyComputerUseWindowCaptureUtility {
     @MainActor
     static func capture(window targetWindow: OpenClickyComputerUseWindowInfo) async throws -> OpenClickyComputerUseWindowCapture {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await CompanionScreenCaptureUtility.currentShareableContent()
         guard let screenCaptureWindow = content.windows.first(where: { Int($0.windowID) == targetWindow.id }) else {
             throw OpenClickyComputerUseError.windowCaptureUnavailable
         }

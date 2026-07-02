@@ -45,15 +45,7 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHome.path
-        environment["PATH"] = Self.pathForAgentProcess(
-            CodexRuntimeLocator.pathByPrependingBundledRuntimePaths(
-                existingPath: environment["PATH"],
-                runtimeExecutableURL: executableURL
-            )
-        )
-        Self.applyGogCLIEnvironment(to: &environment)
+        var environment = Self.baseEnvironment(codexHome: codexHome, runtimeExecutableURL: executableURL)
 
         let configFile = codexHome.appendingPathComponent("config.toml", isDirectory: false)
         let configText = (try? String(contentsOf: configFile, encoding: .utf8)) ?? ""
@@ -98,6 +90,69 @@ nonisolated final class CodexProcessManager: @unchecked Sendable {
         }
 
         try process.run()
+    }
+
+    /// Shared subprocess environment (CODEX_HOME, PATH with bundled runtime
+    /// paths prepended, GOG CLI vars) reused by both the persistent
+    /// app-server (`start`) and one-shot `codex exec` callers such as
+    /// `CodexPointDetector`.
+    static func baseEnvironment(codexHome: URL, runtimeExecutableURL: URL) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_HOME"] = codexHome.path
+        environment["PATH"] = pathForAgentProcess(
+            CodexRuntimeLocator.pathByPrependingBundledRuntimePaths(
+                existingPath: environment["PATH"],
+                runtimeExecutableURL: runtimeExecutableURL
+            )
+        )
+        applyGogCLIEnvironment(to: &environment)
+        return environment
+    }
+
+    /// Runs a one-shot (non-app-server) Codex subprocess to completion and
+    /// returns its trimmed stdout. Shared by callers such as
+    /// `CodexPointDetector` that invoke `codex exec` rather than the
+    /// persistent `app-server` this manager otherwise drives.
+    static func runOneShotProcess(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String],
+        errorDomain: String
+    ) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+
+                process.executableURL = executableURL
+                process.arguments = arguments
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+                process.environment = environment
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+
+                    let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+                    guard process.terminationStatus == 0 else {
+                        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr
+                        throw NSError(
+                            domain: errorDomain,
+                            code: Int(process.terminationStatus),
+                            userInfo: [NSLocalizedDescriptionKey: message]
+                        )
+                    }
+
+                    continuation.resume(returning: stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private static func pathForAgentProcess(_ path: String) -> String {

@@ -67,8 +67,6 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
         defer { lock.unlock() }
 
         do {
-            try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-
             let now = isoTimestamp()
             var usage = readUsageFile(updatedAt: now)
             let key = entryKey(name: name, bundleIdentifier: bundleIdentifier)
@@ -85,7 +83,7 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
                     usage.applications[index].sources.sort()
                 }
                 usage.updatedAt = now
-                try write(usage)
+                try OpenClickyJSONFileStore.write(usage, to: logURL, fileManager: fileManager)
                 return false
             }
 
@@ -101,7 +99,7 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
                 first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
             }
             usage.updatedAt = now
-            try write(usage)
+            try OpenClickyJSONFileStore.write(usage, to: logURL, fileManager: fileManager)
             return true
         } catch {
             print("OpenClicky application usage log write failed: \(error.localizedDescription)")
@@ -110,18 +108,8 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
     }
 
     private func readUsageFile(updatedAt: String) -> UsageFile {
-        guard let data = try? Data(contentsOf: logURL),
-              let decoded = try? JSONDecoder().decode(UsageFile.self, from: data) else {
-            return UsageFile(updatedAt: updatedAt, applications: [])
-        }
-        return decoded
-    }
-
-    private func write(_ usage: UsageFile) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(usage)
-        try data.write(to: logURL, options: [.atomic])
+        OpenClickyJSONFileStore.read(UsageFile.self, from: logURL, fileManager: fileManager)
+            ?? UsageFile(updatedAt: updatedAt, applications: [])
     }
 
     private func isoTimestamp() -> String {
@@ -143,10 +131,7 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
     }
 
     private static func defaultLogURL(fileManager: FileManager) -> URL {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("OpenClicky", isDirectory: true)
+        OpenClickyJSONFileStore.openClickyDirectory(fileManager: fileManager)
             .appendingPathComponent("app-usage.json", isDirectory: false)
     }
 }

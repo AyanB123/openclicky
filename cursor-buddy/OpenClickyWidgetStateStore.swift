@@ -28,11 +28,7 @@ final class OpenClickyWidgetStateStore {
             return appGroupURL
         }
 
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("OpenClicky", isDirectory: true)
-            .appendingPathComponent(fallbackContainerName, isDirectory: true)
+        return OpenClickyJSONFileStore.openClickyDirectory(fileManager: fileManager, subpath: [fallbackContainerName])
     }
 
     func scheduleSnapshotPublish(from companionManager: CompanionManager) {
@@ -61,12 +57,15 @@ final class OpenClickyWidgetStateStore {
     func write(_ snapshot: OpenClickyWidgetSnapshot) {
         do {
             let container = Self.containerDirectory(fileManager: fileManager)
-            try fileManager.createDirectory(at: container, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(snapshot)
-            try data.write(to: container.appendingPathComponent(Self.snapshotFileName, isDirectory: false), options: [.atomic])
+            try OpenClickyJSONFileStore.write(
+                snapshot,
+                to: container.appendingPathComponent(Self.snapshotFileName, isDirectory: false),
+                fileManager: fileManager,
+                encoder: encoder
+            )
             Self.reloadTimelines()
         } catch {
             print("OpenClicky widget snapshot write failed: \(error.localizedDescription)")
@@ -127,13 +126,14 @@ final class OpenClickyWidgetStateStore {
     nonisolated static func readSnapshot(fileManager: FileManager = .default) -> OpenClickyWidgetSnapshot {
         let fileURL = containerDirectory(fileManager: fileManager)
             .appendingPathComponent(snapshotFileName, isDirectory: false)
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return .empty
-        }
-
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode(OpenClickyWidgetSnapshot.self, from: data)) ?? .empty
+        return OpenClickyJSONFileStore.read(
+            OpenClickyWidgetSnapshot.self,
+            from: fileURL,
+            fileManager: fileManager,
+            decoder: decoder
+        ) ?? .empty
     }
 
     static func reloadTimelines() {

@@ -163,7 +163,7 @@ final class CodexPointDetector {
 
         let stdout: String
         do {
-            stdout = try await Self.runProcess(
+            stdout = try await Self.runCodexProcess(
                 executableURL: executable,
                 arguments: arguments,
                 codexHome: homeManager.codexHomeDirectory,
@@ -186,7 +186,7 @@ final class CodexPointDetector {
                 ]
             )
             arguments = argumentsWithModel(Self.codexRuntimeCompatibilityFallbackModel, from: arguments)
-            stdout = try await Self.runProcess(
+            stdout = try await Self.runCodexProcess(
                 executableURL: executable,
                 arguments: arguments,
                 codexHome: homeManager.codexHomeDirectory,
@@ -269,58 +269,27 @@ final class CodexPointDetector {
         return directory
     }
 
-    private static func runProcess(
+    private static func runCodexProcess(
         executableURL: URL,
         arguments: [String],
         codexHome: URL,
         runtimeExecutableURL: URL
     ) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                let outputPipe = Pipe()
-                let errorPipe = Pipe()
-
-                process.executableURL = executableURL
-                process.arguments = arguments
-                process.standardOutput = outputPipe
-                process.standardError = errorPipe
-
-                var environment = ProcessInfo.processInfo.environment
-                environment["CODEX_HOME"] = codexHome.path
-                environment["PATH"] = CodexRuntimeLocator.pathByPrependingBundledRuntimePaths(
-                    existingPath: environment["PATH"],
-                    runtimeExecutableURL: runtimeExecutableURL
-                )
-                if environment["OPENAI_API_KEY"]?.isEmpty != false,
-                   let configuredAPIKey = AppBundleConfiguration.openAIAPIKey(),
-                   !configuredAPIKey.isEmpty {
-                    environment["OPENAI_API_KEY"] = configuredAPIKey
-                }
-                process.environment = environment
-
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-
-                    let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-
-                    guard process.terminationStatus == 0 else {
-                        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? stdout : stderr
-                        throw NSError(
-                            domain: "CodexPointDetector",
-                            code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: message]
-                        )
-                    }
-
-                    continuation.resume(returning: stdout.trimmingCharacters(in: .whitespacesAndNewlines))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        var environment = CodexProcessManager.baseEnvironment(
+            codexHome: codexHome,
+            runtimeExecutableURL: runtimeExecutableURL
+        )
+        if environment["OPENAI_API_KEY"]?.isEmpty != false,
+           let configuredAPIKey = AppBundleConfiguration.openAIAPIKey(),
+           !configuredAPIKey.isEmpty {
+            environment["OPENAI_API_KEY"] = configuredAPIKey
         }
+        return try await CodexProcessManager.runOneShotProcess(
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: environment,
+            errorDomain: "CodexPointDetector"
+        )
     }
 
     private static func parsePoint(from text: String) -> CGPoint? {
