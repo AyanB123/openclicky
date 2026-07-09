@@ -91,6 +91,49 @@ struct OpenClickyVisualGuidanceOverlayTests {
         })
     }
 
+    @Test func bridgeHidesGmailStubToolsUnlessFlagEnabled() throws {
+        UserDefaults.standard.set(false, forKey: AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey)
+        defer { UserDefaults.standard.removeObject(forKey: AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey) }
+
+        let disabledNames = OpenClickyExternalControlBridgeServer.testMCPToolDescriptors.compactMap { $0["name"] as? String }
+        #expect(!disabledNames.contains("gmail_list_messages"))
+        #expect(!disabledNames.contains("gmail_read_message"))
+        #expect(!disabledNames.contains("gmail_draft_reply"))
+
+        UserDefaults.standard.set(true, forKey: AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey)
+        let enabledNames = OpenClickyExternalControlBridgeServer.testMCPToolDescriptors.compactMap { $0["name"] as? String }
+        #expect(enabledNames.contains("gmail_list_messages"))
+        #expect(enabledNames.contains("gmail_read_message"))
+        #expect(enabledNames.contains("gmail_draft_reply"))
+
+        let capabilities = OpenClickyExternalControlBridgeServer.testCapabilityCompatibilityMetadata
+        #expect(capabilities.contains { metadata in
+            metadata["id"] as? String == "gmail.oauth"
+                && metadata["status"] as? String == "gated"
+                && metadata["implementation"] as? String == "stub"
+        })
+    }
+
+    @Test func bridgeReturnsStructuredGatedErrorForGmailStubCalls() throws {
+        UserDefaults.standard.set(true, forKey: AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey)
+        defer { UserDefaults.standard.removeObject(forKey: AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey) }
+
+        let command = OpenClickyExternalControlBridgeServer.testCommand(from: [
+            "tool": "gmail_list_messages",
+            "arguments": ["query": "is:unread", "maxResults": 5],
+        ])
+        guard case .unavailable(let statusCode, let body) = command else {
+            Issue.record("Expected unavailable Gmail stub command")
+            return
+        }
+        #expect(statusCode == 501)
+        #expect(body["ok"] as? Bool == false)
+        #expect(body["capability"] as? String == "gmail.oauth")
+        #expect(body["status"] as? String == "gated")
+        #expect(body["implementation"] as? String == "stub")
+        #expect(body["tool"] as? String == "gmail_list_messages")
+    }
+
     @Test func bridgeParsesScribbleAndRectangleToolCalls() throws {
         let scribble = OpenClickyExternalControlBridgeServer.testCommand(from: [
             "tool": "show_scribble",

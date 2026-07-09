@@ -43,6 +43,8 @@ final class OpenClickyNotchCaptureWindowManager {
     private var mainPanelContentSizeObserver: NSObjectProtocol?
     private var accentThemeObserver: NSObjectProtocol?
     private var mainPanelContentResizeWorkItem: DispatchWorkItem?
+    private var mainPanelOpenSettlingWorkItem: DispatchWorkItem?
+    private var isMainPanelSettlingOpen = false
     private var isMainPanelUserResizing = false
     private var mainPanelUserPreferredSize: NSSize?
     private var mainPanelPreferredContentHeight: CGFloat?
@@ -58,6 +60,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private var currentAudioPowerLevel: CGFloat = 0
     private var isUsingDynamicNotchKitStatusSurface = false
     private var anchorScreenOverride: NSScreen?
+    private var keepAnchorForNextMainPanelOpen = false
     private var collapsedHoverProbeTimer: Timer?
     private var foregroundAppActivationObserver: NSObjectProtocol?
     private var foregroundAppIcon: NSImage?
@@ -66,6 +69,7 @@ final class OpenClickyNotchCaptureWindowManager {
     private var lastContextAffordanceSignature: String?
     private var lastContextAffordanceShownAt: Date?
     private var lastSelectedTextSignature: String?
+    private var externalHoverInputScreenID: CGDirectDisplayID?
     // AppKit window frames are in points, not pixels. Keep these as real
     // point sizes; do not divide by backingScaleFactor or the content clips on
     // Retina displays.
@@ -91,8 +95,11 @@ final class OpenClickyNotchCaptureWindowManager {
     private static let maximumExpandedStatusPanelWidth: CGFloat = 320
     private static let collapsedLabelFont = NSFont.systemFont(ofSize: 13, weight: .heavy)
     private static let collapsedLabelMaxWidth: CGFloat = 300
-    // leading pad + app icon (28) + stack spacing (4) + gap before trailing (8) + play/dots (14) + trailing pad
-    private static let collapsedChromeWidth: CGFloat = 10 + 28 + 4 + 8 + 14 + 16
+    // leading pad + app icon (28) + stack spacing (4) + gap before trailing (8) + play/dots (20) + trailing pad.
+    // The trailing pieces must cover the agent-dots view (20pt, wider than the
+    // play icon) and externalStatusTrailingInset (24pt); anything narrower
+    // leaves the collapsed constraint chain unsatisfiable.
+    private static let collapsedChromeWidth: CGFloat = 10 + 28 + 4 + 8 + 20 + 24
     private static let statusLozengeHeight: CGFloat = 38
     private static let collapsedPanelHeight: CGFloat = statusLozengeHeight
     private static let expandedHandleWidth: CGFloat = 96
@@ -234,8 +241,7 @@ final class OpenClickyNotchCaptureWindowManager {
             hasRunningAgentWork: hasRunningAgentWork,
             agentLiveActivity: companionManager.map(Self.agentLiveActivity(in:)) ?? persistentAgentLiveActivity,
             openMainPanel: { [weak self] in
-                self?.pinAnchorScreenToActiveInteractionIfNeeded()
-                self?.persistentShowMainPanel?()
+                self?.openPersistentMainPanelKeepingCurrentAnchor()
             },
             submitText: persistentSubmitText ?? { _ in }
         )
@@ -360,6 +366,9 @@ final class OpenClickyNotchCaptureWindowManager {
             foregroundAppIcon: foregroundAppIcon,
             foregroundAppName: foregroundAppName,
             submitText: submitText,
+            openMainPanel: { [weak self] in
+                self?.openPersistentMainPanelKeepingCurrentAnchor()
+            },
             hidesWhenClosed: hidesWhenClosed,
             onHiddenWhenClosed: hidesWhenClosed ? { [weak self, weak screen] in
                 guard let screen else { return }
@@ -374,6 +383,7 @@ final class OpenClickyNotchCaptureWindowManager {
         guard let submitText = persistentSubmitText else { return }
         anchorScreenOverride = screen
         isUsingDynamicNotchKitStatusSurface = false
+        externalHoverInputScreenID = nil
         collapseToPill(accentColor: persistentAccentColor, submitText: submitText)
     }
 
@@ -473,6 +483,11 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func hideMainPanel(restoresStatusSurface: Bool = true) {
         mainPanel?.orderOut(nil)
+        mainPanelContentResizeWorkItem?.cancel()
+        mainPanelContentResizeWorkItem = nil
+        mainPanelOpenSettlingWorkItem?.cancel()
+        mainPanelOpenSettlingWorkItem = nil
+        isMainPanelSettlingOpen = false
         removeMainPanelClickOutsideMonitors()
         removeMainPanelEscapeKeyMonitor()
         mainHostingView = nil
@@ -538,9 +553,18 @@ final class OpenClickyNotchCaptureWindowManager {
 
     private func showMainPanel(companionManager: CompanionManager, focusedAgentSessionID: UUID? = nil) {
         stopCollapsedHoverProbe()
+        externalHoverInputScreenID = nil
+        mainPanelContentResizeWorkItem?.cancel()
+        mainPanelContentResizeWorkItem = nil
+        mainPanelOpenSettlingWorkItem?.cancel()
+        isMainPanelSettlingOpen = true
         panel?.orderOut(nil)
         hideDynamicNotchKitStatusSurface()
-        pinAnchorScreenToActiveInteractionIfNeeded()
+        if keepAnchorForNextMainPanelOpen {
+            keepAnchorForNextMainPanelOpen = false
+        } else {
+            pinAnchorScreenToActiveInteractionIfNeeded()
+        }
         ensureMainPanel()
         applyMainPanelResizeBehavior()
         let notchPanelView = OpenClickyNotchPanelView(
@@ -611,6 +635,13 @@ final class OpenClickyNotchCaptureWindowManager {
         mainHostingView = hostingView
         let fittingSize = preferredMainPanelSize()
         showMainPanelWindow(activating: true, width: fittingSize.width, height: fittingSize.height)
+        let settlingWorkItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isMainPanelSettlingOpen = false
+            self.resizeVisibleMainPanelToCurrentContent(animated: false)
+        }
+        mainPanelOpenSettlingWorkItem = settlingWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: settlingWorkItem)
     }
 
     private func showPanel(activating: Bool, width: CGFloat, height: CGFloat) {
@@ -881,6 +912,8 @@ final class OpenClickyNotchCaptureWindowManager {
         }
         refreshMainPanelMinimumSize(preferredHeight: preferredHeight)
 
+        guard !isMainPanelSettlingOpen else { return }
+
         mainPanelContentResizeWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -1137,6 +1170,15 @@ final class OpenClickyNotchCaptureWindowManager {
     }
 
 
+    private func openPersistentMainPanelKeepingCurrentAnchor() {
+        // The quick-entry Open chip is invoked from the notch/status surface
+        // itself. Keep the screen that owns that surface instead of re-pinning
+        // from the previously focused app window, which can put the main
+        // OpenClicky panel on a side display.
+        keepAnchorForNextMainPanelOpen = true
+        persistentShowMainPanel?()
+    }
+
     private func preferredAnchorScreen() -> NSScreen? {
         if let override = anchorScreenOverride, NSScreen.screens.contains(where: { $0.displayID == override.displayID }) {
             return override
@@ -1206,6 +1248,7 @@ final class OpenClickyNotchCaptureWindowManager {
 
         if anchorScreenOverride?.displayID != hoveredScreen.displayID {
             anchorScreenOverride = hoveredScreen
+            externalHoverInputScreenID = nil
             let width = activeMode == .voice
                 ? Self.voicePanelWidth(for: hoveredScreen, appName: foregroundAppName)
                 : Self.collapsedPanelWidth(for: hoveredScreen, appName: foregroundAppName)
@@ -1215,12 +1258,32 @@ final class OpenClickyNotchCaptureWindowManager {
         if showDynamicNotchKitStatusForCurrentModeIfAvailable(on: hoveredScreen, opensExpanded: true) {
             panel?.orderOut(nil)
         } else if !Self.hasPhysicalNotch(on: hoveredScreen) {
-            let width = activeMode == .voice
-                ? Self.voicePanelWidth(for: hoveredScreen, appName: foregroundAppName)
-                : Self.collapsedPanelWidth(for: hoveredScreen, appName: foregroundAppName)
-            let height = activeMode == .voice ? Self.voicePanelHeight : Self.collapsedPanelHeight
-            showFallbackStatusPanel(width: width, height: height)
+            showExternalHoverInput(on: hoveredScreen)
         }
+    }
+
+    private func showExternalHoverInput(on screen: NSScreen) {
+        guard externalHoverInputScreenID != screen.displayID else { return }
+        guard let submitText = persistentSubmitText else { return }
+        externalHoverInputScreenID = screen.displayID
+        isUsingDynamicNotchKitStatusSurface = true
+        panel?.orderOut(nil)
+        dynamicNotchKitBridge.showTextInput(
+            on: screen,
+            accentColor: persistentAccentColor,
+            foregroundAppIcon: foregroundAppIcon,
+            foregroundAppName: foregroundAppName,
+            submitText: submitText,
+            openMainPanel: { [weak self] in
+                self?.openPersistentMainPanelKeepingCurrentAnchor()
+            },
+            hidesWhenClosed: true,
+            focusesInput: false,
+            onHiddenWhenClosed: { [weak self, weak screen] in
+                guard let screen else { return }
+                self?.restoreFallbackPillAfterExternalInput(on: screen)
+            }
+        )
     }
 
 
@@ -1303,8 +1366,11 @@ final class OpenClickyNotchCaptureWindowManager {
         return trimmed.isEmpty || trimmed == "Current app"
     }
 
-    // Chrome with the name label hidden: leading pad + app icon (28) + gap (8) + play/dots (14) + trailing pad
-    private static let compactCollapsedChromeWidth: CGFloat = 10 + 28 + 8 + 14 + 16
+    // Chrome with the name label hidden: leading pad + app icon (28) + gap (8)
+    // + play/dots (20, the dots view is the wider of the two) + trailing pad
+    // (externalStatusTrailingInset, 24). Undershooting this makes the collapsed
+    // constraint chain unsatisfiable and logs constraint conflicts.
+    private static let compactCollapsedChromeWidth: CGFloat = 10 + 28 + 8 + 20 + 24
 
     private static func intrinsicCollapsedWidth(forAppName name: String) -> CGFloat {
         guard !isPlaceholderAppName(name) else {
@@ -1982,6 +2048,7 @@ private final class OpenClickyNotchCaptureRootView: NSView {
         voicePhaseIconView.isHidden = !hidesStatusText
         voiceCopyStack.isHidden = hidesStatusText
         voiceTitleLabel.isHidden = hidesStatusText
+        voiceNotchSpacer.isHidden = false
         collapsedAppIconView.isHidden = true
         collapsedAppNameLabel.isHidden = true
         collapsedPlayIconView.isHidden = true
@@ -2071,11 +2138,14 @@ private final class OpenClickyNotchCaptureRootView: NSView {
     override func mouseEntered(with event: NSEvent) {
         guard mode == .collapsed || mode == .voice else { return }
         let localPoint = convert(event.locationInWindow, from: nil)
-        if let screen = window?.screen, OpenClickyNotchCaptureWindowManager.hasPhysicalNotch(on: screen) {
-            guard shellView.frame.contains(localPoint) else { return }
-        } else {
-            guard bounds.contains(localPoint) || shellView.frame.contains(localPoint) else { return }
+        guard let screen = window?.screen,
+              OpenClickyNotchCaptureWindowManager.hasPhysicalNotch(on: screen) else {
+            // External no-notch displays are handled by the manager's hover
+            // probe so hover opens the compact input surface, not the full
+            // main dialog. Clicks still use the explicit expand action below.
+            return
         }
+        guard shellView.frame.contains(localPoint) else { return }
         expand?()
     }
 
@@ -2290,6 +2360,12 @@ private final class OpenClickyNotchCaptureRootView: NSView {
         let playIconTrailing = collapsedPlayIconView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset))
         let agentDotsTrailing = collapsedAgentDotsView.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalStatusTrailingInset))
         let stackLeading = collapsedStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 10)
+        // The collapsed and voice chains are both installed permanently and
+        // hiding a view does not deactivate its constraints. Keep each chain's
+        // leading pin just below required so the currently hidden chain (or a
+        // transient stale shell width during screen moves) breaks this pin
+        // silently instead of raising a required-constraint conflict.
+        stackLeading.priority = NSLayoutConstraint.Priority(999)
 
         collapsedPlayIconTrailingConstraint = playIconTrailing
         collapsedAgentDotsTrailingConstraint = agentDotsTrailing
@@ -2388,8 +2464,13 @@ private final class OpenClickyNotchCaptureRootView: NSView {
         // on the left, live waveform/indicator on the right.
         let voiceTrailing = voiceStack.trailingAnchor.constraint(equalTo: shellView.trailingAnchor, constant: CGFloat(-OpenClickyNotchCaptureWindowManager.externalVoiceTrailingInset))
         voiceStackTrailingConstraint = voiceTrailing
+        let voiceLeading = voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 12)
+        // Same rationale as the collapsed chain's stackLeading: the voice
+        // chain stays active while hidden (its minimums exceed narrow
+        // collapsed pill widths), so its leading pin must not be required.
+        voiceLeading.priority = NSLayoutConstraint.Priority(999)
         NSLayoutConstraint.activate([
-            voiceStack.leadingAnchor.constraint(equalTo: shellView.leadingAnchor, constant: 12),
+            voiceLeading,
             voiceTrailing,
             voiceStack.centerYAnchor.constraint(equalTo: shellView.centerYAnchor)
         ])

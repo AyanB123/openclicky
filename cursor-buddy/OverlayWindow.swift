@@ -148,7 +148,7 @@ class OverlayWindow: NSWindow {
         // itself must ignore events to stay transparent.
         self.isOpaque = false
         self.backgroundColor = .clear
-        self.level = .screenSaver  // Always on top, above submenus and popups
+        OpenClickyWindowLevels.applyCursorOverlayLevel(to: self)
         self.ignoresMouseEvents = true
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.isReleasedWhenClosed = false
@@ -743,6 +743,21 @@ struct BlueCursorView: View {
                 visualGuidanceOverlay(overlay)
             }
 
+            if !circleSelectPointsOnThisScreen.isEmpty {
+                circleSelectLiveTrail(
+                    circleSelectPointsOnThisScreen,
+                    dimmed: cursorState.circleSelectSnappedRect != nil
+                )
+            }
+
+            if let snappedRect = cursorState.circleSelectSnappedRect,
+               snappedRect.intersects(screenFrame) {
+                circleSelectSnappedHighlight(
+                    snappedRect,
+                    label: cursorState.circleSelectSnapLabel
+                )
+            }
+
             if shouldShowAgentTaskBubble,
                let agentTaskBubbleText = cursorState.agentTaskBubbleText?.trimmingCharacters(in: .whitespacesAndNewlines),
                !agentTaskBubbleText.isEmpty {
@@ -960,6 +975,59 @@ struct BlueCursorView: View {
         cursorState.externalSecondaryCursors.filter { cursor in
             screenFrame.contains(cursor.screenLocation)
         }
+    }
+
+    private var circleSelectPointsOnThisScreen: [CGPoint] {
+        let points = cursorState.circleSelectLivePoints
+        guard !points.isEmpty else { return [] }
+        return points.compactMap { point in
+            guard screenFrame.insetBy(dx: -40, dy: -40).contains(point) else { return nil }
+            return convertScreenPointToSwiftUICoordinates(point)
+        }
+    }
+
+    @ViewBuilder
+    private func circleSelectLiveTrail(_ localPoints: [CGPoint], dimmed: Bool) -> some View {
+        OpenClickyFadingTrailView(
+            points: localPoints,
+            color: Color(red: 0.86, green: 0.28, blue: 0.24),
+            reduceMotion: accessibilityReduceMotion,
+            overallOpacity: dimmed ? 0.35 : 1.0
+        )
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func circleSelectSnappedHighlight(_ screenRect: CGRect, label: String?) -> some View {
+        let localRect = convertScreenRectToSwiftUICoordinates(screenRect)
+        let trailColor = Color(red: 0.86, green: 0.28, blue: 0.24)
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(trailColor.opacity(0.10))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(trailColor.opacity(0.92), lineWidth: 2.4)
+                .shadow(color: trailColor.opacity(0.55), radius: 8, x: 0, y: 0)
+
+            if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.72))
+                    )
+                    .position(x: localRect.midX, y: max(14, localRect.minY - 14))
+            }
+        }
+        .frame(width: max(1, localRect.width), height: max(1, localRect.height))
+        .position(x: localRect.midX, y: localRect.midY)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        .animation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16), value: screenRect)
     }
 
     private var visualGuidanceOverlaysOnThisScreen: [OpenClickyVisualGuidanceOverlay] {
@@ -1668,6 +1736,78 @@ private struct OpenClickyVisualGuidanceScribbleView: View {
     }
 }
 
+/// Freehand circle-select stroke: smooth path with a comet-style fading tail
+/// (oldest segments nearly invisible, head bright and slightly thicker).
+private struct OpenClickyFadingTrailView: View {
+    let points: [CGPoint]
+    let color: Color
+    let reduceMotion: Bool
+    var overallOpacity: Double = 1.0
+
+    /// How many point-steps make up each fade band. Smaller = smoother fade.
+    private let pointsPerBand = 3
+    private let minOpacity: Double = 0.08
+    private let maxOpacity: Double = 0.95
+    private let minLineWidth: CGFloat = 2.2
+    private let maxLineWidth: CGFloat = 5.0
+
+    var body: some View {
+        let displayPoints = points.count >= 2 ? points : []
+        ZStack(alignment: .topLeading) {
+            if displayPoints.count >= 2 {
+                ForEach(Array(bandRanges(for: displayPoints.count).enumerated()), id: \.offset) { _, range in
+                    let progress = bandProgress(range: range, total: displayPoints.count)
+                    let opacity = (minOpacity + (maxOpacity - minOpacity) * progress) * overallOpacity
+                    let width = minLineWidth + (maxLineWidth - minLineWidth) * CGFloat(progress)
+                    let slice = Array(displayPoints[range])
+                    OpenClickySmoothScribblePath(points: slice)
+                        .stroke(
+                            color.opacity(opacity),
+                            style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+                        )
+                        .shadow(
+                            color: color.opacity(reduceMotion ? opacity * 0.15 : opacity * 0.55),
+                            radius: reduceMotion ? 1.5 : (2.5 + 4.5 * progress),
+                            x: 0,
+                            y: 0
+                        )
+                }
+            }
+
+            if let last = displayPoints.last, overallOpacity > 0.5 {
+                Circle()
+                    .fill(color.opacity(0.95 * overallOpacity))
+                    .frame(width: 8, height: 8)
+                    .shadow(color: color.opacity(0.75 * overallOpacity), radius: 5, x: 0, y: 0)
+                    .position(last)
+            }
+        }
+        .opacity(overallOpacity)
+    }
+
+    /// Overlapping index ranges so band strokes join without gaps.
+    private func bandRanges(for count: Int) -> [Range<Int>] {
+        guard count >= 2 else { return [] }
+        var ranges: [Range<Int>] = []
+        var start = 0
+        while start < count - 1 {
+            let end = min(count, start + pointsPerBand + 1)
+            ranges.append(start..<end)
+            if end >= count { break }
+            // Overlap one point so adjacent bands share a join vertex.
+            start = end - 1
+        }
+        return ranges
+    }
+
+    /// 0 at the oldest end of the stroke, 1 at the newest (head).
+    private func bandProgress(range: Range<Int>, total: Int) -> Double {
+        guard total > 1 else { return 1 }
+        let mid = Double(range.lowerBound + range.upperBound - 1) / 2.0
+        return min(max(mid / Double(total - 1), 0), 1)
+    }
+}
+
 private struct OpenClickySmoothScribblePath: Shape {
     let points: [CGPoint]
 
@@ -1904,8 +2044,24 @@ private struct BlueCursorSpinnerView: View {
 }
 
 private final class ClickyAgentDockLayoutState: ObservableObject {
-    @Published var opensPanelsToRight = false
-    @Published var dockHeight: CGFloat = 540
+    var opensPanelsToRight = false {
+        didSet { scheduleChangeNotification() }
+    }
+    var dockHeight: CGFloat = 540 {
+        didSet { scheduleChangeNotification() }
+    }
+
+    private var hasPendingChangeNotification = false
+
+    private func scheduleChangeNotification() {
+        guard !hasPendingChangeNotification else { return }
+        hasPendingChangeNotification = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.hasPendingChangeNotification = false
+            self.objectWillChange.send()
+        }
+    }
 }
 
 private struct ClickyAgentDockStackView: View {
@@ -2827,7 +2983,7 @@ final class ClickyAgentDockWindowManager {
         )
         dockPanel.isOpaque = false
         dockPanel.backgroundColor = .clear
-        dockPanel.level = .screenSaver
+        OpenClickyWindowLevels.applyCursorOverlayLevel(to: dockPanel)
         dockPanel.hasShadow = false
         dockPanel.hidesOnDeactivate = false
         dockPanel.isReleasedWhenClosed = false
@@ -3017,10 +3173,10 @@ class OverlayWindowManager {
 
     // MARK: - Click-through overlay interactivity
     //
-    // The overlay windows are full-screen and sit at `.screenSaver` level, so
-    // they cover everything. Keep them click-through (`ignoresMouseEvents =
-    // true`) so temporary visual guidance never swallows clicks in the app
-    // behind it.
+    // The overlay windows are full-screen and sit above OpenClicky's main
+    // dialog in the shared window-level stack. Keep them click-through
+    // (`ignoresMouseEvents = true`) so temporary visual guidance never
+    // swallows clicks in the app behind it.
     private func startInteractivityTracking() {
         stopInteractivityTracking()
         updateOverlayInteractivity()

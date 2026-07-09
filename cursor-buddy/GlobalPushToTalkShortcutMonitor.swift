@@ -23,9 +23,11 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     private var globalEventTapRunLoopSource: CFRunLoopSource?
     private var isShiftCurrentlyPressed = false
     private var isShiftTapStandaloneCandidate = false
+    private var currentShiftTapPressDate: Date?
     private var lastStandaloneShiftTapDate: Date?
     private var isEscapeCurrentlyPressed = false
-    private let maximumShiftDoubleTapInterval: TimeInterval = 0.42
+    private let maximumShiftDoubleTapInterval: TimeInterval = 0.24
+    private let maximumStandaloneShiftTapHoldDuration: TimeInterval = 0.18
     /// Mutated exclusively from the CGEvent tap callback, which runs on
     /// `CFRunLoopGetMain()` and therefore always executes on the main thread.
     /// Published so the overlay can hide immediately on key release without
@@ -100,6 +102,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func stop() {
         isShortcutCurrentlyPressed = false
+        resetStandaloneShiftTapState(clearPreviousTap: true)
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -200,8 +203,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             // Shift was used as a real typing modifier, not as the standalone
             // double-tap shortcut. Without this guard, typing two capital
             // letters or symbols quickly can open the OpenClicky panel.
-            isShiftTapStandaloneCandidate = false
-            lastStandaloneShiftTapDate = nil
+            resetStandaloneShiftTapState(clearPreviousTap: true)
             return
         }
 
@@ -217,6 +219,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         if isShiftOnly && !isShiftCurrentlyPressed {
             isShiftCurrentlyPressed = true
             isShiftTapStandaloneCandidate = true
+            currentShiftTapPressDate = Date()
             return
         }
 
@@ -224,11 +227,19 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             defer {
                 isShiftCurrentlyPressed = false
                 isShiftTapStandaloneCandidate = false
+                currentShiftTapPressDate = nil
             }
 
             guard isShiftTapStandaloneCandidate else { return }
 
             let now = Date()
+            guard let currentShiftTapPressDate,
+                  now.timeIntervalSince(currentShiftTapPressDate) <= maximumStandaloneShiftTapHoldDuration
+            else {
+                lastStandaloneShiftTapDate = nil
+                return
+            }
+
             if let lastStandaloneShiftTapDate,
                now.timeIntervalSince(lastStandaloneShiftTapDate) <= maximumShiftDoubleTapInterval {
                 self.lastStandaloneShiftTapDate = nil
@@ -240,10 +251,18 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         if isShiftCurrentlyPressed && !isShiftOnly {
-            isShiftTapStandaloneCandidate = false
-            lastStandaloneShiftTapDate = nil
+            resetStandaloneShiftTapState(clearPreviousTap: true)
         }
 
         isShiftCurrentlyPressed = isShiftDown
+    }
+
+    private func resetStandaloneShiftTapState(clearPreviousTap: Bool) {
+        isShiftCurrentlyPressed = false
+        isShiftTapStandaloneCandidate = false
+        currentShiftTapPressDate = nil
+        if clearPreviousTap {
+            lastStandaloneShiftTapDate = nil
+        }
     }
 }

@@ -58,19 +58,20 @@ final class OpenClickyManagedWindowController<Content: View> {
     /// Pass `recenter: false` for windows that should keep their last
     /// position across repeat shows instead of snapping back to center.
     func show(
-        targetScreen: NSScreen? = NSScreen.openClickyActiveInteractionScreen(),
+        targetScreen: NSScreen? = nil,
         recenter: Bool = true,
         makeContent: () -> Content
     ) {
+        let resolvedTargetScreen = targetScreen ?? NSScreen.openClickyActiveInteractionScreen()
         if window == nil {
-            createWindow(content: makeContent(), targetScreen: targetScreen)
+            createWindow(content: makeContent(), targetScreen: resolvedTargetScreen)
         } else {
             hostingView?.rootView = makeContent()
         }
 
         guard let window else { return }
         NSApp.activate(ignoringOtherApps: true)
-        bringToFront(window, targetScreen: targetScreen, recenter: recenter)
+        bringToFront(window, targetScreen: resolvedTargetScreen, recenter: recenter)
     }
 
     func close() {

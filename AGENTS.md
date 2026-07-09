@@ -60,7 +60,7 @@ Two independent layers — keep them straight:
    - `.openAI` -> `OpenAIAPI`
    - `.codex` -> `CodexVoiceSession` / `CodexPointDetector` (selecting e.g. `gpt-5.5` means Codex handles it)
    - `.deepgram` -> Deepgram Voice Agent
-2. **Within-provider ordering (money rule).** For the Claude branch, the Claude Agent SDK is the PRIMARY path because it uses the local Claude Code sign-in already paid for. Direct `ClaudeAPI` HTTP is FALLBACK ONLY (SDK nil or throws). Never short-circuit to direct REST for latency or capability reasons — direct REST bills per token. The OpenAI/Codex branch follows the same shape: Codex app server first, OpenAI key fallback.
+2. **Within-provider ordering (money rule).** For the Claude branch, the Claude Agent SDK is the PRIMARY path because it uses the local Claude Code sign-in already paid for. Direct `ClaudeAPI` HTTP is FALLBACK ONLY (SDK nil or throws). Never short-circuit to direct REST for latency or capability reasons — direct REST bills per token. The OpenAI/Codex branch follows the same shape: Codex app server first, OpenAI key fallback. EXEMPTION: realtime speech models (`gpt-realtime-2.1-mini` default, `gpt-realtime-2.1`, `gpt-realtime-1.5`; legacy `gpt-realtime-2` aliases to mini) use the direct Realtime API path only.
 
 Do not delete `ClaudeAPI.swift` or the HTTP path — it is the deliberate fallback. Before editing any Claude/OpenAI call site, confirm the order is SDK/app-server -> key fallback.
 

@@ -271,6 +271,81 @@ enum CompanionScreenCaptureUtility {
         )]
     }
 
+    /// Crops an existing full-display capture to a screen-space region
+    /// (AppKit coordinates, bottom-left origin). Used after circle-while-talking.
+    static func cropCapture(
+        _ capture: CompanionScreenCapture,
+        toScreenRect screenRect: CGRect,
+        labelPrefix: String = "circled region"
+    ) -> CompanionScreenCapture? {
+        guard capture.displayFrame.width > 1, capture.displayFrame.height > 1 else { return nil }
+        let clipped = screenRect.intersection(capture.displayFrame)
+        guard clipped.width >= 8, clipped.height >= 8 else { return nil }
+
+        guard let sourceImage = NSImage(data: capture.imageData),
+              let cgImage = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+
+        let imageWidth = CGFloat(cgImage.width)
+        let imageHeight = CGFloat(cgImage.height)
+        let relativeMinX = (clipped.minX - capture.displayFrame.minX) / capture.displayFrame.width
+        let relativeMaxX = (clipped.maxX - capture.displayFrame.minX) / capture.displayFrame.width
+        // AppKit y increases upward; CGImage y increases downward.
+        let relativeMinYFromBottom = (clipped.minY - capture.displayFrame.minY) / capture.displayFrame.height
+        let relativeMaxYFromBottom = (clipped.maxY - capture.displayFrame.minY) / capture.displayFrame.height
+
+        let pixelMinX = max(0, floor(relativeMinX * imageWidth))
+        let pixelMaxX = min(imageWidth, ceil(relativeMaxX * imageWidth))
+        let pixelMinYFromTop = max(0, floor((1 - relativeMaxYFromBottom) * imageHeight))
+        let pixelMaxYFromTop = min(imageHeight, ceil((1 - relativeMinYFromBottom) * imageHeight))
+        let pixelWidth = max(1, pixelMaxX - pixelMinX)
+        let pixelHeight = max(1, pixelMaxYFromTop - pixelMinYFromTop)
+
+        let cropRect = CGRect(x: pixelMinX, y: pixelMinYFromTop, width: pixelWidth, height: pixelHeight)
+        guard let cropped = cgImage.cropping(to: cropRect) else { return nil }
+        guard let jpegData = NSBitmapImageRep(cgImage: cropped)
+            .representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
+            return nil
+        }
+
+        let label = "\(labelPrefix) (\(Int(clipped.width))×\(Int(clipped.height)) pt on \(capture.label))"
+        return CompanionScreenCapture(
+            imageData: jpegData,
+            label: label,
+            appName: capture.appName,
+            bundleIdentifier: capture.bundleIdentifier,
+            isCursorScreen: capture.isCursorScreen,
+            displayWidthInPoints: Int(clipped.width.rounded()),
+            displayHeightInPoints: Int(clipped.height.rounded()),
+            displayNativeWidthInPixels: nil,
+            displayNativeHeightInPixels: nil,
+            displayFrame: clipped,
+            screenshotWidthInPixels: Int(pixelWidth.rounded()),
+            screenshotHeightInPixels: Int(pixelHeight.rounded())
+        )
+    }
+
+    /// Captures the cursor screen and crops to a screen-space region.
+    static func captureRegionAsJPEG(
+        _ screenRect: CGRect,
+        labelPrefix: String = "circled region"
+    ) async throws -> CompanionScreenCapture {
+        let captures = try await captureCursorScreenAsJPEG()
+        guard let primary = captures.first(where: \.isCursorScreen) ?? captures.first else {
+            throw NSError(
+                domain: "CompanionScreenCapture",
+                code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "No screen available for region capture"]
+            )
+        }
+        if let cropped = cropCapture(primary, toScreenRect: screenRect, labelPrefix: labelPrefix) {
+            return cropped
+        }
+        // Fall back to the full cursor screen if crop math fails.
+        return primary
+    }
+
     private static func recordEncounteredApplications(
         from windows: [SCWindow],
         excludingBundleIdentifier ownBundleIdentifier: String?,

@@ -683,7 +683,7 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         - Runtime map file: \(homeManager.runtimeMapFile.path)
         - Codex home directory: \(homeManager.codexHomeDirectory.path)
         - Codex config file: \(homeManager.codexHomeDirectory.appendingPathComponent("config.toml", isDirectory: false).path)
-        - Soul/persona file: \(homeManager.soulFile.path)
+        - Soul/persona file: \(homeManager.soulFile.path) (for explicit persona/storage tasks only; routine persona context is already in AGENTS.md)
         - Persistent memory file: \(homeManager.persistentMemoryFile.path)
         - Memory articles directory: \(homeManager.memoriesDirectory.path)
         - Bundled skills directory: \(homeManager.codexHomeDirectory.appendingPathComponent(homeManager.bundledSkillsDirectoryName, isDirectory: true).path)
@@ -694,8 +694,8 @@ final class CodexAgentSession: ObservableObject, Identifiable, BrowserWorkspaceA
         - Log review JSONL file: \(OpenClickyMessageLogStore.shared.reviewCommentsFile.path)
         - Log review comments file: \(OpenClickyMessageLogStore.shared.agentReviewCommentsFile.path)
         - Widget snapshot file: \(OpenClickyWidgetStateStore.snapshotURL.path)
-        - Before working, read the soul/persona file, runtime map, and persistent memory file if they exist.
-        - Treat SOUL.md as OpenClicky's operating identity. Follow it for tone, autonomy, memory, learning, and agent-routing behavior.
+        - Before working, read the runtime map and persistent memory file if they exist.
+        - Treat the OpenClicky persona already inlined in AGENTS.md as OpenClicky's operating identity. Do not open SOUL.md at task start unless the user explicitly asks to view or edit persona/storage files.
         - If the user asks where OpenClicky stores logs, memory, skills, widgets, config, sessions, or review comments, answer from the runtime map and include exact paths.
         - If the user asks to view or edit OpenClicky's logs, memory, learned skills, runtime map, widget state, or review comments, use the local filesystem paths above directly instead of claiming you cannot access them.
         - If the user asks to look at skills and optimize them, inspect bundled and learned skills, archive previous versions under \(homeManager.archivesDirectory.path), then update or create the improved skill files needed.

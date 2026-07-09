@@ -35,6 +35,21 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
     private var playerNode: AVAudioPlayerNode?
     private var streamingTask: Task<Void, Error>?
     private var activeBidirectionalVoiceTurn: BidirectionalVoiceTurn?
+
+    nonisolated static func realtimeReasoningConfiguration(for modelID: String) -> [String: String]? {
+        let normalizedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedModel.hasPrefix("gpt-realtime-2") else { return nil }
+        // OpenAI's Realtime 2 guidance recommends starting production voice
+        // agents at low reasoning effort, then increasing only for workflows
+        // where deeper planning beats latency.
+        return ["effort": "low"]
+    }
+
+    private nonisolated static func addRealtimeReasoningConfiguration(to session: inout [String: Any], modelID: String) {
+        guard let reasoning = realtimeReasoningConfiguration(for: modelID) else { return }
+        session["reasoning"] = reasoning
+    }
+
     private static let realtimeRoutingTools: [[String: Any]] = [
         [
             "type": "function",
@@ -293,16 +308,14 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                 "You are in OpenClicky's bidirectional Realtime voice mode. Listen to the user's live microphone audio directly and reply out loud as OpenClicky in one concise spoken answer. Do not claim you will start background work, take care of a task, or start an agent unless the app already routed the turn before you receive it. You cannot see the user's screen inside this live Realtime turn; for any request about what is on screen, the current window, visible UI, screenshots, pointing, highlighting, drawing, or screen calibration, call openclicky_use_screen_context with the exact transcript instead of answering from audio alone. Do not mention transcription, Whisper, markdown, or [POINT:] tags."
             ].compactMap { $0 }.joined(separator: "\n\n")
 
-            try await sendJSON([
-                "type": "session.update",
-                "session": [
-                    "type": "realtime",
-                    "model": model,
-                    "instructions": instructions,
-                    "output_modalities": ["audio"],
-                    "tools": Self.realtimeRoutingTools,
-                    "tool_choice": "auto",
-                    "audio": [
+            var sessionConfiguration: [String: Any] = [
+                "type": "realtime",
+                "model": model,
+                "instructions": instructions,
+                "output_modalities": ["audio"],
+                "tools": Self.realtimeRoutingTools,
+                "tool_choice": "auto",
+                "audio": [
                         "input": [
                             "format": [
                                 "type": "audio/pcm",
@@ -322,6 +335,10 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                         ]
                     ]
                 ]
+            Self.addRealtimeReasoningConfiguration(to: &sessionConfiguration, modelID: model)
+            try await sendJSON([
+                "type": "session.update",
+                "session": sessionConfiguration
             ], to: webSocket)
 
             let turn = try BidirectionalVoiceTurn(
@@ -480,13 +497,11 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         }
 
         try await waitForRealtimeConnection(on: webSocket)
-        try await sendJSON([
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": model,
-                "output_modalities": ["audio"],
-                "audio": [
+        var sessionConfiguration: [String: Any] = [
+            "type": "realtime",
+            "model": model,
+            "output_modalities": ["audio"],
+            "audio": [
                     "output": [
                         "voice": voiceID,
                         "format": [
@@ -496,6 +511,10 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                     ]
                 ]
             ]
+        Self.addRealtimeReasoningConfiguration(to: &sessionConfiguration, modelID: model)
+        try await sendJSON([
+            "type": "session.update",
+            "session": sessionConfiguration
         ], to: webSocket)
 
         let historyText = conversationHistory.suffix(8).map { entry in
@@ -630,13 +649,15 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         )
 
         try await waitForRealtimeConnection(on: webSocket)
+        var sessionConfiguration: [String: Any] = [
+            "type": "realtime",
+            "model": requestModel,
+            "output_modalities": ["text"]
+        ]
+        Self.addRealtimeReasoningConfiguration(to: &sessionConfiguration, modelID: requestModel)
         try await sendJSON([
             "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": requestModel,
-                "output_modalities": ["text"]
-            ]
+            "session": sessionConfiguration
         ], to: webSocket)
 
         var content: [[String: Any]] = []
@@ -760,13 +781,11 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
 
         try await waitForRealtimeConnection(on: webSocket)
 
-        try await sendJSON([
-            "type": "session.update",
-            "session": [
-                "type": "realtime",
-                "model": model,
-                "output_modalities": ["audio"],
-                "audio": [
+        var sessionConfiguration: [String: Any] = [
+            "type": "realtime",
+            "model": model,
+            "output_modalities": ["audio"],
+            "audio": [
                     "output": [
                         "voice": voiceID,
                         "format": [
@@ -776,6 +795,10 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
                     ]
                 ]
             ]
+        Self.addRealtimeReasoningConfiguration(to: &sessionConfiguration, modelID: model)
+        try await sendJSON([
+            "type": "session.update",
+            "session": sessionConfiguration
         ], to: webSocket)
 
         try await sendJSON([
@@ -1246,12 +1269,23 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
 
 
     private nonisolated static func firstTranscriptString(in value: Any) -> String? {
-        if let string = value as? String { return string }
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return isLikelyRealtimeMetadataString(trimmed) ? nil : trimmed
+        }
         if let dictionary = value as? [String: Any] {
-            for key in ["transcript", "text"] {
-                if let string = dictionary[key] as? String, !string.isEmpty { return string }
+            for key in ["transcript", "text", "content"] {
+                if let string = dictionary[key] as? String {
+                    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty, !isLikelyRealtimeMetadataString(trimmed) { return trimmed }
+                }
             }
-            for nested in dictionary.values {
+
+            let metadataKeys: Set<String> = [
+                "event_id", "id", "item_id", "call_id", "previous_item_id", "response_id",
+                "type", "object", "status", "role", "name", "model", "modalities"
+            ]
+            for (key, nested) in dictionary where !metadataKeys.contains(key) {
                 if let string = firstTranscriptString(in: nested), !string.isEmpty { return string }
             }
         }
@@ -1262,6 +1296,23 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         }
         return nil
     }
+
+    private nonisolated static func isLikelyRealtimeMetadataString(_ value: String) -> Bool {
+        guard !value.isEmpty else { return true }
+        if value.range(of: #"^(?:event|resp|msg|item|call)_[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if value.range(of: #"^(?:response|conversation|input_audio_buffer|session)\."#, options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
+    #if DEBUG
+    nonisolated static func testFirstTranscriptString(in value: Any) -> String? {
+        firstTranscriptString(in: value)
+    }
+    #endif
 
     func stopPlayback() {
         stopPlaybackInternal()
@@ -1353,5 +1404,3 @@ final class OpenAIRealtimeSpeechClient: OpenClickyTTSClient {
         return samples
     }
 }
-
-

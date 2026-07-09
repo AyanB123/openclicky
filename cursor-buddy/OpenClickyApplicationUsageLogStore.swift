@@ -4,6 +4,12 @@ import Foundation
 nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable {
     static let shared = OpenClickyApplicationUsageLogStore()
 
+    struct RecentApplication: Equatable {
+        var name: String
+        var bundleIdentifier: String?
+        var lastSeenAt: String
+    }
+
     private struct UsageFile: Codable {
         var updatedAt: String
         var applications: [ApplicationEntry]
@@ -60,6 +66,41 @@ nonisolated final class OpenClickyApplicationUsageLogStore: @unchecked Sendable 
                 "logPath": logURL.path
             ]
         )
+    }
+
+    func recentApplications(limit: Int = 4, excluding ownBundleIdentifier: String? = Bundle.main.bundleIdentifier) -> [RecentApplication] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard limit > 0 else { return [] }
+        let usage = readUsageFile(updatedAt: isoTimestamp())
+        var seen: Set<String> = []
+        var applications: [RecentApplication] = []
+
+        for entry in usage.applications.sorted(by: { $0.lastSeenAt > $1.lastSeenAt }) {
+            let name = entry.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let bundleIdentifier = entry.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            if let ownBundleIdentifier,
+               bundleIdentifier == ownBundleIdentifier {
+                continue
+            }
+            if name.localizedCaseInsensitiveContains("OpenClicky") {
+                continue
+            }
+
+            let key = entryKey(name: name, bundleIdentifier: bundleIdentifier)
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            applications.append(RecentApplication(
+                name: name,
+                bundleIdentifier: bundleIdentifier?.isEmpty == false ? bundleIdentifier : nil,
+                lastSeenAt: entry.lastSeenAt
+            ))
+            if applications.count == limit { break }
+        }
+
+        return applications
     }
 
     private func updateUsageFile(name: String, bundleIdentifier: String?, source: String) -> Bool {

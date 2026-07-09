@@ -328,8 +328,13 @@ struct HandoffRegionSelection: Equatable {
     var endPositionInScreen: CGPoint
     var screenFrame: CGRect
     var comment: String
+    /// Freehand trail in AppKit screen coordinates when the region was circled while talking.
+    var pathPoints: [CGPoint] = []
+    /// Best-effort ambient context (app, window title, URL/path summary).
+    var ambientSummary: String = ""
 
     var captureRect: CGRect {
+        // start/end are authoritative (may include padding from circle-select seal).
         let minX = min(startPositionInScreen.x, endPositionInScreen.x)
         let minY = min(startPositionInScreen.y, endPositionInScreen.y)
         let maxX = max(startPositionInScreen.x, endPositionInScreen.x)
@@ -347,6 +352,8 @@ struct HandoffRegionSelection: Equatable {
             height: rect.height / screenFrame.height
         )
     }
+
+    var hasFreehandPath: Bool { pathPoints.count >= 2 }
 }
 
 struct HandoffQueuedRegionScreenshot: Identifiable, Equatable {

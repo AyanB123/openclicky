@@ -202,7 +202,7 @@ struct ConversationSidebarView: View {
       }
       .padding(.vertical, 4)
     }
-    .onChange(of: search) { _ in
+    .onChange(of: search) { _, _ in
       archivedVisibleLimit = 24
     }
   }

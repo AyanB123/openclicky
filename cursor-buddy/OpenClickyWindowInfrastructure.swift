@@ -25,6 +25,11 @@ enum OpenClickyWindowLevels {
     /// when the main window opens, while still remaining below active drags.
     static let statusSurface = NSWindow.Level(rawValue: Int(interactiveCeiling) - 1)
 
+    /// The passive cursor and visual-guidance overlay should remain visible
+    /// over OpenClicky's main dialog, but it is click-through and must stay
+    /// below active macOS drag images/drop previews.
+    static let cursorOverlay = statusSurface
+
     /// The main OpenClicky panel stays below the compact notch surface but
     /// above normal app/menu/status surfaces.
     static let mainPanel = NSWindow.Level(rawValue: Int(interactiveCeiling) - 3)
@@ -39,6 +44,10 @@ enum OpenClickyWindowLevels {
 
     static func applyPanelDialogLevel(to window: NSWindow?) {
         window?.level = panelDialog
+    }
+
+    static func applyCursorOverlayLevel(to window: NSWindow?) {
+        window?.level = cursorOverlay
     }
 }
 

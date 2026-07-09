@@ -26,6 +26,9 @@ enum OpenClickyExternalControlCommand {
     case clear
     case speak(text: String, interrupt: Bool)
     case notify(title: String, body: String, threadID: String?, sound: Bool)
+    /// Structured non-success result for gated/stub tools (e.g. Gmail OAuth).
+    /// Prefer this over returning `nil` so agents get an explicit capability error.
+    case unavailable(statusCode: Int, body: [String: Any])
 }
 
 struct OpenClickyExternalControlResponse {
@@ -42,6 +45,27 @@ struct OpenClickyExternalControlResponse {
 
     static func error(_ statusCode: Int, _ message: String) -> OpenClickyExternalControlResponse {
         OpenClickyExternalControlResponse(statusCode: statusCode, body: ["ok": false, "error": message])
+    }
+
+    static func unavailable(
+        statusCode: Int = 501,
+        tool: String,
+        capability: String,
+        message: String,
+        extra: [String: Any] = [:]
+    ) -> OpenClickyExternalControlResponse {
+        var body: [String: Any] = [
+            "ok": false,
+            "error": message,
+            "tool": tool,
+            "capability": capability,
+            "status": "gated",
+            "implementation": "stub"
+        ]
+        for (key, value) in extra {
+            body[key] = value
+        }
+        return OpenClickyExternalControlResponse(statusCode: statusCode, body: body)
     }
 
 }
@@ -630,6 +654,12 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             descriptors.append(contentsOf: visualDrawingMCPToolDescriptors)
         }
 
+        // Gmail tools stay off the advertised surface until the local flag is
+        // enabled. Even then they are stubs that return structured gated errors.
+        if AppBundleConfiguration.gmailOAuthToolsEnabled() {
+            descriptors.append(contentsOf: gmailMCPToolDescriptors)
+        }
+
         descriptors.append(contentsOf: [
             [
                 "name": "screenshot",
@@ -764,8 +794,62 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
         ]
     }
 
+    private static var gmailMCPToolDescriptors: [[String: Any]] {
+        let compatibility: [String: Any] = [
+            "status": "gated",
+            "capability": "gmail.oauth",
+            "requiresOAuth": true,
+            "policy": "read-only-until-confirmed-send",
+            "implementation": "stub"
+        ]
+
+        return [
+            [
+                "name": "gmail_list_messages",
+                "description": "Gated Gmail OAuth stub. Advertised only when the local Gmail OAuth tools flag is enabled. Calls return a structured not-implemented error until the gog-backed backend is wired.",
+                "compatibility": compatibility,
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "query": ["type": "string"],
+                        "maxResults": ["type": "number"],
+                        "account": ["type": "string"]
+                    ]
+                ]
+            ],
+            [
+                "name": "gmail_read_message",
+                "description": "Gated Gmail OAuth stub. Advertised only when the local Gmail OAuth tools flag is enabled. Calls return a structured not-implemented error until the gog-backed backend is wired.",
+                "compatibility": compatibility,
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "messageId": ["type": "string"],
+                        "account": ["type": "string"]
+                    ],
+                    "required": ["messageId"]
+                ]
+            ],
+            [
+                "name": "gmail_draft_reply",
+                "description": "Gated Gmail OAuth stub. Prepare a reply draft for user review once the backend exists. Sending remains blocked and is not implemented on this path.",
+                "compatibility": compatibility,
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "messageId": ["type": "string"],
+                        "body": ["type": "string"],
+                        "account": ["type": "string"]
+                    ],
+                    "required": ["messageId", "body"]
+                ]
+            ]
+        ]
+    }
+
     private static var capabilityCompatibilityMetadata: [[String: Any]] {
         let drawingStatus = AppBundleConfiguration.visualDrawingOverlayToolsEnabled() ? "supported" : "gated"
+        let gmailToolsEnabled = AppBundleConfiguration.gmailOAuthToolsEnabled()
         return [
             [
                 "id": "visual_guidance.scribble",
@@ -782,6 +866,22 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
                 "tools": ["show_highlight", "show_rectangle"],
                 "featureFlag": AppBundleConfiguration.userVisualDrawingOverlayToolsEnabledDefaultsKey,
                 "policy": "visible-current-screen-content-only"
+            ],
+            [
+                "id": "gmail.oauth",
+                "title": "Gmail OAuth",
+                // Always gated until a real OAuth/gog backend exists. The flag only
+                // controls whether the stub tools are advertised for early integration.
+                "status": "gated",
+                "tools": gmailToolsEnabled
+                    ? ["gmail_list_messages", "gmail_read_message", "gmail_draft_reply"]
+                    : [],
+                "featureFlag": AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey,
+                "featureFlagEnabled": gmailToolsEnabled,
+                "requiresOAuth": true,
+                "risk": "external-account-data",
+                "policy": "read-only-until-confirmed-send",
+                "implementation": "stub"
             ]
         ]
     }
@@ -810,9 +910,40 @@ final class OpenClickyExternalControlBridgeServer: @unchecked Sendable {
             return speakCommand(from: arguments)
         case "notify", "notification", "openclicky_notify":
             return notifyCommand(from: arguments)
+        case "gmail_list_messages", "gmail_read_message", "gmail_draft_reply":
+            return gmailUnavailableCommand(tool: tool ?? "gmail", arguments: arguments)
         default:
             return nil
         }
+    }
+
+    private static func gmailUnavailableCommand(tool: String, arguments: [String: Any]) -> OpenClickyExternalControlCommand {
+        let featureEnabled = AppBundleConfiguration.gmailOAuthToolsEnabled()
+        let message: String
+        if featureEnabled {
+            message = "Gmail OAuth bridge tools are advertised as stubs only. No local OAuth/gog mailbox backend is wired yet. Prefer the bundled gog / google-workspace-gogcli skill path for reads, and do not treat this call as a send."
+        } else {
+            message = "Gmail OAuth tools are disabled. Enable openClickyGmailOAuthToolsEnabled or OPENCLICKY_GMAIL_OAUTH_TOOLS_ENABLED to advertise the stub surface. Prefer the bundled gog / google-workspace-gogcli skill path."
+        }
+
+        var body: [String: Any] = [
+            "ok": false,
+            "error": message,
+            "tool": tool,
+            "capability": "gmail.oauth",
+            "status": "gated",
+            "implementation": "stub",
+            "featureFlag": AppBundleConfiguration.userGmailOAuthToolsEnabledDefaultsKey,
+            "featureFlagEnabled": featureEnabled,
+            "policy": "read-only-until-confirmed-send"
+        ]
+        if let messageId = string(arguments["messageId"]) {
+            body["messageId"] = messageId
+        }
+        if let query = string(arguments["query"]) {
+            body["query"] = query
+        }
+        return .unavailable(statusCode: 501, body: body)
     }
 
     private static func mcpJSONRPCResponse(from json: [String: Any]) -> MCPJSONRPCBridgeResponse? {

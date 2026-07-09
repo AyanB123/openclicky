@@ -320,6 +320,16 @@ struct CodexAgentModeTests {
         #expect(instruction.lowercased() == "i think we need to fix openclicky so coding tasks always go to agent mode")
     }
 
+    @MainActor @Test func implicitAgentRoutingTreatsOpenClickyOptimizationChecksAsAgentTasks() throws {
+        let maybeInstruction = CompanionManager.implicitAgentTaskInstruction(
+            from: "check openclicky code is optimised for gpt realtime two point one mini"
+        )
+        #expect(maybeInstruction != nil)
+        guard let instruction = maybeInstruction else { return }
+
+        #expect(instruction.lowercased() == "check openclicky code is optimised for gpt realtime two point one mini")
+    }
+
     @MainActor @Test func implicitAgentRoutingKeepsConceptualCodingQuestionsInVoiceRoute() throws {
         let maybeInstruction = CompanionManager.implicitAgentTaskInstruction(
             from: "How would I fix this Swift error conceptually?"
@@ -534,5 +544,22 @@ struct CodexAgentModeTests {
     @MainActor @Test func preResponseFillerUsesNaturalThinkingBeat() throws {
         #expect(StreamingTTSSession.preResponseFillerDelayMilliseconds >= 300)
         #expect(StreamingTTSSession.preResponseFillerDelayMilliseconds <= 500)
+    }
+
+    @MainActor @Test func quickScreenPromptEnforcesScreenThenSuggestionsThenFollowUp() throws {
+        let prompt = OpenClickyQuickActionPrompts.screen
+
+        #expect(prompt.contains("what is on the screen"))
+        #expect(prompt.contains("give a few useful suggestions"))
+        #expect(prompt.contains("Would you like me to do anything else?"))
+    }
+
+    @MainActor @Test func quickSkillsPromptEnforcesSuggestionFlowAndFollowUp() throws {
+        let prompt = OpenClickyQuickActionPrompts.skills
+
+        #expect(prompt.contains("suggest relevant skills or connections"))
+        #expect(prompt.contains("Explain why they fit"))
+        #expect(prompt.contains("Would you like me to find some skills?"))
+        #expect(prompt.contains("Would you like me to do anything else?"))
     }
 }

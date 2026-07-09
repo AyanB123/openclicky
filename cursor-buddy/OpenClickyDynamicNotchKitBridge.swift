@@ -131,6 +131,10 @@ private final class OpenClickyDynamicNotchKitModel: ObservableObject {
     @Published var inputFocusRequest = 0
     var submitText: (String) -> Void = { _ in }
 
+    var hasDraftContent: Bool {
+        !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftAttachments.isEmpty
+    }
+
     /// Collapse the notch only when the pointer has left it and the input is
     /// not being typed into — keeps the notch open while the user types.
     func closeNotchIfIdle() {
@@ -144,6 +148,34 @@ private final class OpenClickyDynamicNotchKitModel: ObservableObject {
         contextSuggestion = nil
         submitText(trimmed)
         closeNotch()
+    }
+
+    func skillQuickPrompt() -> String {
+        let activeName = foregroundAppName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var appNames: [String] = []
+        var seen: Set<String> = []
+
+        func append(_ name: String) {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != "Current app" else { return }
+            let key = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            appNames.append(trimmed)
+        }
+
+        append(activeName)
+        for app in OpenClickyApplicationUsageLogStore.shared.recentApplications(limit: 4) {
+            append(app.name)
+        }
+
+        guard !appNames.isEmpty else { return OpenClickyQuickActionPrompts.skills }
+        return """
+        \(OpenClickyQuickActionPrompts.skills)
+
+        OpenClicky recent app context: \(appNames.joined(separator: ", ")).
+        Use the current screen first, then these last few apps as workflow context. Do not overfit to only the immediately previous app.
+        """
     }
     
 
@@ -405,21 +437,27 @@ final class OpenClickyDynamicNotchKitBridge {
         notch.transitionConfiguration.skipIntermediateHides = true
         model.openNotch = { [weak self] in
             guard let self else { return }
-            self.model.isExpanded = true
-            guard let screen = self.currentTargetScreen() else { return }
-            Task { await self.expandNotch(on: screen) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.model.isExpanded = true
+                guard let screen = self.currentTargetScreen() else { return }
+                Task { await self.expandNotch(on: screen) }
+            }
         }
         model.closeNotch = { [weak self] in
             guard let self else { return }
-            self.model.isExpanded = false
-            if self.model.hidesWhenClosed {
-                Task {
-                    await self.hideNotchIfNeeded()
-                    self.model.onHiddenWhenClosed?()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.model.isExpanded = false
+                if self.model.hidesWhenClosed, !self.model.isDoingSomething {
+                    Task {
+                        await self.hideNotchIfNeeded()
+                        self.model.onHiddenWhenClosed?()
+                    }
+                } else {
+                    guard let screen = self.currentTargetScreen() else { return }
+                    Task { await self.compactNotch(on: screen) }
                 }
-            } else {
-                guard let screen = self.currentTargetScreen() else { return }
-                Task { await self.compactNotch(on: screen) }
             }
         }
         return notch
@@ -487,7 +525,8 @@ final class OpenClickyDynamicNotchKitBridge {
         model.openMainPanel = openMainPanel
         model.submitText = submitText
         Task {
-            if opensExpanded {
+            let shouldShowExpanded = opensExpanded || model.isInputFocused || model.hasDraftContent
+            if shouldShowExpanded {
                 model.isExpanded = true
                 await expandNotch(on: screen)
             } else {
@@ -523,7 +562,7 @@ final class OpenClickyDynamicNotchKitBridge {
             // Voice state can update many times while OpenClicky is thinking or
             // speaking. Preserve a user-expanded notch across those refreshes
             // instead of immediately compacting it again on the next status tick.
-            let shouldShowExpanded = opensExpanded || model.isExpanded
+            let shouldShowExpanded = opensExpanded || model.isExpanded || model.isInputFocused || model.hasDraftContent
             model.isExpanded = shouldShowExpanded
             if shouldShowExpanded {
                 await expandNotch(on: screen)
@@ -541,6 +580,7 @@ final class OpenClickyDynamicNotchKitBridge {
         foregroundAppIcon: NSImage?,
         foregroundAppName: String,
         submitText: @escaping (String) -> Void,
+        openMainPanel: @escaping () -> Void = {},
         hidesWhenClosed: Bool = false,
         focusesInput: Bool = true,
         onHiddenWhenClosed: (() -> Void)? = nil
@@ -553,6 +593,7 @@ final class OpenClickyDynamicNotchKitBridge {
         model.foregroundAppIcon = foregroundAppIcon
         model.foregroundAppName = foregroundAppName
         model.submitText = submitText
+        model.openMainPanel = openMainPanel
         model.isExpanded = true
         Task {
             await expandNotch(on: screen)
@@ -690,7 +731,10 @@ private struct OpenClickyDynamicNotchKitCompactLeadingView: View {
     }
 
     private var compactWidth: CGFloat {
-        model.isExpanded ? 20 : (compactAppName == nil ? 32 : 92)
+        guard !model.isExpanded else { return 20 }
+        guard let compactAppName else { return 32 }
+        let nameWidth = CGFloat(compactAppName.count * 8) + 40
+        return min(156, max(112, nameWidth))
     }
 }
 
@@ -784,9 +828,14 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
         .padding(.top, 4)
         .padding(.bottom, 12)
         .onHover { isHovering in
-            model.isNotchHovered = isHovering
-            if !isHovering {
-                model.closeNotchIfIdle()
+            // Hover can flip while SwiftUI is mid view-update (the notch
+            // resizes under the pointer), so defer the publish out of the
+            // update pass.
+            DispatchQueue.main.async {
+                model.isNotchHovered = isHovering
+                if !isHovering {
+                    model.closeNotchIfIdle()
+                }
             }
         }
         .onDrop(
@@ -848,7 +897,7 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
                     systemImage: "rectangle.and.text.magnifyingglass",
                     accentColor: Color(nsColor: model.activityAccentColor)
                 ) {
-                    runQuickPrompt("Summarise what is visible on my screen.")
+                    runQuickPrompt(OpenClickyQuickActionPrompts.screen)
                 }
 
                 OpenClickyDynamicNotchKitChip(
@@ -856,7 +905,7 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
                     systemImage: "hammer.fill",
                     accentColor: Color(nsColor: model.activityAccentColor)
                 ) {
-                    runQuickPrompt("OpenClicky, suggest useful skills or connections for the active app and current workflow.")
+                    runQuickPrompt(model.skillQuickPrompt())
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -864,6 +913,14 @@ private struct OpenClickyDynamicNotchKitExpandedView: View {
     }
 
     private func runQuickPrompt(_ prompt: String) {
+        model.mode = .collapsed
+        model.agentLiveActivity = OpenClickyAgentLiveActivity(
+            isActive: true,
+            runningCount: max(1, model.agentLiveActivity.runningCount),
+            primaryTitle: "Starting OpenClicky",
+            detail: nil,
+            phaseLabel: "Starting"
+        )
         model.submitText(prompt)
         model.closeNotch()
     }
@@ -1071,15 +1128,26 @@ private struct OpenClickyDynamicNotchKitInputRow: View {
             fieldFocused = true
         }
         .onChange(of: model.draftText) { _, _ in
-            model.scrubDroppedFileTextFromDraft()
+            // Scrubbing rewrites draftText, which cannot publish from inside
+            // the onChange view-update transaction.
+            DispatchQueue.main.async {
+                model.scrubDroppedFileTextFromDraft()
+            }
         }
         .onChange(of: model.draftAttachments) { _, _ in
-            model.scrubDroppedFileTextFromDraft()
+            DispatchQueue.main.async {
+                model.scrubDroppedFileTextFromDraft()
+            }
         }
         .onChange(of: fieldFocused) { _, focused in
-            model.isInputFocused = focused
-            if !focused {
-                model.closeNotchIfIdle()
+            // onChange runs inside the view-update transaction; publishing
+            // model state here trips "Publishing changes from within view
+            // updates". Defer to the next runloop turn.
+            DispatchQueue.main.async {
+                model.isInputFocused = focused
+                if !focused {
+                    model.closeNotchIfIdle()
+                }
             }
         }
         .onExitCommand {
@@ -1161,12 +1229,14 @@ private struct OpenClickyDynamicNotchKitInputRow: View {
         guard !trimmed.isEmpty || !model.draftAttachments.isEmpty else { return }
         let prompt = Self.composePrompt(trimmed, attachments: model.draftAttachments)
         let send = model.submitText
-        model.draftText = ""
-        model.draftAttachments = []
-        fieldFocused = false
-        model.isInputFocused = false
-        send(prompt)
-        model.closeNotch()
+        DispatchQueue.main.async {
+            model.draftText = ""
+            model.draftAttachments = []
+            fieldFocused = false
+            model.isInputFocused = false
+            send(prompt)
+            model.closeNotch()
+        }
     }
 
     private static func isImage(_ url: URL) -> Bool {

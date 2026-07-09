@@ -100,11 +100,22 @@ extension CompanionManager {
                 OpenClickyApplicationUsageLogStore.shared.recordFrontmostApplication(source: "voice_question")
                 let historyForAPI = self.voiceConversationHistoryForAPI()
 
+                // Circle-while-talking: if the user drew a freehand trail during
+                // this PTT hold, always attach visual context (crop + full screen).
+                let circleHandoff = await self.consumePendingCircleSelectHandoff(instruction: transcript)
+                if let circleHandoff {
+                    // Also queue for Agent Mode so dual-mode consumers share the same region.
+                    self.queueHandoffRegion(
+                        selection: circleHandoff.selection,
+                        imageData: circleHandoff.imageData
+                    )
+                }
+
                 // Only attach screenshots when the utterance actually needs
                 // visual context. Text-only turns should not pay the capture,
                 // base64, upload, and vision-processing latency tax.
                 let captureStartedAt = Date()
-                let shouldAttachScreenContext = Self.shouldAttachScreenContext(
+                let shouldAttachScreenContext = circleHandoff != nil || Self.shouldAttachScreenContext(
                     to: transcript,
                     recentConversationHistory: historyForAPI
                 )
@@ -129,8 +140,11 @@ extension CompanionManager {
                         "controller": "ScreenCaptureKit",
                         "screenContextNeeded": shouldAttachScreenContext,
                         "screenCount": screenCaptures.count,
+                        "circleSelectAttached": circleHandoff != nil,
                         "cameraContextAttached": cameraFrame != nil,
-                        "imageBytes": screenCaptures.reduce(0) { $0 + $1.imageData.count } + (cameraFrame?.data.count ?? 0)
+                        "imageBytes": screenCaptures.reduce(0) { $0 + $1.imageData.count }
+                            + (circleHandoff?.imageData.count ?? 0)
+                            + (cameraFrame?.data.count ?? 0)
                     ]
                 )
 
@@ -142,10 +156,18 @@ extension CompanionManager {
                 // Build image labels with the actual screenshot pixel dimensions
                 // so Claude's coordinate space matches the image it sees. We
                 // scale from screenshot pixels to display points ourselves.
-                var labeledImages = screenCaptures.map { capture in
+                var labeledImages: [(data: Data, label: String)] = []
+                if let circleHandoff {
+                    let rect = circleHandoff.selection.captureRect
+                    labeledImages.append((
+                        data: circleHandoff.imageData,
+                        label: "circled region crop (primary focus; \(Int(rect.width))x\(Int(rect.height)) pt) — user freehand-selected this area while speaking"
+                    ))
+                }
+                labeledImages.append(contentsOf: screenCaptures.map { capture in
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
-                }
+                })
                 if let cameraFrame {
                     labeledImages.append((data: cameraFrame.data, label: cameraFrame.label))
                 }
@@ -153,6 +175,11 @@ extension CompanionManager {
                 let userPromptForClaude: String
                 if labeledImages.isEmpty {
                     userPromptForClaude = "\(transcript)\n\nNo screenshot is available. Answer from the transcript only and use [POINT:none]."
+                } else if let circleHandoff {
+                    let note = circleHandoff.selection.ambientSummary.isEmpty
+                        ? "The user circled a screen region while speaking. The first image is the cropped circled area; following images show broader screen context."
+                        : "The user circled a screen region while speaking. The first image is the cropped circled area; following images show broader screen context.\n\(circleHandoff.selection.ambientSummary)"
+                    userPromptForClaude = "\(transcript)\n\n\(note)"
                 } else {
                     userPromptForClaude = transcript
                 }

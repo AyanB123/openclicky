@@ -531,7 +531,7 @@ extension OpenClickyNotchPanelView {
                 id: "summarise-screen",
                 title: "Summarise screen",
                 systemImageName: "rectangle.and.text.magnifyingglass",
-                prompt: "Summarise what’s on my screen.",
+                prompt: OpenClickyQuickActionPrompts.screen,
                 mode: .ask,
                 opensSettings: false
             ),

@@ -35,12 +35,12 @@ nonisolated struct OpenClickyModelOption: Identifiable, Equatable {
 }
 
 nonisolated enum OpenClickyModelCatalog {
-    static let defaultSpeechModelID = "gpt-realtime-2"
+    static let defaultSpeechModelID = "gpt-realtime-2.1-mini"
     /// Fast conversational responder. Used for the always-on voice loop —
     /// hears the user, routes direct computer-use locally, and delegates
     /// background work to the configured Codex model.
     static let defaultVoiceResponseModelID = defaultSpeechModelID
-    static let defaultCodexActionsModelID = "gpt-5.4"
+    static let defaultCodexActionsModelID = "gpt-5.5"
     /// Text/vision model used when a live speech model needs screenshots,
     /// attachments, or Codex fallback. Realtime IDs stay on the audio path.
     static let defaultVoiceAnalysisModelID = defaultCodexActionsModelID
@@ -52,8 +52,11 @@ nonisolated enum OpenClickyModelCatalog {
     /// Resolves the delegation model — falls back to a sensible coder
     /// when the user hasn't picked one explicitly.
     static func delegationModel(withID modelID: String?) -> OpenClickyModelOption {
-        if let modelID, let match = voiceResponseModels.first(where: { $0.id == modelID }) {
-            return match
+        if let modelID {
+            let resolved = normalizedModelID(modelID)
+            if let match = voiceResponseModels.first(where: { $0.id == resolved }) {
+                return match
+            }
         }
         return voiceResponseModel(withID: defaultDelegationModelID)
     }
@@ -76,7 +79,10 @@ nonisolated enum OpenClickyModelCatalog {
         // is selected as the response voice model, it owns both the spoken
         // reply generation and the audio playback path instead of chaining
         // a separate text model into TTS.
-        OpenClickyModelOption(id: "gpt-realtime-2", label: "GPT Realtime 2", provider: .openAI, maxOutputTokens: 128_000),
+        // Default stays on mini for lower latency and cost; full 2.1 is
+        // available when stronger realtime reasoning is worth the spend.
+        OpenClickyModelOption(id: "gpt-realtime-2.1-mini", label: "GPT Realtime 2.1 mini", provider: .openAI, maxOutputTokens: 128_000),
+        OpenClickyModelOption(id: "gpt-realtime-2.1", label: "GPT Realtime 2.1", provider: .openAI, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-realtime-1.5", label: "GPT Realtime 1.5", provider: .openAI, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "deepgram-voice-agent", label: "Deepgram Voice Agent", provider: .deepgram, maxOutputTokens: 128_000)
     ]
@@ -86,7 +92,8 @@ nonisolated enum OpenClickyModelCatalog {
     static let computerUseModels: [OpenClickyModelOption] = [
         OpenClickyModelOption(id: "claude-sonnet-4-6", label: "Claude Sonnet", provider: .anthropic, maxOutputTokens: 64_000),
         OpenClickyModelOption(id: "claude-opus-4-6", label: "Claude Opus", provider: .anthropic, maxOutputTokens: 128_000),
-        OpenClickyModelOption(id: "gpt-realtime-2", label: "GPT Realtime 2", provider: .openAI, maxOutputTokens: 128_000),
+        OpenClickyModelOption(id: "gpt-realtime-2.1-mini", label: "GPT Realtime 2.1 mini", provider: .openAI, maxOutputTokens: 128_000),
+        OpenClickyModelOption(id: "gpt-realtime-2.1", label: "GPT Realtime 2.1", provider: .openAI, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-5.5", label: "GPT-5.5", provider: .codex, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-5.4", label: "GPT-5.4", provider: .codex, maxOutputTokens: 128_000),
         OpenClickyModelOption(id: "gpt-5.4-mini", label: "GPT-5.4 Mini", provider: .codex, maxOutputTokens: 128_000),
@@ -106,15 +113,39 @@ nonisolated enum OpenClickyModelCatalog {
     // but Codex requires the Responses API, so routing agents there 404s on
     // /v1/responses. Keep agents on real cloud providers.
 
+    /// Maps retired / alias model IDs onto the currently offered catalog IDs.
+    /// Keep legacy `gpt-realtime-2` pointed at the new mini default so existing
+    /// installs do not fall through to a text model.
+    static func normalizedModelID(_ modelID: String) -> String {
+        let trimmed = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return defaultVoiceResponseModelID }
+        switch trimmed.lowercased() {
+        case "gpt-realtime-2", "gpt-realtime-2.0", "gpt-realtime-2-mini":
+            return defaultSpeechModelID
+        default:
+            return trimmed
+        }
+    }
+
     static func voiceResponseModel(withID modelID: String) -> OpenClickyModelOption {
-        responseVoiceModels.first { $0.id == modelID } ?? voiceResponseModels[0]
+        let resolved = normalizedModelID(modelID)
+        if let match = responseVoiceModels.first(where: { $0.id == resolved }) {
+            return match
+        }
+        // Unknown IDs reset to the product default (speech-to-speech), not the
+        // first text model in the list (which used to silently become Haiku).
+        return responseVoiceModels.first { $0.id == defaultVoiceResponseModelID }
+            ?? speechModels.first
+            ?? voiceResponseModels[0]
     }
 
     static func voiceAnalysisModel(withID modelID: String?) -> OpenClickyModelOption {
-        if let modelID,
-           !isSpeechModelID(modelID),
-           let match = voiceResponseModels.first(where: { $0.id == modelID }) {
-            return match
+        if let modelID {
+            let resolved = normalizedModelID(modelID)
+            if !isSpeechModelID(resolved),
+               let match = voiceResponseModels.first(where: { $0.id == resolved }) {
+                return match
+            }
         }
         if let match = voiceResponseModels.first(where: { $0.id == defaultVoiceAnalysisModelID }) {
             return match
@@ -123,10 +154,12 @@ nonisolated enum OpenClickyModelCatalog {
     }
 
     static func codexVoiceSessionModel(withID modelID: String?) -> OpenClickyModelOption {
-        if let modelID,
-           !isSpeechModelID(modelID),
-           let match = codexActionsModels.first(where: { $0.id == modelID }) {
-            return match
+        if let modelID {
+            let resolved = normalizedModelID(modelID)
+            if !isSpeechModelID(resolved),
+               let match = codexActionsModels.first(where: { $0.id == resolved }) {
+                return match
+            }
         }
 
         let analysisModel = voiceAnalysisModel(withID: modelID)
@@ -138,21 +171,31 @@ nonisolated enum OpenClickyModelCatalog {
     }
 
     static func isSpeechModelID(_ modelID: String) -> Bool {
-        speechModels.contains { $0.id == modelID }
+        let resolved = normalizedModelID(modelID)
+        return speechModels.contains { $0.id == resolved }
     }
 
     static func speechModel(withID modelID: String?) -> OpenClickyModelOption {
-        if let modelID, let match = speechModels.first(where: { $0.id == modelID }) {
-            return match
+        if let modelID {
+            let resolved = normalizedModelID(modelID)
+            if let match = speechModels.first(where: { $0.id == resolved }) {
+                return match
+            }
         }
         return speechModels.first { $0.id == defaultSpeechModelID } ?? speechModels[0]
     }
 
     static func computerUseModel(withID modelID: String) -> OpenClickyModelOption {
-        computerUseModels.first { $0.id == modelID } ?? computerUseModels[0]
+        let resolved = normalizedModelID(modelID)
+        return computerUseModels.first { $0.id == resolved }
+            ?? computerUseModels.first { $0.id == defaultComputerUseModelID }
+            ?? computerUseModels[0]
     }
 
     static func codexActionsModel(withID modelID: String) -> OpenClickyModelOption {
-        codexActionsModels.first { $0.id == modelID } ?? codexActionsModels[0]
+        let resolved = normalizedModelID(modelID)
+        return codexActionsModels.first { $0.id == resolved }
+            ?? codexActionsModels.first { $0.id == defaultCodexActionsModelID }
+            ?? codexActionsModels[0]
     }
 }

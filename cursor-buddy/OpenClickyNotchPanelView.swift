@@ -479,6 +479,16 @@ enum OpenClickyNotchTab: String, CaseIterable, Identifiable {
     }
 }
 
+enum OpenClickyQuickActionPrompts {
+    static let screen = """
+    OpenClicky, look at the current screen context. First say what is on the screen, then give a few useful suggestions for what I could do next. End by asking: “Would you like me to do anything else?”
+    """
+
+    static let skills = """
+    OpenClicky, suggest relevant skills or connections for the active app and current workflow. Explain why they fit, keep it practical, and end by asking: “Would you like me to find some skills?” or “Would you like me to do anything else?”
+    """
+}
+
 enum OpenClickyQuickPromptMode: Equatable {
     case ask
     case agent
@@ -613,5 +623,4 @@ struct OpenClickyPanelTypography {
         }
     }
 }
-
 

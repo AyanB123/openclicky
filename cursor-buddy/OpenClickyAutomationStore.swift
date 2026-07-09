@@ -42,7 +42,7 @@ final class OpenClickyAutomationStore: ObservableObject {
     Goal: find useful Agent Mode skills for the apps and workflows the user is actively using, then surface install/connect options in the OpenClicky Connect tab.
 
     Be efficient:
-    1. Identify likely active apps/workflows from recent OpenClicky logs, current screen/window context if provided, and obvious local project folders. Keep OpenClicky's default suggestions available, but when an active app is visible, include suggestions tailored to that app using known skills, MCP/connectors, gog routes, browser automation, or screen-context workflows. Do not scan huge folders blindly.
+    1. Identify likely active apps/workflows from the current screen/window context, the last few foreground apps recorded by OpenClicky, recent OpenClicky logs, and obvious local project folders. Keep OpenClicky's default suggestions available, but when recent apps are visible, include suggestions tailored to those apps using known skills, MCP/connectors, gog routes, browser automation, or screen-context workflows. Do not overfit to only the immediately previous app, and do not scan huge folders blindly.
     2. Search local skills first under ~/Library/Application Support/OpenClicky/AgentMode/CodexHome/OpenClickyBundledSkills, ~/Library/Application Support/OpenClicky/AgentMode/CodexHome/OpenClickyLearnedSkills, ~/.codex/skills, ~/.agents/skills, ~/Documents/GitHub/*/skills, and any directly relevant repo skill folders. Prefer `find`/metadata over reading every large file.
     3. Only then do targeted web research for public skills or official app integrations that match those apps. Use current sources and avoid broad marketplace scraping.
     4. Recommend only practical, low-risk options that OpenClicky can install locally or connect through existing app/tool routes.
@@ -442,12 +442,13 @@ final class OpenClickySkillDiscoveryStore: ObservableObject {
 
   func reload() {
     let savedSuggestions = loadSavedSuggestions()
-    let appContext = currentApplicationContext()
+    let appContexts = currentApplicationContexts()
     let registry = OpenClickySkillSuggestionRegistry.load(from: OpenClickyAutomationStore.skillSuggestionRulesURL)
-    activeApplicationName = appContext?.name
+    let contextNames = appContexts.map(\.name).joined(separator: ", ")
+    activeApplicationName = contextNames.isEmpty ? nil : contextNames
 
     suggestions = mergeSuggestions(
-      registry.suggestions(for: appContext, slug: slug),
+      appContexts.flatMap { registry.suggestions(for: $0, slug: slug) },
       savedSuggestions.isEmpty ? registry.defaultSuggestions : savedSuggestions
     )
   }
@@ -481,49 +482,32 @@ final class OpenClickySkillDiscoveryStore: ObservableObject {
     var bundleIdentifier: String?
   }
 
-  private func currentApplicationContext() -> ApplicationContext? {
+  private func currentApplicationContexts(limit: Int = 4) -> [ApplicationContext] {
     let ownBundleIdentifier = Bundle.main.bundleIdentifier
+    var contexts: [ApplicationContext] = []
+    var seen: Set<String> = []
+
+    func append(_ context: ApplicationContext) {
+      let key = context.bundleIdentifier?.lowercased()
+        ?? context.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).lowercased()
+      guard !seen.contains(key) else { return }
+      seen.insert(key)
+      contexts.append(context)
+    }
+
     if let app = NSWorkspace.shared.frontmostApplication,
        app.bundleIdentifier != ownBundleIdentifier,
        let name = app.localizedName?.trimmingCharacters(in: .whitespacesAndNewlines),
        !name.isEmpty {
-      return ApplicationContext(name: name, bundleIdentifier: app.bundleIdentifier)
+      append(ApplicationContext(name: name, bundleIdentifier: app.bundleIdentifier))
     }
 
-    return mostRecentRecordedApplication(excluding: ownBundleIdentifier)
-  }
-
-  private func mostRecentRecordedApplication(excluding ownBundleIdentifier: String?) -> ApplicationContext? {
-    let logURL = OpenClickyApplicationUsageLogStore.shared.logURL
-    guard let data = try? Data(contentsOf: logURL),
-          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let apps = root["applications"] as? [[String: Any]] else {
-      return nil
+    for app in OpenClickyApplicationUsageLogStore.shared.recentApplications(limit: limit, excluding: ownBundleIdentifier) {
+      append(ApplicationContext(name: app.name, bundleIdentifier: app.bundleIdentifier))
+      if contexts.count == limit { break }
     }
 
-    let sortedApps = apps.sorted {
-      ($0["lastSeenAt"] as? String ?? "") > ($1["lastSeenAt"] as? String ?? "")
-    }
-
-    for entry in sortedApps {
-      let bundleIdentifier = (entry["bundleIdentifier"] as? String)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      if let ownBundleIdentifier, bundleIdentifier == ownBundleIdentifier {
-        continue
-      }
-      let name = (entry["name"] as? String)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      guard let name, !name.isEmpty else { continue }
-      if name.localizedCaseInsensitiveContains("OpenClicky") {
-        continue
-      }
-      return ApplicationContext(
-        name: name,
-        bundleIdentifier: bundleIdentifier?.isEmpty == false ? bundleIdentifier : nil
-      )
-    }
-
-    return nil
+    return contexts
   }
 
   private func slug(for value: String) -> String {

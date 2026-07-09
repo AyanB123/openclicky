@@ -61,7 +61,7 @@ final class DeepgramStreamingTranscriptionProvider: BuddyTranscriptionProvider {
     }
 }
 
-private final class DeepgramStreamingTranscriptionSession: StreamingWebSocketTranscriptionSession, BuddyStreamingTranscriptionSession {
+private final class DeepgramStreamingTranscriptionSession: StreamingWebSocketTranscriptionSession, @unchecked Sendable, BuddyStreamingTranscriptionSession {
     private struct MessageEnvelope: Decodable {
         let type: String?
     }

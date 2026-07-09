@@ -66,6 +66,11 @@ final class CursorOverlayState: ObservableObject {
     @Published var externalPrimaryCaptionAccentHex: String?
     @Published var externalSecondaryCursors: [OpenClickyExternalProxyCursor] = []
     @Published var visualGuidanceOverlays: [OpenClickyVisualGuidanceOverlay] = []
+    /// Live freehand trail while push-to-talk circle-select is active (AppKit screen coords).
+    @Published var circleSelectLivePoints: [CGPoint] = []
+    /// Intelligent snap rect locked after a completed circle (AppKit screen coords).
+    @Published var circleSelectSnappedRect: CGRect?
+    @Published var circleSelectSnapLabel: String?
     @Published var activeControlGlowRect: CGRect?
     @Published var activeControlGlowLabel: String?
 }
@@ -513,34 +518,49 @@ final class CompanionManager: ObservableObject {
     /// observed by BlueCursorView to trigger the flight animation.
     var detectedElementScreenLocation: CGPoint? {
         didSet {
-            cursorOverlayState.detectedElementScreenLocation = detectedElementScreenLocation
+            updateCursorOverlayState { [detectedElementScreenLocation] overlayState in
+                overlayState.detectedElementScreenLocation = detectedElementScreenLocation
+            }
         }
     }
     /// The display frame (global AppKit coords) of the screen the detected
     /// element is on, so BlueCursorView knows which screen overlay should animate.
     var detectedElementDisplayFrame: CGRect? {
         didSet {
-            cursorOverlayState.detectedElementDisplayFrame = detectedElementDisplayFrame
+            updateCursorOverlayState { [detectedElementDisplayFrame] overlayState in
+                overlayState.detectedElementDisplayFrame = detectedElementDisplayFrame
+            }
         }
     }
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
     var detectedElementBubbleText: String? {
         didSet {
-            cursorOverlayState.detectedElementBubbleText = detectedElementBubbleText
+            updateCursorOverlayState { [detectedElementBubbleText] overlayState in
+                overlayState.detectedElementBubbleText = detectedElementBubbleText
+            }
         }
     }
     /// True for task-start handoff flights that should tag the corner briefly
     /// and come straight back instead of holding a pointing caption.
     var detectedElementReturnsImmediately: Bool = false {
         didSet {
-            cursorOverlayState.detectedElementReturnsImmediately = detectedElementReturnsImmediately
+            updateCursorOverlayState { [detectedElementReturnsImmediately] overlayState in
+                overlayState.detectedElementReturnsImmediately = detectedElementReturnsImmediately
+            }
         }
     }
     private var lastPointedElementScreenLocation: CGPoint?
     private var lastPointedElementDisplayFrame: CGRect?
     private var lastPointedElementLabel: String?
     private var lastPointedElementAt: Date?
+
+    private func updateCursorOverlayState(_ apply: @escaping @MainActor (CursorOverlayState) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            apply(self.cursorOverlayState)
+        }
+    }
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
@@ -593,6 +613,13 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var homeChatEntries: [CodexTranscriptEntry] = []
     @Published private(set) var isHomeChatModeActive = false
     @Published var handoffQueue: [HandoffQueuedRegionScreenshot] = []
+    /// Sealed circle-while-talking stroke from the most recent PTT hold, awaiting voice/agent attach.
+    private(set) var pendingCircleSelectStroke: CircleSelectSealedStroke?
+    /// Crop capture started at PTT release so the final transcript can attach without extra latency.
+    private var pendingCircleSelectCaptureTask: Task<HandoffQueuedRegionScreenshot?, Never>?
+    /// Live partial transcript while PTT is held — used to bias circle snap to spoken items.
+    private var circleSelectLivePartialTranscript: String = ""
+    let circleSelectSession = CircleSelectSession()
     @Published private(set) var agentDockItems: [ClickyAgentDockItem] = []
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
@@ -1742,9 +1769,12 @@ final class CompanionManager: ObservableObject {
         // Migrate that stale default once so existing installs actually use
         // the speech-to-speech Realtime path they now default to.
         if storedModel == "gpt-5.5",
-           storedSpeechModel == OpenClickyModelCatalog.defaultSpeechModelID,
+           storedSpeechModel == OpenClickyModelCatalog.defaultSpeechModelID
+               || storedSpeechModel == "gpt-realtime-2"
+               || storedSpeechModel == "gpt-realtime-2.1-mini",
            !defaults.bool(forKey: realtimeVoiceDefaultMigrationKey) {
             defaults.set(OpenClickyModelCatalog.defaultSpeechModelID, forKey: "selectedVoiceResponseModel")
+            defaults.set(OpenClickyModelCatalog.defaultSpeechModelID, forKey: "openClickySpeechModel")
             defaults.set(true, forKey: realtimeVoiceDefaultMigrationKey)
             return OpenClickyModelCatalog.defaultSpeechModelID
         }
@@ -1752,7 +1782,19 @@ final class CompanionManager: ObservableObject {
         let requestedModel = storedModel
             ?? defaults.string(forKey: "selectedClaudeModel")
             ?? OpenClickyModelCatalog.defaultVoiceResponseModelID
-        return OpenClickyModelCatalog.voiceResponseModel(withID: requestedModel).id
+        let resolvedModel = OpenClickyModelCatalog.voiceResponseModel(withID: requestedModel).id
+
+        // Persist alias migrations (e.g. gpt-realtime-2 → gpt-realtime-2.1-mini)
+        // so Settings and speech paths stop carrying retired IDs.
+        if storedModel != resolvedModel {
+            defaults.set(resolvedModel, forKey: "selectedVoiceResponseModel")
+        }
+        if OpenClickyModelCatalog.isSpeechModelID(resolvedModel),
+           storedSpeechModel != resolvedModel {
+            defaults.set(resolvedModel, forKey: "openClickySpeechModel")
+        }
+
+        return resolvedModel
     }
 
     func setSelectedModel(_ model: String) {
@@ -2440,6 +2482,8 @@ final class CompanionManager: ObservableObject {
                 userInfo: ["source": "external_control_bridge"]
             )
             return .accepted(["notified": true, "identifier": identifier])
+        case .unavailable(let statusCode, let body):
+            return OpenClickyExternalControlResponse(statusCode: statusCode, body: body)
         }
     }
 
@@ -4232,6 +4276,7 @@ final class CompanionManager: ObservableObject {
                 "deepgramVoiceAgentPlaying": deepgramVoiceAgentClient.isPlaying
             ]
         )
+        cancelCircleSelectSession(clearPending: true)
         interruptCurrentVoiceResponse()
     }
 
@@ -4284,6 +4329,7 @@ final class CompanionManager: ObservableObject {
             // captures in parallel with audio recording instead of blocking
             // the response path after the final transcript arrives.
             startPrewarmedScreenshotCaptureIfPossible()
+            beginCircleSelectSessionIfEnabled()
 
             pendingKeyboardShortcutStartTask?.cancel()
             if shouldUseBidirectionalRealtimeVoiceInput {
@@ -4298,6 +4344,8 @@ final class CompanionManager: ObservableObject {
                 await buddyDictationManager.startPushToTalkFromKeyboardShortcut(
                     currentDraftText: "",
                     updateDraftText: { [weak self] partialTranscript in
+                        self?.circleSelectLivePartialTranscript = partialTranscript
+                        self?.circleSelectSession.refreshSnapUsingLatestTranscript()
                         self?.handleLiveComputerUseTranscript(partialTranscript)
                     },
                     submitDraftText: { [weak self] finalTranscript in
@@ -4321,6 +4369,7 @@ final class CompanionManager: ObservableObject {
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
             ClickyAnalytics.trackPushToTalkReleased()
+            finishCircleSelectSessionForVoiceTurn()
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             if finishBidirectionalRealtimeVoiceCaptureIfNeeded(source: "keyboardShortcut") {
@@ -4332,6 +4381,164 @@ final class CompanionManager: ObservableObject {
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
         case .none:
             break
+        }
+    }
+
+    func beginCircleSelectSessionIfEnabled() {
+        guard AppBundleConfiguration.isCircleWhileTalkingEnabled() else {
+            cancelCircleSelectSession(clearPending: false)
+            return
+        }
+        pendingCircleSelectCaptureTask?.cancel()
+        pendingCircleSelectCaptureTask = nil
+        pendingCircleSelectStroke = nil
+        circleSelectLivePartialTranscript = ""
+        clearCircleSelectOverlay()
+        // Drop prior circle handoffs so a new hold never reuses a stale region.
+        handoffQueue.removeAll { $0.selection.hasFreehandPath }
+
+        let requireClick = AppBundleConfiguration.isCircleWhileTalkingRequireClickEnabled()
+        circleSelectSession.start(
+            requireClick: requireClick,
+            partialTranscriptProvider: { [weak self] in
+                guard let self else { return nil }
+                let live = self.circleSelectLivePartialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !live.isEmpty { return live }
+                let last = self.lastTranscript?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return last.isEmpty ? nil : last
+            },
+            onPointsChanged: { [weak self] points in
+                self?.cursorOverlayState.circleSelectLivePoints = points
+            },
+            onSnapChanged: { [weak self] snap in
+                self?.cursorOverlayState.circleSelectSnappedRect = snap?.rect
+                self?.cursorOverlayState.circleSelectSnapLabel = snap?.label
+            }
+        )
+        OpenClickyMessageLogStore.shared.append(
+            lane: "voice",
+            direction: "internal",
+            event: "voice.circle_select.started",
+            fields: [
+                "requireClick": requireClick
+            ]
+        )
+    }
+
+    func finishCircleSelectSessionForVoiceTurn() {
+        guard AppBundleConfiguration.isCircleWhileTalkingEnabled() || circleSelectSession.isActive else {
+            clearCircleSelectOverlay()
+            return
+        }
+
+        let sealed = circleSelectSession.stop()
+        // Keep snapped rect visible briefly after seal so the handoff feels deliberate.
+        if let snap = sealed?.snap {
+            cursorOverlayState.circleSelectSnappedRect = snap.rect
+            cursorOverlayState.circleSelectSnapLabel = snap.label
+        }
+        cursorOverlayState.circleSelectLivePoints = sealed?.points ?? []
+        pendingCircleSelectStroke = sealed
+
+        if let sealed {
+            // Keep the trail / snap visible briefly so the user sees the sealed region.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(900))
+                guard let self else { return }
+                if self.pendingCircleSelectStroke?.sealedAt == sealed.sealedAt {
+                    self.clearCircleSelectOverlay()
+                }
+            }
+            pendingCircleSelectCaptureTask?.cancel()
+            pendingCircleSelectCaptureTask = Task { @MainActor in
+                do {
+                    let crop = try await CompanionScreenCaptureUtility.captureRegionAsJPEG(sealed.captureRect)
+                    let selection = sealed.handoffSelection(instruction: "")
+                    let queued = HandoffQueuedRegionScreenshot(selection: selection, imageData: crop.imageData)
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "internal",
+                        event: "voice.circle_select.sealed",
+                        fields: [
+                            "pointCount": sealed.points.count,
+                            "pathLength": Int(sealed.pathLength.rounded()),
+                            "width": Int(sealed.captureRect.width.rounded()),
+                            "height": Int(sealed.captureRect.height.rounded()),
+                            "imageBytes": crop.imageData.count
+                        ]
+                    )
+                    return queued
+                } catch {
+                    OpenClickyMessageLogStore.shared.append(
+                        lane: "voice",
+                        direction: "error",
+                        event: "voice.circle_select.capture_failed",
+                        fields: ["error": error.localizedDescription]
+                    )
+                    return nil
+                }
+            }
+        } else {
+            clearCircleSelectOverlay()
+            pendingCircleSelectCaptureTask = nil
+            OpenClickyMessageLogStore.shared.append(
+                lane: "voice",
+                direction: "internal",
+                event: "voice.circle_select.discarded",
+                fields: ["reason": "below_threshold_or_disabled"]
+            )
+        }
+    }
+
+    func cancelCircleSelectSession(clearPending: Bool = true) {
+        circleSelectSession.cancel()
+        clearCircleSelectOverlay()
+        if clearPending {
+            pendingCircleSelectStroke = nil
+            pendingCircleSelectCaptureTask?.cancel()
+            pendingCircleSelectCaptureTask = nil
+        }
+    }
+
+    private func clearCircleSelectOverlay() {
+        cursorOverlayState.circleSelectLivePoints = []
+        cursorOverlayState.circleSelectSnappedRect = nil
+        cursorOverlayState.circleSelectSnapLabel = nil
+    }
+
+    /// Consumes a sealed circle-select capture for the current voice/agent turn.
+    /// Returns crop attachment data plus ambient note when the user circled while talking.
+    func consumePendingCircleSelectHandoff(instruction: String) async -> HandoffQueuedRegionScreenshot? {
+        let sealed = pendingCircleSelectStroke
+        let captureTask = pendingCircleSelectCaptureTask
+        pendingCircleSelectStroke = nil
+        pendingCircleSelectCaptureTask = nil
+        clearCircleSelectOverlay()
+
+        guard sealed != nil || captureTask != nil else { return nil }
+
+        let queued = await captureTask?.value
+        if var existing = queued {
+            existing.selection.comment = instruction
+            if let sealed {
+                existing.selection.pathPoints = sealed.points
+                existing.selection.ambientSummary = sealed.ambient.summaryLine
+                existing.selection.startPositionInScreen = sealed.startPositionInScreen
+                existing.selection.endPositionInScreen = sealed.endPositionInScreen
+                existing.selection.screenFrame = sealed.screenFrame
+            }
+            return existing
+        }
+
+        guard let sealed else { return nil }
+        do {
+            let crop = try await CompanionScreenCaptureUtility.captureRegionAsJPEG(sealed.captureRect)
+            return HandoffQueuedRegionScreenshot(
+                selection: sealed.handoffSelection(instruction: instruction),
+                imageData: crop.imageData
+            )
+        } catch {
+            return nil
         }
     }
 
@@ -4562,6 +4769,8 @@ final class CompanionManager: ObservableObject {
                 let onUserTranscript: @MainActor @Sendable (String) -> Void = { [weak self] transcript in
                     guard self?.realtimeBidirectionalVoiceTurnGeneration == turnGeneration else { return }
                     self?.lastTranscript = transcript
+                    self?.circleSelectLivePartialTranscript = transcript
+                    self?.circleSelectSession.refreshSnapUsingLatestTranscript()
                 }
                 let onAssistantTextChunk: @MainActor @Sendable (String) -> Void = { [weak self] accumulatedText in
                     guard self?.realtimeBidirectionalVoiceTurnGeneration == turnGeneration else { return }
@@ -8329,6 +8538,7 @@ final class CompanionManager: ObservableObject {
         guard allPermissionsGranted else { return }
         guard !buddyDictationManager.isKeyboardShortcutSessionActiveOrFinalizing else { return }
 
+        startPrewarmedScreenshotCaptureIfPossible()
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
         notchCaptureWindowManager.showTextInput { [weak self] submittedText in
             self?.submitNewAgentTaskFromUI(submittedText, source: "notch_shortcut_task_prompt")
@@ -8346,6 +8556,7 @@ final class CompanionManager: ObservableObject {
         guard allPermissionsGranted else { return }
         guard !buddyDictationManager.isKeyboardShortcutSessionActiveOrFinalizing else { return }
 
+        startPrewarmedScreenshotCaptureIfPossible()
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
         notchCaptureWindowManager.showTextInput(
             accentTheme: accentTheme,
@@ -8372,31 +8583,13 @@ final class CompanionManager: ObservableObject {
         interruptCurrentVoiceResponse()
         clearDetectedElementLocation()
 
-        if handleAgentCancellationRequestIfNeeded(from: trimmedText) {
-            return
-        }
-
-        if handleAgentSelectionRequestIfNeeded(from: trimmedText, source: "text_mode") {
-            return
-        }
-
-        if handleDirectComputerUseRequest(from: trimmedText, source: "text_mode") {
-            return
-        }
-
-        if handleAgentStatusQuestionIfNeeded(from: trimmedText) {
-            return
-        }
-
-        if acceptPendingAgentOfferIfConfirmed(from: trimmedText) {
-            return
-        }
-
-        if startExplicitAgentTaskIfRequested(from: trimmedText) {
-            return
-        }
-
-        if submitContextualAgentFollowUp(trimmedText, source: "text") {
+        if routeFinalVoiceTranscriptActionIfNeeded(
+            trimmedText,
+            source: "text",
+            selectionSource: "text_mode",
+            directComputerUseSource: "text_mode",
+            includeQuickLocalResponses: false
+        ) {
             return
         }
 
@@ -11403,7 +11596,7 @@ final class CompanionManager: ObservableObject {
         guard !isExplicitAgentRoutingCandidate(trimmedTranscript) else { return nil }
         guard compositeAppActionRequest(from: trimmedTranscript) == nil else { return nil }
 
-        let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#
+        let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+|you\s+)?(?:please\s+)?(?:(?:ask|tell)\s+(?:an?\s+|the\s+)?agent\s+to\s+)?(?:open|launch|start|switch\s+to)\s+(?:up\s+)?(.+?)(?:\s+for\s+me)?[\.\!\?]*\s*$"#
         if let regex = try? NSRegularExpression(pattern: pattern),
            let match = regex.firstMatch(
             in: trimmedTranscript,
@@ -11602,7 +11795,8 @@ final class CompanionManager: ObservableObject {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
 
-        guard Self.containsFolderOpenVerb(normalizedTranscript) else {
+        guard Self.containsFolderOpenVerb(normalizedTranscript),
+              !Self.isBlockedFolderOpenShortcutContext(normalizedTranscript) else {
             return nil
         }
 
@@ -11641,21 +11835,16 @@ final class CompanionManager: ObservableObject {
     }
 
     private static func containsFolderOpenVerb(_ normalizedTranscript: String) -> Bool {
-        let openSignals = [
-            "open",
-            "show",
-            "reveal",
-            "switch to",
-            "bring up",
-            "pull up",
-            "go into",
-            "go in",
-            "go to",
-            "navigate to",
-            "inside"
-        ]
+        let commandPattern = #"^(?:(?:can|could|would|will)\s+you\s+|you\s+|please\s+|now\s+)*(?:open|show|reveal|switch\s+to|bring\s+up|pull\s+up|go\s+into|go\s+in|go\s+to|navigate\s+to|inside)\b"#
+        return normalizedTranscript.range(of: commandPattern, options: .regularExpression) != nil
+    }
 
-        return openSignals.contains { normalizedTranscript.contains($0) }
+    private static func isBlockedFolderOpenShortcutContext(_ normalizedTranscript: String) -> Bool {
+        // Structural only: questions, planning verbs, and "take a look" review
+        // language must not become Finder opens. Avoid product-specific phrase
+        // denylists that only cover today's transcripts.
+        let planningOrQuestionPattern = #"^(?:(?:can|could|would|will)\s+you\s+|please\s+)?(?:look\s+into|take\s+a\s+look(?:\s+at)?|research|investigate|propose|design|plan|think\s+about|tell\s+me|explain|is|are|was|were|do|does|did|what|where|why|how)\b"#
+        return normalizedTranscript.range(of: planningOrQuestionPattern, options: .regularExpression) != nil
     }
 
     private static func relativeFolderOpenRequest(
@@ -11667,7 +11856,8 @@ final class CompanionManager: ObservableObject {
         guard !trimmedTranscript.isEmpty else { return nil }
 
         let normalizedTranscript = normalizedFolderCommandText(trimmedTranscript)
-        guard containsFolderOpenVerb(normalizedTranscript) else { return nil }
+        guard containsFolderOpenVerb(normalizedTranscript),
+              !isBlockedFolderOpenShortcutContext(normalizedTranscript) else { return nil }
 
         let targetName = relativeFolderTargetName(from: normalizedTranscript)
         guard !targetName.isEmpty else { return nil }
@@ -14266,7 +14456,16 @@ final class CompanionManager: ObservableObject {
             return
         }
         if let sessionID = agentDockItems.first(where: { $0.id == itemID })?.sessionID {
-            armVoiceFollowUpTarget(sessionID, source: "agent_overlay_open")
+            selectCodexAgentSession(sessionID)
+            OpenClickyMessageLogStore.shared.append(
+                lane: "agent",
+                direction: "internal",
+                event: "openclicky.agent_overlay.opened_selection_only",
+                fields: [
+                    "source": "agent_overlay_open",
+                    "sessionID": sessionID.uuidString
+                ]
+            )
             notchCaptureWindowManager.showMainInterfacePanel(companionManager: self, focusedAgentSessionID: sessionID)
             return
         }
@@ -14754,6 +14953,14 @@ final class CompanionManager: ObservableObject {
             await Task.yield()
             try? await Task.sleep(for: .milliseconds(120))
 
+            // If the user just circled while talking and agent is taking the turn,
+            // ensure the region is on the handoff queue before context prep.
+            if includeScreenContext,
+               handoffQueue.allSatisfy({ !$0.selection.hasFreehandPath }),
+               let circleHandoff = await consumePendingCircleSelectHandoff(instruction: trimmedPrompt) {
+                queueHandoffRegion(selection: circleHandoff.selection, imageData: circleHandoff.imageData)
+            }
+
             let screenContext = includeScreenContext ? await prepareAgentScreenContextForNextTurn(
                 minimumPasteboardChangeCount: baselinePasteboardChangeCount,
                 forceClipboardSelection: forceClipboardSelection
@@ -14802,6 +15009,15 @@ final class CompanionManager: ObservableObject {
         minimumPasteboardChangeCount: Int,
         forceClipboardSelection: Bool = false
     ) async -> CodexAgentScreenContext? {
+        // Drop stale circle-while-talking regions so an older hold cannot
+        // leak into an unrelated agent turn.
+        let circleHandoffMaxAge: TimeInterval = 45
+        let now = Date()
+        handoffQueue.removeAll { queued in
+            queued.selection.hasFreehandPath
+                && now.timeIntervalSince(queued.queuedAt) > circleHandoffMaxAge
+        }
+
         if !handoffQueue.isEmpty {
             let queuedRegions = handoffQueue
             do {
@@ -14879,13 +15095,26 @@ final class CompanionManager: ObservableObject {
 
             let rect = queuedRegion.selection.captureRect
             let comment = queuedRegion.selection.comment.trimmingCharacters(in: .whitespacesAndNewlines)
-            let noteParts = [
-                "Selected region x:\(Int(rect.minX)) y:\(Int(rect.minY)) width:\(Int(rect.width)) height:\(Int(rect.height)).",
-                comment.isEmpty ? nil : "User note: \(comment)"
-            ].compactMap { $0 }
+            var noteParts: [String] = [
+                "Selected region x:\(Int(rect.minX)) y:\(Int(rect.minY)) width:\(Int(rect.width)) height:\(Int(rect.height))."
+            ]
+            if queuedRegion.selection.hasFreehandPath {
+                noteParts.append(
+                    "User freehand-circled this region while speaking (\(queuedRegion.selection.pathPoints.count) path points)."
+                )
+            }
+            let ambient = queuedRegion.selection.ambientSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ambient.isEmpty {
+                noteParts.append(ambient)
+            }
+            if !comment.isEmpty {
+                noteParts.append("User note / instruction: \(comment)")
+            }
 
             return CodexAgentScreenContextAttachment(
-                label: "Queued handoff region \(index + 1)",
+                label: queuedRegion.selection.hasFreehandPath
+                    ? "Circled handoff region \(index + 1)"
+                    : "Queued handoff region \(index + 1)",
                 fileURL: fileURL,
                 note: noteParts.joined(separator: " ")
             )
@@ -14896,7 +15125,9 @@ final class CompanionManager: ObservableObject {
             .filter { !$0.isEmpty }
 
         return CodexAgentScreenContext(
-            source: "queued screen handoff",
+            source: queuedRegions.contains(where: { $0.selection.hasFreehandPath })
+                ? "circled screen handoff"
+                : "queued screen handoff",
             capturedAt: Date(),
             selectedText: resolveSelectedText(
                 from: queuedNotes,
@@ -15692,6 +15923,10 @@ extension CompanionManager {
 
     static func testLocalAppOpenTarget(from transcript: String) -> String? {
         localAppOpenRequest(from: transcript)?.appName
+    }
+
+    static func testLocalFolderOpenTarget(from transcript: String) -> String? {
+        localFolderOpenRequest(from: transcript)?.url.path
     }
 
     static func testLogEvidenceAnalysisInstruction(from transcript: String) -> String? {

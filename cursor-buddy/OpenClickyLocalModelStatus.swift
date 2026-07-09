@@ -240,7 +240,7 @@ enum OpenClickyLocalModelStore {
         ".gitattributes"
     ]
 
-    static func modelsDirectory(
+    nonisolated static func modelsDirectory(
         fileManager: FileManager = .default,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
@@ -264,7 +264,7 @@ enum OpenClickyLocalModelStore {
         return preferred
     }
 
-    static func localDirectory(
+    nonisolated static func localDirectory(
         for modelID: String,
         rootDirectory: URL = modelsDirectory()
     ) -> URL {
@@ -403,7 +403,7 @@ enum OpenClickyLocalModelStore {
         }
     }
 
-    private static func environmentDirectory(for key: String, environment: [String: String]) -> URL? {
+    nonisolated private static func environmentDirectory(for key: String, environment: [String: String]) -> URL? {
         guard let raw = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty
         else {
@@ -412,7 +412,7 @@ enum OpenClickyLocalModelStore {
         return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
     }
 
-    private static func directoryHasVisibleContents(_ url: URL, fileManager: FileManager) -> Bool {
+    nonisolated private static func directoryHasVisibleContents(_ url: URL, fileManager: FileManager) -> Bool {
         guard let entries = try? fileManager.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: nil,

@@ -222,6 +222,8 @@ struct OpenClickySettingsView: View {
     @AppStorage(AppBundleConfiguration.userGlassOpacityDefaultsKey) private var glassOpacity = 0.75
     @AppStorage(AppBundleConfiguration.userGlassFrostingDefaultsKey) private var glassFrosting = 0.20
     @AppStorage(AppBundleConfiguration.userThemeDefaultsKey) private var clickyTheme = ClickyTheme.system.rawValue
+    @AppStorage(AppBundleConfiguration.userCircleWhileTalkingEnabledDefaultsKey) private var circleWhileTalkingEnabled = true
+    @AppStorage(AppBundleConfiguration.userCircleWhileTalkingRequireClickDefaultsKey) private var circleWhileTalkingRequireClick = true
     @State private var selectedSection: OpenClickySettingsSection = .basic
     @State private var gogCLIStatus = OpenClickyGogCLIStatus.unknown
     @State private var isRefreshingGogCLIStatus = false
@@ -593,6 +595,22 @@ struct OpenClickySettingsView: View {
                     systemImageName: "captions.bubble",
                     isOn: $voiceResponseCaptionsEnabled
                 )
+
+                toggleRow(
+                    title: "Circle while talking",
+                    subtitle: "Hold push-to-talk, then click and drag a red trail around something while speaking. On release, the region goes with your instruction to voice and Agent Mode.",
+                    systemImageName: "pencil.tip.crop.circle",
+                    isOn: $circleWhileTalkingEnabled
+                )
+
+                if circleWhileTalkingEnabled {
+                    toggleRow(
+                        title: "Click and drag to draw",
+                        subtitle: "On (default): click and drag while holding the key. Off: any mouse movement while holding the key draws.",
+                        systemImageName: "hand.draw",
+                        isOn: $circleWhileTalkingRequireClick
+                    )
+                }
 
                 actionRow(title: "Test caption playback", systemImageName: "play.circle") {
                     companionManager.testVoiceResponseCaptionPlayback()

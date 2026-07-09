@@ -19,13 +19,25 @@ This policy applies to bundled skills when they run inside OpenClicky Agent Mode
 
 ## Visual Guidance Tools
 
-OpenClicky's external bridge currently supports local token-gated endpoints for cursor pointing, multi-cursors, captions, screenshots, click, clear, speak, notify, multi-call batches, and MCP-style tool descriptors.
+OpenClicky's external bridge currently supports local token-gated endpoints for cursor pointing, multi-cursors, captions, screenshots, click, clear, speak, notify, multi-call batches, temporary scribble/freehand paths, temporary rectangle highlights, and MCP-style tool descriptors.
 
 - Use coordinates only for visible, current screen content.
 - Keep captions short and avoid covering critical UI.
 - Use `/clear` before changing scenes or ending stale tours.
 - Scribble/freehand path and rectangle highlight overlays are supported when `GET /health` reports `visual_guidance.scribble` and `visual_guidance.rectangle` as `supported` and `GET /mcp/tools` exposes `show_scribble`, `show_highlight`, and `show_rectangle`. If the capability status is `gated`, do not call those tools until the runtime flag is enabled. Do not claim spotlight masks, arrows, or persistent annotations exist until those descriptors are added.
 - For clicks, prefer element-aware/native computer-use tools when available; use raw coordinate clicks only when the target is visible and unambiguous.
+
+## Gmail OAuth Tools
+
+OpenClicky's external bridge may advertise `gmail.oauth` only when the local runtime flag `openClickyGmailOAuthToolsEnabled` / `OPENCLICKY_GMAIL_OAUTH_TOOLS_ENABLED` is on. Even then, `gmail_list_messages`, `gmail_read_message`, and `gmail_draft_reply` are stubs that return structured not-implemented errors until the local OAuth/gog backend is wired.
+
+- Treat Gmail as risky external-account data.
+- Prefer the bundled `gog` / `google-workspace-gogcli` skill path for real mailbox reads when available.
+- Require local Google OAuth and least-privilege Gmail scopes before live mailbox reads.
+- List, search, read, summarize, and draft-only reply preparation are read-oriented actions when auth is already available and task intent is clear.
+- Do not call send, forward, reply-all, delete, archive, label, mark-read, or other mailbox mutations from the stub path.
+- If a Gmail bridge tool returns `status: gated` / HTTP 501, stop and report that the bridge backend is not implemented yet.
+- Future Gmail sends must require explicit confirmation of recipient, subject, body, account, and attachments immediately before execution.
 
 ## Output and Artifacts
 

@@ -15,7 +15,7 @@ OpenClicky owns the macOS companion UI, voice flow, screen context, cursor overl
 - Use OpenClicky's computer-use path only when direct tools cannot finish the job.
 - When working on the OpenClicky app repo, do not run terminal `xcodebuild`. Use Xcode for app builds and permission testing, and use `swiftc -parse <relevant Swift source files>` for lightweight syntax checks.
 - For Mac typing, clicking, and focused-window control, prefer OpenClicky's selected direct computer-use backend, native CUA Swift or Background Computer Use, and `cuaDriver` when available. In progress and final text, describe this as OpenClicky's computer-use path rather than assuming CUA is always selected. Do not default to or advertise Clawd/clawdcursor mouse/keyboard tools unless OpenClicky's direct path is unavailable and the fallback is stated.
-- Read `SOUL.md` before task work. It defines OpenClicky's operating identity, voice, autonomy, memory behavior, and quality bar.
+- OpenClicky's persona is inlined under "## OpenClicky Persona (SOUL)" at the bottom of this file. Treat it as identity; do not open `SOUL.md` separately.
 - Read `memory.md` from OpenClicky's Codex home before task work. It is durable memory, not optional context.
 - Read `OpenClickyRuntimeMap.md` when the user asks where OpenClicky stores logs, memory, skills, widgets, sessions, config, or review comments.
 - If the user asks to view or edit OpenClicky's logs, memory, learned skills, runtime map, widget snapshot, sessions, or review comments, use those local files directly. Do not claim OpenClicky cannot inspect its own storage.

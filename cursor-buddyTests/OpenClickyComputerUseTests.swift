@@ -112,6 +112,32 @@ struct OpenClickyComputerUseTests {
         #expect(CompanionManager.testWebOpenTarget(from: "Open Chrome and go to amazon.co.uk")?.browserAppName == "Google Chrome")
     }
 
+    @Test func directRequestRoutersDoNotStealQuestionsOrDesignTasks() throws {
+        #expect(CompanionManager.testLocalAppOpenTarget(from: "You open GitHub.") == "GitHub Desktop")
+        #expect(CompanionManager.testLocalFolderOpenTarget(from: "Is your working folder currently the OpenClicky folder?") == nil)
+        #expect(CompanionManager.testLocalFolderOpenTarget(from: "look into introducing workspaces or project folders in OpenClicky so I can configure named workspaces") == nil)
+        #expect(CompanionManager.testLocalFolderOpenTarget(from: "Take a look at /Users/jkneen/clawd/github/hf-realtime-voice — how could we integrate this into OpenClicky?") == nil)
+    }
+
+    @Test func realtimeDoneTranscriptExtractionIgnoresTransportIds() throws {
+        let responseDone: [String: Any] = [
+            "type": "response.done",
+            "event_id": "event_DygDZLewDHSIBzmCqbYFv",
+            "response": [
+                "id": "resp_123",
+                "output": [
+                    [
+                        "type": "message",
+                        "content": [
+                            ["type": "output_text", "text": "Opening GitHub Desktop."]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        #expect(OpenAIRealtimeSpeechClient.testFirstTranscriptString(in: responseDone) == "Opening GitHub Desktop.")
+    }
+
     @Test func pastedLogsDoNotBecomeReminderCountCommands() throws {
         let pastedLogs = """
         find out why we're having issues
@@ -130,7 +156,7 @@ struct OpenClickyComputerUseTests {
         #expect(CompanionManager.testNativeKeyPress(from: "Press command k in Spotify.")?.modifiers == ["command"])
     }
 
-    @Test func compositeAppCommandsPreserveTheFollowUpAction() throws {
+    @MainActor @Test func compositeAppCommandsPreserveTheFollowUpAction() throws {
         let spotifyAction = CompanionManager.testCompositeAppAction(
             from: "Open Spotify and play AC/DC Back in Black."
         )
@@ -190,7 +216,7 @@ struct OpenClickyComputerUseTests {
         #expect(CompanionManager.testSystemVolumeControlAction(from: "open Spotify and turn volume up") == nil)
     }
 
-    @Test func spotifySearchPlayRouteStaysOnComputerUseExecution() throws {
+    @MainActor @Test func spotifySearchPlayRouteStaysOnComputerUseExecution() throws {
         let nativeMethods = CompanionManager.testSpotifySearchPlayExecutionMethods(for: .nativeSwift)
         #expect(nativeMethods.started == "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey + AppleScript playback verification")
         #expect(nativeMethods.completed == "NSWorkspace.open_spotify_uri + OpenClickyNativeComputerUseController.pressKey + AppleScript playback verification")
@@ -204,7 +230,7 @@ struct OpenClickyComputerUseTests {
         #expect(backgroundMethods.completed.localizedCaseInsensitiveContains("verification"))
     }
 
-    @Test func voiceAgentStartFingerprintNormalizesDuplicateRealtimeRoutes() throws {
+    @MainActor @Test func voiceAgentStartFingerprintNormalizesDuplicateRealtimeRoutes() throws {
         let first = CompanionManager.testVoiceAgentStartFingerprint(
             instruction: "Figure out why our background computer-use path, C U A, is reporting background agent not started yet.",
             route: "agent.hybrid_start"
@@ -217,8 +243,32 @@ struct OpenClickyComputerUseTests {
     }
 
     @Test func realtimeTwoIsTheDefaultVoiceInteractionModel() throws {
-        #expect(OpenClickyModelCatalog.defaultVoiceResponseModelID == "gpt-realtime-2")
+        #expect(OpenClickyModelCatalog.defaultVoiceResponseModelID == "gpt-realtime-2.1-mini")
         #expect(OpenClickyModelCatalog.defaultCodexActionsModelID != OpenClickyModelCatalog.defaultVoiceResponseModelID)
+        #expect(OpenClickyModelCatalog.speechModels.contains { $0.id == "gpt-realtime-2.1" })
+        #expect(OpenClickyModelCatalog.speechModels.contains { $0.id == "gpt-realtime-2.1-mini" })
+    }
+
+    @Test func retiredRealtimeTwoAliasMigratesToCurrentMiniDefault() throws {
+        #expect(OpenClickyModelCatalog.normalizedModelID("gpt-realtime-2") == "gpt-realtime-2.1-mini")
+        #expect(OpenClickyModelCatalog.voiceResponseModel(withID: "gpt-realtime-2").id == "gpt-realtime-2.1-mini")
+        #expect(OpenClickyModelCatalog.speechModel(withID: "gpt-realtime-2").id == "gpt-realtime-2.1-mini")
+        #expect(OpenClickyModelCatalog.isSpeechModelID("gpt-realtime-2"))
+        #expect(OpenClickyModelCatalog.computerUseModel(withID: "gpt-realtime-2").id == "gpt-realtime-2.1-mini")
+    }
+
+    @Test func unknownVoiceModelIDsFallBackToSpeechDefaultNotHaiku() throws {
+        let resolved = OpenClickyModelCatalog.voiceResponseModel(withID: "definitely-not-a-real-model-id")
+        #expect(resolved.id == OpenClickyModelCatalog.defaultVoiceResponseModelID)
+        #expect(OpenClickyModelCatalog.isSpeechModelID(resolved.id))
+        #expect(resolved.id != "claude-haiku-4-5")
+    }
+
+    @Test func realtimeTwoUsesLowReasoningEffortForVoiceLatency() throws {
+        #expect(OpenAIRealtimeSpeechClient.realtimeReasoningConfiguration(for: "gpt-realtime-2.1-mini")?["effort"] == "low")
+        #expect(OpenAIRealtimeSpeechClient.realtimeReasoningConfiguration(for: "gpt-realtime-2.1")?["effort"] == "low")
+        #expect(OpenAIRealtimeSpeechClient.realtimeReasoningConfiguration(for: "gpt-realtime-2")?["effort"] == "low")
+        #expect(OpenAIRealtimeSpeechClient.realtimeReasoningConfiguration(for: "gpt-realtime-1.5") == nil)
     }
 
     @Test func voiceResponseModelsDoNotUseShortTTSGenerationCap() throws {
@@ -227,11 +277,11 @@ struct OpenClickyComputerUseTests {
     }
 
     @Test func realtimeModelsResolveToNonSpeechModelsOutsideRealtimeTransport() throws {
-        let analysisModel = OpenClickyModelCatalog.voiceAnalysisModel(withID: "gpt-realtime-2")
+        let analysisModel = OpenClickyModelCatalog.voiceAnalysisModel(withID: "gpt-realtime-2.1-mini")
         #expect(analysisModel.id == OpenClickyModelCatalog.defaultVoiceAnalysisModelID)
         #expect(!OpenClickyModelCatalog.isSpeechModelID(analysisModel.id))
 
-        let codexModel = OpenClickyModelCatalog.codexVoiceSessionModel(withID: "gpt-realtime-2")
+        let codexModel = OpenClickyModelCatalog.codexVoiceSessionModel(withID: "gpt-realtime-2.1-mini")
         #expect(codexModel.id == OpenClickyModelCatalog.defaultCodexActionsModelID)
         #expect(!OpenClickyModelCatalog.isSpeechModelID(codexModel.id))
     }
@@ -244,19 +294,19 @@ struct OpenClickyComputerUseTests {
     @Test func realtimeVoiceUsesRealtimeForComputerUsePointing() throws {
         #expect(
             CompanionManager.testComputerUsePointingResolver(
-                selectedVoiceModelID: "gpt-realtime-2",
+                selectedVoiceModelID: "gpt-realtime-2.1-mini",
                 selectedComputerUseModelID: "gpt-5.5"
             ) == "openai_realtime"
         )
     }
 
     @Test func realtimeComputerUseModelUsesRealtimeAPIInsteadOfCodex() throws {
-        let model = OpenClickyModelCatalog.computerUseModel(withID: "gpt-realtime-2")
+        let model = OpenClickyModelCatalog.computerUseModel(withID: "gpt-realtime-2.1-mini")
         #expect(model.provider == .openAI)
         #expect(
             CompanionManager.testComputerUsePointingResolver(
                 selectedVoiceModelID: "gpt-5.5",
-                selectedComputerUseModelID: "gpt-realtime-2"
+                selectedComputerUseModelID: "gpt-realtime-2.1-mini"
             ) == "openai_realtime"
         )
     }
@@ -271,7 +321,7 @@ struct OpenClickyComputerUseTests {
         #expect(
             CompanionManager.testComputerUsePointingResolver(
                 selectedVoiceModelID: "claude-haiku-4-5",
-                selectedComputerUseModelID: "gpt-5.4"
+                selectedComputerUseModelID: "gpt-5.5"
             ) == "codex_cli"
         )
         #expect(

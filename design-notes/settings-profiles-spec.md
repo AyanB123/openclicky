@@ -52,7 +52,7 @@ Exact provider raw-values below are taken from the current enums.
 |---|---|---|---|
 | Intent | No API keys / private, cheap | Lowest latency, full-duplex convo | Best transcription + reasoning + voice |
 | STT (`openClickyVoiceTranscriptionProvider`) | `parakeet` (local) | `openai` (Realtime built-in) | `deepgram` (or `assemblyai`) |
-| Response model (`selectedVoiceResponseModel`) | Claude via Agent SDK (local Code sign-in) | `gpt-realtime-2` (speech-to-speech) | `claude-sonnet-4-6` / Opus, or `gpt-5.5` |
+| Response model (`selectedVoiceResponseModel`) | Claude via Agent SDK (local Code sign-in) | `gpt-realtime-2.1-mini` (speech-to-speech; full `gpt-realtime-2.1` available) | `claude-sonnet-4-6` / Opus, or `gpt-5.5` |
 | TTS (`openClickyTTSProvider`) | `microsoft_edge` (free, no key) | `openai_realtime` | `elevenlabs` |
 | Realtime duplex | off | **on** | off |
 | Activation (`openClickyVoiceActivationMode`) | push-to-talk | continuous | push-to-talk |
@@ -145,7 +145,7 @@ activation = "push_to_talk"
 [profiles.realtime]
 display_name = "Realtime"
 stt = "openai"
-response_model = "gpt-realtime-2"
+response_model = "gpt-realtime-2.1-mini"
 tts = "openai_realtime"
 realtime = true
 activation = "continuous"

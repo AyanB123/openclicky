@@ -51,6 +51,7 @@ nonisolated enum AppBundleConfiguration {
     static let userMCPCuaDriverCommandDefaultsKey = "openClickyMCPCuaDriverCommand"
     static let userExternalInferenceProxyEnabledDefaultsKey = "openClickyExternalInferenceProxyEnabled"
     static let userVisualDrawingOverlayToolsEnabledDefaultsKey = "openClickyVisualDrawingOverlayToolsEnabled"
+    static let userGmailOAuthToolsEnabledDefaultsKey = "openClickyGmailOAuthToolsEnabled"
     static let userExternalControlBridgeTokenDefaultsKey = "openClickyExternalControlBridgeToken"
     static let userAgentPlaintextProviderSyncEnabledDefaultsKey = "openClickyAgentPlaintextProviderSyncEnabled"
     static let userDesktopNotificationsEnabledDefaultsKey = "openClickyDesktopNotificationsEnabled"
@@ -62,6 +63,11 @@ nonisolated enum AppBundleConfiguration {
     static let userGlassOpacityDefaultsKey = "openClickyGlassOpacity"
     static let userGlassFrostingDefaultsKey = "openClickyGlassFrosting"
     static let userThemeDefaultsKey = "openClickyThemeAppearance"
+    /// Hold push-to-talk and circle a region while speaking.
+    static let userCircleWhileTalkingEnabledDefaultsKey = "openClickyCircleWhileTalkingEnabled"
+    /// When true (default), sample only while the primary mouse button is dragged during PTT hold.
+    /// When false, any mouse movement while holding the key draws.
+    static let userCircleWhileTalkingRequireClickDefaultsKey = "openClickyCircleWhileTalkingRequireClick"
     static let appGroupIdentifier = "group.com.jkneen.openclicky"
 
     static func registerDefaults() {
@@ -70,8 +76,23 @@ nonisolated enum AppBundleConfiguration {
             userWidgetsEnabledDefaultsKey: true,
             userWidgetsIncludeAgentTaskNamesDefaultsKey: true,
             userWidgetsIncludeMemorySnippetsDefaultsKey: true,
-            userWidgetsIncludeFocusedAppContextDefaultsKey: true
+            userWidgetsIncludeFocusedAppContextDefaultsKey: true,
+            userCircleWhileTalkingEnabledDefaultsKey: true,
+            userCircleWhileTalkingRequireClickDefaultsKey: true
         ])
+    }
+
+    static func isCircleWhileTalkingEnabled() -> Bool {
+        userDefaultsBool(forKey: userCircleWhileTalkingEnabledDefaultsKey, defaultValue: true)
+    }
+
+    static func isCircleWhileTalkingRequireClickEnabled() -> Bool {
+        // Default click-and-drag: only true when the key is missing, or when
+        // the user explicitly left it on. Users who previously saved false keep that.
+        if UserDefaults.standard.object(forKey: userCircleWhileTalkingRequireClickDefaultsKey) == nil {
+            return true
+        }
+        return userDefaultsBool(forKey: userCircleWhileTalkingRequireClickDefaultsKey, defaultValue: true)
     }
 
     static func anthropicAPIKey() -> String? {
@@ -152,6 +173,13 @@ nonisolated enum AppBundleConfiguration {
         return userDefaultsBool(forKey: userVisualDrawingOverlayToolsEnabledDefaultsKey, defaultValue: true)
             && environmentValue != "0"
             && environmentValue?.lowercased() != "false"
+    }
+
+    static func gmailOAuthToolsEnabled() -> Bool {
+        let environmentValue = normalizedConfigurationValue(ProcessInfo.processInfo.environment["OPENCLICKY_GMAIL_OAUTH_TOOLS_ENABLED"])
+        return userDefaultsBool(forKey: userGmailOAuthToolsEnabledDefaultsKey, defaultValue: false)
+            || environmentValue == "1"
+            || environmentValue?.lowercased() == "true"
     }
 
     static func externalControlBridgeToken() -> String? {
